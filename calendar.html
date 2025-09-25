@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DICE — 캘린더</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --primary:#2563eb;
+      --primary-700:#1d4ed8;
+      --bg:#f8fafc;
+      --text:#1e293b;
+      --muted:#64748b;
+      --border:#e2e8f0;
+      --radius:12px;
+      --shadow:0 4px 12px rgba(20,40,120,0.08);
+    }
+    *{box-sizing:border-box; margin:0; padding:0}
+    body{font-family:"Noto Sans KR",sans-serif; background:var(--bg); color:var(--text); padding-bottom:80px}
+
+    /* Header */
+    .header{
+      background:#fff;
+      border-bottom:1px solid var(--border);
+      padding:16px 0;
+      position:sticky;
+      top:0;
+      z-index:10;
+    }
+    .header-content{
+      max-width:1200px;
+      margin:0 auto;
+      padding:0 20px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+    }
+    .brand{display:flex;align-items:center;gap:10px;font-weight:800;}
+    .brand svg{width:24px;height:24px}
+    .brand .name{font-size:20px}
+
+    /* Calendar */
+    .main{
+      max-width:800px;
+      margin:0 auto;
+      padding:20px;
+    }
+    
+    .calendar-header{
+      background:#fff;
+      border-radius:var(--radius);
+      padding:24px;
+      margin-bottom:20px;
+      box-shadow:var(--shadow);
+      text-align:center;
+    }
+    
+    .month-nav{
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      margin-bottom:20px;
+    }
+    
+    .month-nav button{
+      background:var(--primary);
+      color:white;
+      border:none;
+      width:40px;
+      height:40px;
+      border-radius:50%;
+      cursor:pointer;
+      font-size:18px;
+    }
+    
+    .month-title{
+      font-size:24px;
+      font-weight:800;
+    }
+    
+    .calendar{
+      background:#fff;
+      border-radius:var(--radius);
+      padding:20px;
+      box-shadow:var(--shadow);
+      margin-bottom:20px;
+    }
+    
+    .weekdays{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      gap:1px;
+      margin-bottom:10px;
+    }
+    
+    .weekday{
+      padding:12px;
+      text-align:center;
+      font-weight:600;
+      color:var(--muted);
+      background:#f8fafc;
+    }
+    
+    .days{
+      display:grid;
+      grid-template-columns:repeat(7,1fr);
+      gap:1px;
+    }
+    
+    .day{
+      aspect-ratio:1;
+      display:flex;
+      flex-direction:column;
+      justify-content:flex-start;
+      align-items:center;
+      padding:8px 4px;
+      background:#fff;
+      border:1px solid var(--border);
+      cursor:pointer;
+      position:relative;
+    }
+    
+    .day:hover{
+      background:#f8fafc;
+    }
+    
+    .day.other-month{
+      color:var(--muted);
+      opacity:0.5;
+    }
+    
+    .day.today{
+      background:var(--primary);
+      color:white;
+    }
+    
+    .day.has-event{
+      background:#e0f2fe;
+    }
+    
+    .day.has-event.today{
+      background:var(--primary-700);
+    }
+    
+    .event-dot{
+      width:6px;
+      height:6px;
+      background:var(--primary);
+      border-radius:50%;
+      margin-top:2px;
+    }
+    
+    .events-sidebar{
+      background:#fff;
+      border-radius:var(--radius);
+      padding:24px;
+      box-shadow:var(--shadow);
+    }
+    
+    .events-sidebar h3{
+      margin-bottom:16px;
+      font-size:18px;
+      font-weight:800;
+    }
+    
+    .event-item{
+      padding:12px;
+      border-left:4px solid var(--primary);
+      background:#f8fafc;
+      border-radius:0 8px 8px 0;
+      margin-bottom:12px;
+    }
+    
+    .event-title{
+      font-weight:600;
+      margin-bottom:4px;
+    }
+    
+    .event-meta{
+      font-size:12px;
+      color:var(--muted);
+    }
+
+    /* Bottom Navigation */
+    .bottom-nav{
+      position:fixed;
+      bottom:0;
+      left:0;
+      right:0;
+      background:#fff;
+      border-top:1px solid var(--border);
+      display:flex;
+      justify-content:space-around;
+      padding:8px 0;
+      z-index:1000;
+    }
+    .nav-item{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      background:none;
+      border:none;
+      padding:8px 12px;
+      cursor:pointer;
+      transition:.2s ease;
+      color:var(--muted);
+    }
+    .nav-item.active{
+      color:var(--primary);
+    }
+    .nav-item:hover{
+      color:var(--primary);
+    }
+    .nav-icon{
+      font-size:20px;
+      margin-bottom:2px;
+    }
+    .nav-label{
+      font-size:11px;
+      font-weight:600;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-content">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="2.5" y="4" width="14" height="14" rx="4" ry="4" />
+          <circle cx="8" cy="10" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="7.5" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="12.5" r="1.5" fill="#fff"/>
+        </svg>
+        <span class="name">DICE</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="main">
+    <div class="calendar-header">
+      <div class="month-nav">
+        <button onclick="previousMonth()">‹</button>
+        <div class="month-title" id="monthTitle">2025년 1월</div>
+        <button onclick="nextMonth()">›</button>
+      </div>
+    </div>
+
+    <div class="calendar">
+      <div class="weekdays">
+        <div class="weekday">일</div>
+        <div class="weekday">월</div>
+        <div class="weekday">화</div>
+        <div class="weekday">수</div>
+        <div class="weekday">목</div>
+        <div class="weekday">금</div>
+        <div class="weekday">토</div>
+      </div>
+      <div class="days" id="calendarDays">
+        <!-- 동적으로 생성됩니다 -->
+      </div>
+    </div>
+
+    <div class="events-sidebar">
+      <h3>🎯 이번 달 중요 일정</h3>
+      <div class="event-item">
+        <div class="event-title">2025학년도 1학기 수강신청</div>
+        <div class="event-meta">2월 15일 - 2월 19일 • 교무팀</div>
+      </div>
+      <div class="event-item">
+        <div class="event-title">삼성전자 채용설명회</div>
+        <div class="event-meta">2월 10일 14:00 • 취업지원센터</div>
+      </div>
+      <div class="event-item">
+        <div class="event-title">창업경진대회 마감</div>
+        <div class="event-meta">2월 28일 23:59 • 창업지원센터</div>
+      </div>
+    </div>
+  </main>
+
+  <!-- Bottom Navigation -->
+  <nav class="bottom-nav">
+    <button class="nav-item" onclick="goToPage('home')">
+      <div class="nav-icon">🏠</div>
+      <div class="nav-label">홈</div>
+    </button>
+    <button class="nav-item active" onclick="goToPage('calendar')">
+      <div class="nav-icon">📅</div>
+      <div class="nav-label">캘린더</div>
+    </button>
+    <button class="nav-item" onclick="goToPage('ai')">
+      <div class="nav-icon">🤖</div>
+      <div class="nav-label">AI 채팅</div>
+    </button>
+    <button class="nav-item" onclick="goToPage('settings')">
+      <div class="nav-icon">⚙️</div>
+      <div class="nav-label">설정</div>
+    </button>
+  </nav>
+
+  <script>
+    let currentDate = new Date();
+    
+    const events = {
+      '2025-01-15': '수강신청 안내',
+      '2025-01-20': '장학금 신청',
+      '2025-02-10': '채용설명회',
+      '2025-02-15': '수강신청 시작',
+      '2025-02-28': '창업대회 마감'
+    };
+
+    function generateCalendar() {
+      const year = currentDate.getFullYear();
+      const month = currentDate.getMonth();
+      
+      document.getElementById('monthTitle').textContent = 
+        `${year}년 ${month + 1}월`;
+      
+      const firstDay = new Date(year, month, 1);
+      const lastDay = new Date(year, month + 1, 0);
+      const startDate = new Date(firstDay);
+      startDate.setDate(startDate.getDate() - firstDay.getDay());
+      
+      const calendarDays = document.getElementById('calendarDays');
+      calendarDays.innerHTML = '';
+      
+      for (let i = 0; i < 42; i++) {
+        const day = new Date(startDate);
+        day.setDate(startDate.getDate() + i);
+        
+        const dayElement = document.createElement('div');
+        dayElement.className = 'day';
+        dayElement.textContent = day.getDate();
+        
+        if (day.getMonth() !== month) {
+          dayElement.classList.add('other-month');
+        }
+        
+        if (day.toDateString() === new Date().toDateString()) {
+          dayElement.classList.add('today');
+        }
+        
+        const dateString = day.toISOString().split('T')[0];
+        if (events[dateString]) {
+          dayElement.classList.add('has-event');
+          const dot = document.createElement('div');
+          dot.className = 'event-dot';
+          dayElement.appendChild(dot);
+        }
+        
+        calendarDays.appendChild(dayElement);
+      }
+    }
+
+    function previousMonth() {
+      currentDate.setMonth(currentDate.getMonth() - 1);
+      generateCalendar();
+    }
+
+    function nextMonth() {
+      currentDate.setMonth(currentDate.getMonth() + 1);
+      generateCalendar();
+    }
+
+    function goToPage(page) {
+      document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+      event.target.closest('.nav-item').classList.add('active');
+
+      switch(page) {
+        case 'home':
+          window.location.href = 'dashboard.html';
+          break;
+        case 'calendar':
+          // 현재 페이지
+          break;
+        case 'ai':
+          window.location.href = 'ai-chat.html';
+          break;
+        case 'settings':
+          window.location.href = 'settings.html';
+          break;
+      }
+    }
+
+    // 초기화
+    generateCalendar();
+  </script>
+</body>
+</html>

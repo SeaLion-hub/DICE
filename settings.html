@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DICE — 설정</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --primary:#2563eb;
+      --primary-700:#1d4ed8;
+      --bg:#f8fafc;
+      --text:#1e293b;
+      --muted:#64748b;
+      --border:#e2e8f0;
+      --radius:12px;
+      --shadow:0 4px 12px rgba(20,40,120,0.08);
+    }
+    *{box-sizing:border-box; margin:0; padding:0}
+    body{font-family:"Noto Sans KR",sans-serif; background:var(--bg); color:var(--text); padding-bottom:80px}
+
+    /* Header */
+    .header{
+      background:#fff;
+      border-bottom:1px solid var(--border);
+      padding:16px 0;
+      position:sticky;
+      top:0;
+      z-index:10;
+    }
+    .header-content{
+      max-width:1200px;
+      margin:0 auto;
+      padding:0 20px;
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+    }
+    .brand{display:flex;align-items:center;gap:10px;font-weight:800;}
+    .brand svg{width:24px;height:24px}
+    .brand .name{font-size:20px}
+
+    /* Main */
+    .main{
+      max-width:600px;
+      margin:0 auto;
+      padding:20px;
+    }
+
+    .profile-section{
+      background:#fff;
+      border-radius:var(--radius);
+      padding:24px;
+      margin-bottom:20px;
+      box-shadow:var(--shadow);
+      text-align:center;
+    }
+
+    .profile-avatar{
+      width:80px;
+      height:80px;
+      border-radius:50%;
+      background:var(--primary);
+      color:white;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:32px;
+      margin:0 auto 16px;
+    }
+
+    .profile-name{
+      font-size:20px;
+      font-weight:700;
+      margin-bottom:4px;
+    }
+
+    .profile-email{
+      color:var(--muted);
+      font-size:14px;
+    }
+
+    .settings-section{
+      background:#fff;
+      border-radius:var(--radius);
+      padding:0;
+      margin-bottom:20px;
+      box-shadow:var(--shadow);
+    }
+
+    .settings-header{
+      padding:20px 24px;
+      border-bottom:1px solid var(--border);
+      font-size:16px;
+      font-weight:700;
+    }
+
+    .setting-item{
+      padding:16px 24px;
+      border-bottom:1px solid var(--border);
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      cursor:pointer;
+      transition:.2s ease;
+    }
+
+    .setting-item:hover{
+      background:#f8fafc;
+    }
+
+    .setting-item:last-child{
+      border-bottom:none;
+    }
+
+    .setting-left{
+      display:flex;
+      align-items:center;
+      gap:12px;
+    }
+
+    .setting-icon{
+      font-size:20px;
+      width:20px;
+      text-align:center;
+    }
+
+    .setting-info h4{
+      font-size:14px;
+      font-weight:600;
+      margin-bottom:2px;
+    }
+
+    .setting-info p{
+      font-size:12px;
+      color:var(--muted);
+    }
+
+    .setting-toggle{
+      width:50px;
+      height:26px;
+      border-radius:13px;
+      border:none;
+      cursor:pointer;
+      position:relative;
+      transition:.3s ease;
+    }
+
+    .setting-toggle.on{
+      background:var(--primary);
+    }
+
+    .setting-toggle.off{
+      background:#cbd5e1;
+    }
+
+    .setting-toggle::after{
+      content:'';
+      width:20px;
+      height:20px;
+      border-radius:50%;
+      background:white;
+      position:absolute;
+      top:3px;
+      transition:.3s ease;
+    }
+
+    .setting-toggle.on::after{
+      left:27px;
+    }
+
+    .setting-toggle.off::after{
+      left:3px;
+    }
+
+    .arrow{
+      color:var(--muted);
+      font-size:16px;
+    }
+
+    .version-info{
+      text-align:center;
+      padding:40px 20px;
+      color:var(--muted);
+    }
+
+    .version-info .logo{
+      font-size:48px;
+      margin-bottom:16px;
+    }
+
+    .version-info h3{
+      font-size:18px;
+      margin-bottom:8px;
+      color:var(--text);
+    }
+
+    .version-info p{
+      font-size:14px;
+      line-height:1.6;
+      margin-bottom:8px;
+    }
+
+    /* Bottom Navigation */
+    .bottom-nav{
+      position:fixed;
+      bottom:0;
+      left:0;
+      right:0;
+      background:#fff;
+      border-top:1px solid var(--border);
+      display:flex;
+      justify-content:space-around;
+      padding:8px 0;
+      z-index:1000;
+    }
+    .nav-item{
+      display:flex;
+      flex-direction:column;
+      align-items:center;
+      background:none;
+      border:none;
+      padding:8px 12px;
+      cursor:pointer;
+      transition:.2s ease;
+      color:var(--muted);
+    }
+    .nav-item.active{
+      color:var(--primary);
+    }
+    .nav-item:hover{
+      color:var(--primary);
+    }
+    .nav-icon{
+      font-size:20px;
+      margin-bottom:2px;
+    }
+    .nav-label{
+      font-size:11px;
+      font-weight:600;
+    }
+
+    .logout-section{
+      background:#fff;
+      border-radius:var(--radius);
+      padding:0;
+      margin-bottom:20px;
+      box-shadow:var(--shadow);
+    }
+
+    .logout-item{
+      padding:16px 24px;
+      display:flex;
+      align-items:center;
+      gap:12px;
+      cursor:pointer;
+      transition:.2s ease;
+      color:#dc2626;
+    }
+
+    .logout-item:hover{
+      background:#fef2f2;
+    }
+  </style>
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-content">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="2.5" y="4" width="14" height="14" rx="4" ry="4" />
+          <circle cx="8" cy="10" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="7.5" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="12.5" r="1.5" fill="#fff"/>
+        </svg>
+        <span class="name">DICE</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="main">
+    <!-- Profile Section -->
+    <div class="profile-section">
+      <div class="profile-avatar" id="profileAvatar">👤</div>
+      <div class="profile-name" id="profileName">Y2D2</div>
+      <div class="profile-email" id="profileEmail">user@email.com</div>
+    </div>
+
+    <!-- 알림 설정 -->
+    <div class="settings-section">
+      <div class="settings-header">🔔 알림 설정</div>
+      
+      <div class="setting-item" onclick="toggleSetting('pushNotifications')">
+        <div class="setting-left">
+          <div class="setting-icon">📱</div>
+          <div class="setting-info">
+            <h4>푸시 알림</h4>
+            <p>새로운 공지사항 알림 받기</p>
+          </div>
+        </div>
+        <button class="setting-toggle on" id="pushNotifications"></button>
+      </div>
+      
+      <div class="setting-item" onclick="toggleSetting('emailNotifications')">
+        <div class="setting-left">
+          <div class="setting-icon">📧</div>
+          <div class="setting-info">
+            <h4>이메일 알림</h4>
+            <p>중요한 공지사항 이메일로 받기</p>
+          </div>
+        </div>
+        <button class="setting-toggle on" id="emailNotifications"></button>
+      </div>
+      
+      <div class="setting-item" onclick="toggleSetting('deadlineAlerts')">
+        <div class="setting-left">
+          <div class="setting-icon">⏰</div>
+          <div class="setting-info">
+            <h4>마감일 알림</h4>
+            <p>신청 마감 3일 전 알림</p>
+          </div>
+        </div>
+        <button class="setting-toggle on" id="deadlineAlerts"></button>
+      </div>
+    </div>
+
+    <!-- 개인화 설정 -->
+    <div class="settings-section">
+      <div class="settings-header">🎯 개인화 설정</div>
+      
+      <div class="setting-item" onclick="openPreferences()">
+        <div class="setting-left">
+          <div class="setting-icon">❤️</div>
+          <div class="setting-info">
+            <h4>관심 분야</h4>
+            <p>장학금, 인턴십, 공모전 등</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+      
+      <div class="setting-item" onclick="openCollegeSettings()">
+        <div class="setting-left">
+          <div class="setting-icon">🏫</div>
+          <div class="setting-info">
+            <h4>구독 단과대학</h4>
+            <p>관심 있는 단과대학 선택</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+      
+      <div class="setting-item" onclick="toggleSetting('aiRecommendations')">
+        <div class="setting-left">
+          <div class="setting-icon">🤖</div>
+          <div class="setting-info">
+            <h4>AI 맞춤 추천</h4>
+            <p>AI 기반 개인화 공지사항 추천</p>
+          </div>
+        </div>
+        <button class="setting-toggle on" id="aiRecommendations"></button>
+      </div>
+    </div>
+
+    <!-- 계정 설정 -->
+    <div class="settings-section">
+      <div class="settings-header">👤 계정 설정</div>
+      
+      <div class="setting-item" onclick="editProfile()">
+        <div class="setting-left">
+          <div class="setting-icon">✏️</div>
+          <div class="setting-info">
+            <h4>프로필 수정</h4>
+            <p>이름, 이메일 변경</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+      
+      <div class="setting-item" onclick="changePassword()">
+        <div class="setting-left">
+          <div class="setting-icon">🔐</div>
+          <div class="setting-info">
+            <h4>비밀번호 변경</h4>
+            <p>계정 보안 관리</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+    </div>
+
+    <!-- 기타 설정 -->
+    <div class="settings-section">
+      <div class="settings-header">⚙️ 기타 설정</div>
+      
+      <div class="setting-item" onclick="openHelp()">
+        <div class="setting-left">
+          <div class="setting-icon">❓</div>
+          <div class="setting-info">
+            <h4>도움말</h4>
+            <p>사용법 및 FAQ</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+      
+      <div class="setting-item" onclick="openFeedback()">
+        <div class="setting-left">
+          <div class="setting-icon">💬</div>
+          <div class="setting-info">
+            <h4>피드백 보내기</h4>
+            <p>개선 사항이나 버그 제보</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+      
+      <div class="setting-item" onclick="openPrivacy()">
+        <div class="setting-left">
+          <div class="setting-icon">🔒</div>
+          <div class="setting-info">
+            <h4>개인정보처리방침</h4>
+            <p>데이터 사용 정책</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+    </div>
+
+    <!-- 로그아웃 -->
+    <div class="logout-section">
+      <div class="logout-item" onclick="logout()">
+        <div class="setting-icon">🚪</div>
+        <div class="setting-info">
+          <h4>로그아웃</h4>
+        </div>
+      </div>
+    </div>
+
+    <!-- Version Info -->
+    <div class="version-info">
+      <div class="logo">🎲</div>
+      <h3>DICE v1.0.0</h3>
+      <p>연세대학교 통합 공지사항 시스템</p>
+      <p>© 2025 DICE Team</p>
+    </div>
+  </main>
+
+  <!-- Bottom Navigation -->
+  <nav class="bottom-nav">
+    <button class="nav-item" onclick="goToPage('home')">
+      <div class="nav-icon">🏠</div>
+      <div class="nav-label">홈</div>
+    </button>
+    <button class="nav-item" onclick="goToPage('calendar')">
+      <div class="nav-icon">📅</div>
+      <div class="nav-label">캘린더</div>
+    </button>
+    <button class="nav-item" onclick="goToPage('ai')">
+      <div class="nav-icon">🤖</div>
+      <div class="nav-label">AI 채팅</div>
+    </button>
+    <button class="nav-item active" onclick="goToPage('settings')">
+      <div class="nav-icon">⚙️</div>
+      <div class="nav-label">설정</div>
+    </button>
+  </nav>
+
+  <script>
+    // 설정 상태 관리
+    let settings = {
+      pushNotifications: true,
+      emailNotifications: true,
+      deadlineAlerts: true,
+      aiRecommendations: true
+    };
+
+    // 초기화
+    window.addEventListener('load', function() {
+      loadUserProfile();
+      loadSettings();
+    });
+
+    function loadUserProfile() {
+      const currentUser = JSON.parse(localStorage.getItem('dice_current_user') || 'null');
+      
+      if (!currentUser) {
+        window.location.href = 'auth.html';
+        return;
+      }
+      
+      const email = currentUser.email;
+      const name = email.split('@')[0].toUpperCase();
+      
+      document.getElementById('profileName').textContent = name;
+      document.getElementById('profileEmail').textContent = email;
+      document.getElementById('profileAvatar').textContent = name.charAt(0);
+    }
+
+    function loadSettings() {
+      const savedSettings = JSON.parse(localStorage.getItem('dice_settings') || '{}');
+      settings = { ...settings, ...savedSettings };
+      
+      // UI 업데이트
+      Object.keys(settings).forEach(key => {
+        const toggle = document.getElementById(key);
+        if (toggle) {
+          toggle.className = `setting-toggle ${settings[key] ? 'on' : 'off'}`;
+        }
+      });
+    }
+
+    function saveSettings() {
+      localStorage.setItem('dice_settings', JSON.stringify(settings));
+    }
+
+    function toggleSetting(settingName) {
+      settings[settingName] = !settings[settingName];
+      const toggle = document.getElementById(settingName);
+      if (toggle) {
+        toggle.className = `setting-toggle ${settings[settingName] ? 'on' : 'off'}`;
+      }
+      saveSettings();
+      
+      // 피드백 표시
+      showToast(`${getSettingDisplayName(settingName)} ${settings[settingName] ? '활성화' : '비활성화'}되었습니다.`);
+    }
+
+    function getSettingDisplayName(settingName) {
+      const names = {
+        pushNotifications: '푸시 알림',
+        emailNotifications: '이메일 알림',
+        deadlineAlerts: '마감일 알림',
+        aiRecommendations: 'AI 추천'
+      };
+      return names[settingName] || settingName;
+    }
+
+    function showToast(message) {
+      const toast = document.createElement('div');
+      toast.style.cssText = `
+        position: fixed;
+        bottom: 100px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: #1f2937;
+        color: white;
+        padding: 12px 20px;
+        border-radius: 8px;
+        font-size: 14px;
+        z-index: 2000;
+        animation: fadeInOut 2s ease-in-out;
+      `;
+      toast.textContent = message;
+      
+      const style = document.createElement('style');
+      style.textContent = `
+        @keyframes fadeInOut {
+          0% { opacity: 0; transform: translateX(-50%) translateY(20px); }
+          20%, 80% { opacity: 1; transform: translateX(-50%) translateY(0); }
+          100% { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+        }
+      `;
+      
+      document.head.appendChild(style);
+      document.body.appendChild(toast);
+      
+      setTimeout(() => {
+        document.body.removeChild(toast);
+        document.head.removeChild(style);
+      }, 2000);
+    }
+
+    // 각 설정 페이지 함수들
+    function openPreferences() {
+      alert('관심 분야 설정 페이지로 이동합니다.\n(장학금, 인턴십, 공모전, 채용, 학사 등)');
+    }
+
+    function openCollegeSettings() {
+      alert('구독할 단과대학을 선택하는 페이지로 이동합니다.\n현재 18개 단과대학을 지원합니다.');
+    }
+
+    function editProfile() {
+      const newName = prompt('새로운 이름을 입력하세요:', document.getElementById('profileName').textContent);
+      if (newName && newName.trim()) {
+        document.getElementById('profileName').textContent = newName.trim();
+        document.getElementById('profileAvatar').textContent = newName.trim().charAt(0).toUpperCase();
+        showToast('프로필이 업데이트되었습니다.');
+      }
+    }
+
+    function changePassword() {
+      alert('비밀번호 변경 페이지로 이동합니다.\n보안을 위해 현재 비밀번호를 입력해야 합니다.');
+    }
+
+    function openHelp() {
+      alert('도움말 페이지입니다.\n\n주요 기능:\n• 공지사항 통합 검색\n• AI 맞춤 추천\n• 실시간 알림\n• 캘린더 연동');
+    }
+
+    function openFeedback() {
+      const feedback = prompt('개선 사항이나 버그를 알려주세요:');
+      if (feedback && feedback.trim()) {
+        showToast('피드백이 전송되었습니다. 감사합니다!');
+      }
+    }
+
+    function openPrivacy() {
+      alert('개인정보처리방침\n\n수집하는 정보:\n• 이메일 주소 (계정 식별용)\n• 관심 분야 (맞춤 추천용)\n\n제3자 제공: 하지 않음\n보관 기간: 탈퇴시까지');
+    }
+
+    function logout() {
+      if (confirm('정말 로그아웃하시겠습니까?')) {
+        localStorage.removeItem('dice_current_user');
+        localStorage.removeItem('dice_settings');
+        window.location.href = 'index.html';
+      }
+    }
+
+    function goToPage(page) {
+      document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
+      event.target.closest('.nav-item').classList.add('active');
+
+      switch(page) {
+        case 'home':
+          window.location.href = 'dashboard.html';
+          break;
+        case 'calendar':
+          window.location.href = 'calendar.html';
+          break;
+        case 'ai':
+          window.location.href = 'ai-chat.html';
+          break;
+        case 'settings':
+          // 현재 페이지
+          break;
+      }
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DICE — 로그인 및 회원가입</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;900&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --primary:#2563eb;
+      --primary-700:#1d4ed8;
+      --bg:#f9fbff;
+      --text:#1e293b;
+      --muted:#64748b;
+      --radius:12px;
+      --shadow:0 6px 18px rgba(20,40,120,0.12);
+    }
+    *{box-sizing:border-box; margin:0; padding:0}
+    body{font-family:"Noto Sans KR",sans-serif; background:var(--bg); color:var(--text)}
+    a{text-decoration:none; color:var(--primary); cursor:pointer}
+    a:hover{text-decoration:underline}
+
+    .container{display:flex; flex-direction:column; align-items:center; justify-content:center; min-height:100vh; padding:20px}
+
+    .card{
+      background:#fff;
+      border-radius:var(--radius);
+      box-shadow:var(--shadow);
+      padding:40px 32px;
+      width:100%;
+      max-width:400px;
+      text-align:center;
+    }
+    .card svg{width:32px;height:32px;margin-bottom:16px;}
+    .card h2{font-size:24px;font-weight:800;margin-bottom:6px;color:var(--primary-700)}
+    .card p{color:var(--muted);font-size:14px;margin-bottom:24px}
+
+    form{display:flex;flex-direction:column;gap:16px;text-align:left}
+    label{font-size:14px;font-weight:600;color:var(--text)}
+    input{
+      padding:12px 14px;
+      border:1px solid #d0d7e2;
+      border-radius:var(--radius);
+      font-size:15px;
+    }
+    input:focus{outline:2px solid var(--primary); border-color:var(--primary)}
+
+    .btn{
+      border:none;cursor:pointer;
+      border-radius:var(--radius);
+      padding:14px 18px;
+      background:var(--primary);
+      color:#fff;font-size:16px;font-weight:700;
+      transition:.2s ease;
+    }
+    .btn:hover{background:var(--primary-700)}
+
+    .switch{text-align:center;margin-top:18px;font-size:14px}
+    .back-link{
+      position:absolute;
+      top:20px;
+      left:20px;
+      color:var(--primary);
+      font-size:14px;
+      font-weight:600;
+    }
+
+    /* Hidden pages */
+    .page{display:none}
+    .page.active{display:block}
+
+    .success-message{
+      background:#dcfce7;
+      color:#166534;
+      padding:12px 16px;
+      border-radius:8px;
+      margin-bottom:20px;
+      font-size:14px;
+      font-weight:600;
+    }
+  </style>
+</head>
+<body>
+  <a href="index.html" class="back-link">← 메인으로 돌아가기</a>
+  
+  <div class="container">
+    <!-- 랜딩 -->
+    <div id="landing" class="page active">
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="2.5" y="4" width="14" height="14" rx="4" ry="4" />
+          <circle cx="8" cy="10" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="7.5" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="12.5" r="1.5" fill="#fff"/>
+        </svg>
+        <h2>놓치지 마세요,<br>중요한 기회를</h2>
+        <p>대학의 모든 공지사항을 한 곳에서 확인하고 AI 추천을 받아보세요.</p>
+        <button class="btn" onclick="showPage('login')">시작하기</button>
+      </div>
+    </div>
+
+    <!-- 로그인 -->
+    <div id="login" class="page">
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="2.5" y="4" width="14" height="14" rx="4" ry="4" />
+          <circle cx="8" cy="10" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="7.5" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="12.5" r="1.5" fill="#fff"/>
+        </svg>
+        <h2>로그인</h2>
+        <p>DICE 계정으로 로그인하세요</p>
+        <form onsubmit="handleLogin(event)">
+          <div>
+            <label for="email">이메일</label>
+            <input type="email" id="email" placeholder="your@email.com" required>
+          </div>
+          <div>
+            <label for="password">비밀번호</label>
+            <input type="password" id="password" placeholder="비밀번호를 입력하세요" required>
+          </div>
+          <button type="submit" class="btn">로그인</button>
+        </form>
+        <div class="switch">계정이 없으신가요? <a onclick="showPage('signup')">회원가입</a></div>
+      </div>
+    </div>
+
+    <!-- 회원가입 -->
+    <div id="signup" class="page">
+      <div class="card">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="2.5" y="4" width="14" height="14" rx="4" ry="4" />
+          <circle cx="8" cy="10" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="7.5" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="12.5" r="1.5" fill="#fff"/>
+        </svg>
+        <h2>회원가입</h2>
+        <p>새로운 계정을 생성하세요</p>
+        <form onsubmit="handleSignup(event)">
+          <div>
+            <label for="newemail">이메일</label>
+            <input type="email" id="newemail" placeholder="your@email.com" required>
+          </div>
+          <div>
+            <label for="newpassword">비밀번호</label>
+            <input type="password" id="newpassword" placeholder="비밀번호를 입력하세요" minlength="6" required>
+          </div>
+          <div>
+            <label for="confirmpassword">비밀번호 확인</label>
+            <input type="password" id="confirmpassword" placeholder="비밀번호를 다시 입력하세요" required>
+          </div>
+          <button type="submit" class="btn">회원가입</button>
+        </form>
+        <div class="switch">이미 계정이 있으신가요? <a onclick="showPage('login')">로그인</a></div>
+      </div>
+    </div>
+
+    <!-- 대시보드 -->
+    <div id="dashboard" class="page">
+      <div class="card">
+        <div class="success-message">로그인이 성공했습니다! 🎉</div>
+        <h2>환영합니다</h2>
+        <p>이제 공지사항을 확인하세요!</p>
+        <div style="display:flex;gap:10px;flex-direction:column;">
+          <button class="btn" onclick="goToDashboard()">대시보드로 이동</button>
+          <button class="btn" onclick="logout()" style="background:#6b7280;">로그아웃</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // 페이지 전환
+    function showPage(id){
+      document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+      document.getElementById(id).classList.add('active');
+    }
+
+    // 로그인 처리
+    function handleLogin(event) {
+      event.preventDefault();
+      const email = document.getElementById('email').value;
+      const password = document.getElementById('password').value;
+      
+      // 저장된 사용자 정보 확인
+      const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
+      const user = users.find(u => u.email === email && u.password === password);
+      
+      if (user) {
+        // 로그인 상태 저장
+        localStorage.setItem('dice_current_user', JSON.stringify(user));
+        showPage('dashboard');
+      } else {
+        alert('이메일 또는 비밀번호가 잘못되었습니다.');
+      }
+    }
+
+    // 회원가입 처리
+    function handleSignup(event) {
+      event.preventDefault();
+      const email = document.getElementById('newemail').value;
+      const password = document.getElementById('newpassword').value;
+      const confirmPassword = document.getElementById('confirmpassword').value;
+      
+      if (password !== confirmPassword) {
+        alert('비밀번호가 일치하지 않습니다.');
+        return;
+      }
+      
+      // 기존 사용자 확인
+      const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
+      if (users.find(u => u.email === email)) {
+        alert('이미 등록된 이메일입니다.');
+        return;
+      }
+      
+      // 새 사용자 추가
+      const newUser = { email, password, createdAt: new Date().toISOString() };
+      users.push(newUser);
+      localStorage.setItem('dice_users', JSON.stringify(users));
+      
+      // 자동 로그인
+      localStorage.setItem('dice_current_user', JSON.stringify(newUser));
+      showPage('dashboard');
+    }
+
+    // 로그아웃
+    function logout() {
+      localStorage.removeItem('dice_current_user');
+      showPage('login');
+    }
+
+    // 대시보드로 이동
+    function goToDashboard() {
+      // 실제로는 dashboard.html로 리다이렉트
+      window.location.href = 'dashboard.html';
+    }
+
+    // 페이지 로드시 로그인 상태 확인
+    window.addEventListener('load', function() {
+      const currentUser = localStorage.getItem('dice_current_user');
+      if (currentUser) {
+        // 이미 로그인된 상태라면 대시보드 표시
+        showPage('dashboard');
+      }
+    });
+  </script>
+</body>
+</html>
