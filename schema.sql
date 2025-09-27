@@ -1,6 +1,6 @@
 -- DICE 통합 공지사항 시스템 PostgreSQL Database Schema
--- Version: 1.0.0
--- Created: 2025-01-15
+-- Version: 1.1.0
+-- Updated: 2025-01-16
 
 -- ===================================
 -- 1. DATABASE SETUP
@@ -36,6 +36,9 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255) NOT NULL,
     name VARCHAR(100),
     student_id VARCHAR(20),
+    major VARCHAR(100), -- 전공(학과) 추가
+    gpa DECIMAL(3,2) CHECK (gpa >= 0 AND gpa <= 4.5), -- 학점 추가
+    toeic_score INTEGER CHECK (toeic_score >= 0 AND toeic_score <= 990), -- 토익점수 추가
     role user_role DEFAULT 'student',
     is_active BOOLEAN DEFAULT true,
     email_verified BOOLEAN DEFAULT false,
@@ -46,6 +49,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 CREATE INDEX IF NOT EXISTS idx_users_student_id ON users(student_id) WHERE student_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_major ON users(major) WHERE major IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at DESC);
 
 CREATE TABLE IF NOT EXISTS user_settings (
@@ -58,6 +62,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
     deadline_alert_days INTEGER DEFAULT 3 CHECK (deadline_alert_days BETWEEN 1 AND 30),
     interested_categories notice_category[] DEFAULT ARRAY['general']::notice_category[],
     excluded_keywords TEXT[],
+    filter_keywords TEXT[], -- 필터링용 키워드 추가
     notices_per_page INTEGER DEFAULT 20 CHECK (notices_per_page BETWEEN 10 AND 100),
     default_sort_order VARCHAR(20) DEFAULT 'date_desc',
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
@@ -264,7 +269,11 @@ COMMENT ON TABLE notices IS '크롤링된 공지사항 데이터';
 COMMENT ON TABLE user_notice_interactions IS '사용자-공지사항 상호작용 기록';
 COMMENT ON TABLE crawl_logs IS 'Apify 크롤링 실행 로그';
 COMMENT ON COLUMN users.password_hash IS 'bcrypt 또는 argon2로 해시된 비밀번호';
+COMMENT ON COLUMN users.major IS '사용자 전공/학과';
+COMMENT ON COLUMN users.gpa IS '사용자 학점 (0.0 ~ 4.5)';
+COMMENT ON COLUMN users.toeic_score IS '사용자 토익 점수 (0 ~ 990)';
 COMMENT ON COLUMN notices.content_hash IS 'SHA-256 해시로 중복 공지 감지용';
 COMMENT ON COLUMN notices.original_id IS '원본 시스템(대학 웹사이트)의 공지 ID';
 COMMENT ON COLUMN user_settings.deadline_alert_days IS '마감일 며칠 전에 알림을 받을지 설정';
 COMMENT ON COLUMN user_settings.interested_categories IS '관심있는 공지사항 카테고리 목록';
+COMMENT ON COLUMN user_settings.filter_keywords IS '공지사항 필터링용 키워드 목록';

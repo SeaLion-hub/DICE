@@ -2,29 +2,64 @@
 """
 연세대학교 전체 단과대학 공지사항 통합 시스템
 - 18개 단과대학 공지사항 통합
-- 선택형 인터페이스
-- 상세보기 페이지
-- 본문 자동 포맷팅
+- PostgreSQL DB 연동
+- 회원가입/로그인 API
+- 크롤링 데이터 DB 저장
 """
 
-from flask import Flask, render_template_string, jsonify, send_from_directory
-from datetime import datetime
+from flask import Flask, render_template_string, jsonify, send_from_directory, request
+from datetime import datetime, timedelta
 import re
-import requests ,os
+import requests
+import os
+import hashlib
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import uuid
+import bcrypt
+import jwt
 from flask_cors import CORS 
 from dotenv import load_dotenv
+import json
 
-load_dotenv()  # .env 파일에서 환경 변수 로드
+load_dotenv()
 
-# 정적 파일(index.html, auth.html, dashboard.html)을 같은 서버에서 서빙
-# 파일들이 yonsei_app.py와 같은 폴더에 있다고 가정
 app = Flask(__name__, static_folder='.', static_url_path='')
 CORS(app)
 
-# ===== Apify 설정 (수정 필요 시 바꾸세요) =====
+# ===== 환경 변수 설정 =====
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_xxxxxxxxxx")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/dice_db")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-here")
 
-# 단과대학 정보 및 Task IDs
+# ===== DB 연결 함수 =====
+def get_db_connection():
+    """PostgreSQL 데이터베이스 연결"""
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+        return conn
+    except Exception as e:
+        print(f"DB 연결 실패: {e}")
+        return None
+
+def init_db():
+    """데이터베이스 초기화 - 테이블이 없으면 생성"""
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                # schema.sql 파일 실행 (존재하는 경우)
+                if os.path.exists('schema.sql'):
+                    with open('schema.sql', 'r', encoding='utf-8') as f:
+                        cur.execute(f.read())
+                conn.commit()
+                print("DB 초기화 완료")
+        except Exception as e:
+            print(f"DB 초기화 실패: {e}")
+        finally:
+            conn.close()
+
+# 단과대학 정보
 COLLEGES = {
     'main': {
         'name': '메인 공지사항',
@@ -154,93 +189,6 @@ COLLEGES = {
     }
 }
 
-# 테스트용 더미 데이터
-def generate_dummy_data(college_key):
-    college = COLLEGES[college_key]
-    base_notices = [
-        {
-            'id': f'{college_key}_1',
-            'title': f'{college["name"]} 2025학년도 1학기 수강신청 안내',
-            'content': f'''2025학년도 1학기 수강신청 안내드립니다.
-
-1. 수강신청 일정
-가. 수강신청 기간: 2025년 2월 15일(월) ~ 2월 19일(금)
-나. 수강정정 기간: 2025년 3월 2일(월) ~ 3월 6일(금)
-
-2. 수강신청 방법
-가. 연세포털시스템(portal.yonsei.ac.kr) 접속
-나. 수강신청 메뉴 클릭
-다. 원하는 과목 검색 및 신청
-
-3. 유의사항
-가. 수강신청 가능 학점: 최소 12학점 ~ 최대 18학점
-나. 필수과목 우선 신청 권장
-다. 수강신청 인원 초과시 전공자 우선
-
-문의사항은 {college["name"]} 행정팀으로 연락 바랍니다.
-전화: 02-2123-XXXX
-이메일: admin@yonsei.ac.kr''',
-            'date': '2025-01-15',
-            'url': college['url'],
-            'department': f'{college["name"]} 행정팀',
-            'views': '1,234'
-        },
-        {
-            'id': f'{college_key}_2',
-            'title': f'{college["name"]} 학술 세미나 개최 안내',
-            'content': f'''제15회 {college["name"]} 학술 세미나를 다음과 같이 개최합니다.
-
-1. 행사 개요
-가. 일시: 2025년 2월 10일(수) 14:00~17:00
-나. 장소: {college["name"]} 대강당
-다. 주제: 미래 사회와 {college["name"]}의 역할
-
-2. 프로그램
-가. 14:00~14:30 : 등록 및 개회식
-나. 14:30~15:30 : 기조강연
-다. 15:30~16:30 : 학생 연구발표
-라. 16:30~17:00 : 질의응답 및 폐회
-
-3. 참가 신청
-가. 신청기간: 2025년 1월 20일 ~ 2월 5일
-나. 신청방법: 온라인 사전등록 (선착순 200명)
-다. 참가비: 무료
-
-많은 관심과 참여 부탁드립니다.''',
-            'date': '2025-01-14',
-            'url': college['url'],
-            'department': f'{college["name"]} 학술위원회',
-            'views': '856'
-        },
-        {
-            'id': f'{college_key}_3',
-            'title': f'{college["name"]} 겨울 계절학기 성적 확인',
-            'content': f'''2024년도 겨울 계절학기 성적이 공개되었습니다.
-
-1. 성적 확인 방법
-가. 연세포털시스템 로그인
-나. 성적조회 메뉴 선택
-다. 2024년 겨울계절학기 선택
-
-2. 성적 이의신청
-가. 신청기간: 2025년 1월 18일 ~ 1월 22일
-나. 신청방법: 포털시스템 내 이의신청 메뉴
-다. 처리기간: 신청 후 7일 이내
-
-3. 주의사항
-가. 이의신청은 기간 내에만 가능
-나. 단순 점수 확인 요청은 불가
-다. 구체적인 사유 작성 필요
-
-문의: {college["name"]} 교무팀''',
-            'date': '2025-01-13',
-            'url': college['url'],
-            'department': f'{college["name"]} 교무팀',
-            'views': '2,341'
-        }
-    ]
-    return base_notices
-
 def format_content(content):
     if not content:
         return ""
@@ -250,10 +198,301 @@ def format_content(content):
     content = re.sub(r'\n{3,}', '\n\n', content)
     return content.strip()
 
-# ---------------- UI 라우트 (정적 파일) ----------------
+def save_notices_to_db(college_key, notices):
+    """크롤링한 공지사항을 DB에 저장"""
+    conn = get_db_connection()
+    if not conn:
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            for notice in notices:
+                # content_hash 생성
+                content_hash = hashlib.sha256(
+                    f"{notice['title']}{notice['content']}".encode()
+                ).hexdigest()
+                
+                # 날짜 파싱
+                published_date = None
+                if notice.get('date'):
+                    try:
+                        published_date = datetime.strptime(notice['date'], '%Y-%m-%d').date()
+                    except:
+                        pass
+                
+                # notices 테이블에 저장 (중복 시 업데이트)
+                cur.execute("""
+                    INSERT INTO notices (
+                        college_id, title, content, department, writer,
+                        original_id, original_url, published_date,
+                        content_hash, view_count
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (college_id, original_id) 
+                    DO UPDATE SET
+                        title = EXCLUDED.title,
+                        content = EXCLUDED.content,
+                        department = EXCLUDED.department,
+                        writer = EXCLUDED.writer,
+                        original_url = EXCLUDED.original_url,
+                        published_date = EXCLUDED.published_date,
+                        content_hash = EXCLUDED.content_hash,
+                        last_checked_at = CURRENT_TIMESTAMP
+                """, (
+                    college_key, notice['title'], notice.get('content'),
+                    notice.get('department'), notice.get('writer'),
+                    notice.get('id'), notice.get('url'),
+                    published_date, content_hash,
+                    int(notice.get('views', '0').replace(',', ''))
+                ))
+            
+            # crawl_logs에 기록
+            cur.execute("""
+                INSERT INTO crawl_logs (
+                    college_id, status, notices_fetched,
+                    started_at, completed_at
+                ) VALUES (%s, %s, %s, %s, %s)
+            """, (
+                college_key, 'success', len(notices),
+                datetime.now(), datetime.now()
+            ))
+            
+            conn.commit()
+            return True
+    except Exception as e:
+        print(f"DB 저장 실패: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+def get_notices_from_db(college_key):
+    """DB에서 공지사항 조회"""
+    conn = get_db_connection()
+    if not conn:
+        return []
+    
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, title, content, department as writer,
+                       published_date as date, original_url as url,
+                       view_count as views
+                FROM notices
+                WHERE college_id = %s AND status = 'active'
+                ORDER BY published_date DESC
+                LIMIT 50
+            """, (college_key,))
+            
+            notices = cur.fetchall()
+            # 날짜 및 조회수 포맷팅
+            for notice in notices:
+                if notice['date']:
+                    notice['date'] = notice['date'].strftime('%Y-%m-%d')
+                notice['views'] = f"{notice['views']:,}"
+                notice['id'] = str(notice['id'])
+            
+            return notices
+    except Exception as e:
+        print(f"DB 조회 실패: {e}")
+        return []
+    finally:
+        conn.close()
+
+def get_apify_data(task_id):
+    """Apify Task의 최신 실행 결과 가져오기"""
+    try:
+        url = f"https://api.apify.com/v2/actor-tasks/{task_id}/runs"
+        headers = {"Authorization": f"Bearer {APIFY_TOKEN}"}
+        params = {"limit": 1, "desc": "true"}
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+
+        if response.status_code != 200:
+            return None
+
+        runs = response.json().get('data', {}).get('items', [])
+        if not runs:
+            return None
+
+        latest_run = runs[0]
+        dataset_id = latest_run.get('defaultDatasetId')
+        if not dataset_id:
+            return None
+
+        dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
+        dataset_response = requests.get(dataset_url, headers=headers, timeout=10)
+        if dataset_response.status_code != 200:
+            return None
+
+        items = dataset_response.json()
+        valid_items = []
+
+        for idx, item in enumerate(items[:50]):
+            if not item:
+                continue
+
+            title = (
+                item.get('title') or item.get('name') or 
+                item.get('headline') or item.get('subject')
+            )
+            content = item.get('content') or item.get('body') or item.get('text') or ''
+            date = item.get('date') or item.get('publishedAt') or ''
+            url_field = item.get('url') or item.get('link') or ''
+            dept = item.get('department') or item.get('writer') or ''
+            views = item.get('views') or '0'
+
+            if not title:
+                continue
+
+            valid_items.append({
+                'id': f'{task_id}_{idx}',
+                'title': title,
+                'content': content,
+                'date': str(date) if date else '',
+                'url': url_field,
+                'department': dept,
+                'writer': dept,
+                'views': str(views),
+            })
+
+        return valid_items or None
+
+    except Exception as e:
+        print(f"Error fetching Apify data: {e}")
+        return None
+
+# ============= AUTH API =============
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    """회원가입 API"""
+    data = request.get_json()
+    conn = get_db_connection()
+    
+    if not conn:
+        return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+    
+    try:
+        # 비밀번호 해싱
+        password_hash = bcrypt.hashpw(
+            data['password'].encode('utf-8'), 
+            bcrypt.gensalt()
+        ).decode('utf-8')
+        
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 사용자 생성
+            cur.execute("""
+                INSERT INTO users (
+                    email, password_hash, name, student_id,
+                    major, gpa, toeic_score
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                RETURNING id, email, name, student_id, major, gpa, toeic_score
+            """, (
+                data['email'], password_hash, data.get('name'),
+                data.get('student_id'), data.get('major'),
+                data.get('gpa'), data.get('toeic_score')
+            ))
+            
+            user = cur.fetchone()
+            
+            # user_settings 기본값 생성
+            cur.execute("""
+                INSERT INTO user_settings (user_id)
+                VALUES (%s)
+            """, (user['id'],))
+            
+            conn.commit()
+            
+            # JWT 토큰 생성
+            token = jwt.encode(
+                {'user_id': str(user['id']), 'email': user['email']},
+                JWT_SECRET_KEY,
+                algorithm='HS256'
+            )
+            
+            return jsonify({
+                'success': True,
+                'user': {
+                    'id': str(user['id']),
+                    'email': user['email'],
+                    'name': user['name'],
+                    'major': user['major'],
+                    'gpa': float(user['gpa']) if user['gpa'] else None,
+                    'toeic_score': user['toeic_score']
+                },
+                'token': token
+            })
+            
+    except psycopg2.IntegrityError:
+        return jsonify({'success': False, 'message': '이미 등록된 이메일입니다'}), 400
+    except Exception as e:
+        print(f"회원가입 오류: {e}")
+        return jsonify({'success': False, 'message': '회원가입 실패'}), 500
+    finally:
+        conn.close()
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """로그인 API"""
+    data = request.get_json()
+    conn = get_db_connection()
+    
+    if not conn:
+        return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+    
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, email, password_hash, name, student_id,
+                       major, gpa, toeic_score
+                FROM users
+                WHERE email = %s
+            """, (data['email'],))
+            
+            user = cur.fetchone()
+            
+            if not user:
+                return jsonify({'success': False, 'message': '사용자를 찾을 수 없습니다'}), 404
+            
+            # 비밀번호 검증
+            if not bcrypt.checkpw(data['password'].encode('utf-8'), 
+                                user['password_hash'].encode('utf-8')):
+                return jsonify({'success': False, 'message': '비밀번호가 일치하지 않습니다'}), 401
+            
+            # 마지막 로그인 시간 업데이트
+            cur.execute("""
+                UPDATE users SET last_login_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, (user['id'],))
+            conn.commit()
+            
+            # JWT 토큰 생성
+            token = jwt.encode(
+                {'user_id': str(user['id']), 'email': user['email']},
+                JWT_SECRET_KEY,
+                algorithm='HS256'
+            )
+            
+            return jsonify({
+                'success': True,
+                'user': {
+                    'id': str(user['id']),
+                    'email': user['email'],
+                    'name': user['name'],
+                    'major': user['major'],
+                    'gpa': float(user['gpa']) if user['gpa'] else None,
+                    'toeic_score': user['toeic_score']
+                },
+                'token': token
+            })
+            
+    except Exception as e:
+        print(f"로그인 오류: {e}")
+        return jsonify({'success': False, 'message': '로그인 실패'}), 500
+    finally:
+        conn.close()
+
+# ============= 기존 라우트 =============
 @app.route('/landing')
 def serve_landing():
-    # index.html 정적 파일
     return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/auth')
@@ -264,7 +503,10 @@ def serve_auth():
 def serve_dashboard():
     return send_from_directory(app.static_folder, 'dashboard.html')
 
-# -------------- 기존 메인(크롤링 UI) --------------
+@app.route('/settings')
+def serve_settings():
+    return send_from_directory(app.static_folder, 'settings.html')
+
 MAIN_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="ko">
@@ -273,7 +515,6 @@ MAIN_TEMPLATE = """
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>연세대학교 통합 공지사항 시스템</title>
     <style>
-      /* (생략 없이 원문 유지) */
       * { margin:0; padding:0; box-sizing:border-box; }
       body { font-family: 'Noto Sans KR', -apple-system, sans-serif; background: linear-gradient(135deg, #003876 0%, #005BBB 100%); min-height: 100vh; padding: 20px; }
       .container { max-width: 1200px; margin:0 auto; }
@@ -402,128 +643,35 @@ MAIN_TEMPLATE = """
 
 @app.route('/')
 def index():
-    # 기존 메인(선택형 크롤링 UI)
     return render_template_string(MAIN_TEMPLATE, colleges=COLLEGES)
-
-def get_apify_data(task_id):
-    """Apify Task의 최신 실행 결과 가져오기 (title 필드 유연 처리)"""
-    try:
-        url = f"https://api.apify.com/v2/actor-tasks/{task_id}/runs"
-        headers = {"Authorization": f"Bearer {APIFY_TOKEN}"}
-        params = {"limit": 1, "desc": "true"}
-        response = requests.get(url, headers=headers, params=params, timeout=10)
-
-        if response.status_code != 200:
-            return None
-
-        runs = response.json().get('data', {}).get('items', [])
-        if not runs:
-            # 최근 실행이 없으면 None
-            return None
-
-        latest_run = runs[0]
-        dataset_id = latest_run.get('defaultDatasetId')
-        if not dataset_id:
-            return None
-
-        dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-        dataset_response = requests.get(dataset_url, headers=headers, timeout=10)
-        if dataset_response.status_code != 200:
-            return None
-
-        # Apify는 보통 JSON 배열을 바로 반환
-        items = dataset_response.json()
-        valid_items = []
-
-        for idx, item in enumerate(items[:50]):  # 넉넉히 50개까지
-            if not item:
-                continue
-
-            # ---- 유연한 필드 매핑 ----
-            title = (
-                item.get('title')
-                or item.get('name')
-                or item.get('headline')
-                or item.get('subject')
-                or item.get('heading')
-            )
-            content = (
-                item.get('content')
-                or item.get('body')
-                or item.get('text')
-                or ''
-            )
-            date = (
-                item.get('date')
-                or item.get('publishedAt')
-                or item.get('time')
-                or item.get('createdAt')
-                or ''
-            )
-            url_field = item.get('url') or item.get('link') or item.get('sourceUrl') or ''
-            dept = item.get('department') or item.get('writer') or item.get('author') or ''
-            views = item.get('views') or item.get('viewCount') or item.get('hits') or '0'
-
-            # 제목 완전 없으면 본문/URL로 대체 생성
-            if not title:
-                if content:
-                    # 본문 앞 30~60자 정도로 제목 생성
-                    snippet = re.sub(r'\s+', ' ', content).strip()
-                    title = (snippet[:50] + '…') if len(snippet) > 50 else snippet
-                elif url_field:
-                    # URL에서 경로 마지막 세그먼트를 제목 대용
-                    title = url_field.rstrip('/').split('/')[-1][:60] or '제목 없음'
-                else:
-                    # 정말 아무 것도 없으면 스킵
-                    continue
-
-            # 날짜가 이상하면 비워두고, 프론트에서 정렬 시 빈값은 뒤로 밀림
-            if date:
-                try:
-                    # ISO / 일반 한국식 섞여와도 최대한 파싱 시도
-                    _ = datetime.fromisoformat(date.replace('Z', '+00:00'))
-                except Exception:
-                    # 간단한 yyyy-mm-dd 매칭만 체크
-                    if not re.match(r'^\d{4}-\d{2}-\d{2}', str(date)):
-                        # 형식 안 맞으면 비우기
-                        date = ''
-
-            valid_items.append({
-                'id': f'{task_id}_{idx}',
-                'title': title,
-                'content': content,
-                'date': str(date) if date else '',
-                'url': url_field,
-                'department': dept,
-                'views': str(views),
-            })
-
-        return valid_items or None
-
-    except Exception as e:
-        print(f"Error fetching Apify data: {e}")
-        return None
-
 
 @app.route('/api/notices/<college_key>')
 def get_notices(college_key):
     if college_key not in COLLEGES:
         return jsonify({'success': False, 'message': 'Invalid college'})
+    
     college = COLLEGES[college_key]
     notices = []
-
-    if APIFY_TOKEN != 'apify_api_xxxxxxxxxx' and not college['task_id'].startswith('task_id_'):
+    
+    # 먼저 DB에서 조회
+    notices = get_notices_from_db(college_key)
+    
+    # DB에 데이터가 없으면 Apify에서 가져오기
+    if not notices and APIFY_TOKEN != 'apify_api_xxxxxxxxxx':
         apify_data = get_apify_data(college['task_id'])
         if apify_data:
+            # DB에 저장
+            save_notices_to_db(college_key, apify_data)
             notices = apify_data
-        else:
-            notices = generate_dummy_data(college_key)
-    else:
-        notices = generate_dummy_data(college_key)
-
+    
     return jsonify({
         'success': True,
-        'college': { 'key': college_key, 'name': college['name'], 'icon': college['icon'], 'color': college['color'] },
+        'college': {
+            'key': college_key,
+            'name': college['name'],
+            'icon': college['icon'],
+            'color': college['color']
+        },
         'notices': notices
     })
 
@@ -531,29 +679,49 @@ def get_notices(college_key):
 def notice_detail(college_key, notice_id):
     if college_key not in COLLEGES:
         return "잘못된 접근입니다.", 404
+    
     college = COLLEGES[college_key]
     notice = None
-
-    if APIFY_TOKEN != 'apify_api_xxxxxxxxxx' and not college['task_id'].startswith('task_id_'):
-        apify_data = get_apify_data(college['task_id'])
-        if apify_data:
-            for n in apify_data:
-                if n['id'] == notice_id:
-                    notice = n
-                    break
-
-    if not notice:
-        notices = generate_dummy_data(college_key)
-        for n in notices:
-            if n['id'] == notice_id:
-                notice = n
-                break
-
+    
+    # DB에서 상세 정보 조회
+    conn = get_db_connection()
+    if conn:
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT * FROM notices
+                    WHERE id = %s OR original_id = %s
+                    LIMIT 1
+                """, (notice_id, notice_id))
+                
+                notice_data = cur.fetchone()
+                if notice_data:
+                    notice = {
+                        'id': str(notice_data['id']),
+                        'title': notice_data['title'],
+                        'content': notice_data['content'] or '',
+                        'date': notice_data['published_date'].strftime('%Y-%m-%d') if notice_data['published_date'] else '',
+                        'url': notice_data['original_url'] or college['url'],
+                        'department': notice_data['department'] or college['name'],
+                        'views': f"{notice_data['view_count']:,}"
+                    }
+                    
+                    # 조회수 증가
+                    cur.execute("""
+                        UPDATE notices SET view_count = view_count + 1
+                        WHERE id = %s
+                    """, (notice_data['id'],))
+                    conn.commit()
+        except Exception as e:
+            print(f"상세 조회 오류: {e}")
+        finally:
+            conn.close()
+    
     if not notice:
         return "공지사항을 찾을 수 없습니다.", 404
-
+    
     notice['formatted_content'] = format_content(notice['content'])
-
+    
     DETAIL_TEMPLATE = """
     <!DOCTYPE html>
     <html lang="ko">
@@ -604,200 +772,28 @@ def notice_detail(college_key, notice_id):
     """
     return render_template_string(DETAIL_TEMPLATE, notice=notice, college=college)
 
-# 건강/서버 정보
 @app.route('/api/health')
 def health_check():
     return jsonify({
         'status': 'healthy',
-        'message': 'DICE 크롤링 서버가 정상 작동 중입니다',
+        'message': 'DICE 서버가 정상 작동 중입니다',
         'timestamp': datetime.now().isoformat(),
         'colleges_count': len(COLLEGES),
-        'apify_configured': APIFY_TOKEN != 'apify_api_xxxxxxxxxx'
+        'db_connected': get_db_connection() is not None
     })
-
-@app.route('/api/server-info')
-def server_info():
-    configured_colleges = sum(1 for c in COLLEGES.values() if not c['task_id'].startswith('task_id_'))
-    return jsonify({
-        'total_colleges': len(COLLEGES),
-        'configured_colleges': configured_colleges,
-        'apify_token_set': APIFY_TOKEN != 'apify_api_xxxxxxxxxx',
-        'server_mode': 'production' if APIFY_TOKEN != 'apify_api_xxxxxxxxxx' else 'test'
-    })
-
-# 디버그
-@app.route('/api/debug/<college_key>')
-def debug_college(college_key):
-    if college_key not in COLLEGES:
-        return jsonify({'success': False, 'message': 'Invalid college'})
-    college = COLLEGES[college_key]
-    debug_info = {
-        'college_name': college['name'],
-        'task_id': college['task_id'],
-        'token_configured': APIFY_TOKEN != 'apify_api_xxxxxxxxxx',
-        'task_id_configured': not college['task_id'].startswith('task_id_'),
-        'data_source': None,
-        'error': None,
-        'api_response': None,
-        'dataset_items': 0
-    }
-    if debug_info['token_configured'] and debug_info['task_id_configured']:
-        try:
-            url = f"https://api.apify.com/v2/actor-tasks/{college['task_id']}/runs"
-            headers = {"Authorization": f"Bearer {APIFY_TOKEN}"}
-            params = {"limit": 1, "desc": "true"}
-            response = requests.get(url, headers=headers, params=params, timeout=10)
-            debug_info['api_response'] = {'status_code': response.status_code, 'url': url}
-            if response.status_code == 200:
-                runs = response.json().get('data', {}).get('items', [])
-                if runs:
-                    latest_run = runs[0]
-                    debug_info['latest_run'] = {
-                        'id': latest_run.get('id'),
-                        'status': latest_run.get('status'),
-                        'finishedAt': latest_run.get('finishedAt'),
-                        'datasetId': latest_run.get('defaultDatasetId')
-                    }
-                    dataset_id = latest_run.get('defaultDatasetId')
-                    if dataset_id:
-                        dataset_url = f"https://api.apify.com/v2/datasets/{dataset_id}/items"
-                        dataset_response = requests.get(dataset_url, headers=headers, timeout=10)
-                        if dataset_response.status_code == 200:
-                            items = dataset_response.json()
-                            debug_info['dataset_items'] = len(items)
-                            debug_info['data_source'] = 'Apify'
-                            if items:
-                                debug_info['sample_item'] = {
-                                    'title': items[0].get('title','N/A'),
-                                    'has_content': bool(items[0].get('content')),
-                                    'has_date': bool(items[0].get('date')),
-                                    'has_url': bool(items[0].get('url'))
-                                }
-                        else:
-                            debug_info['error'] = f'Dataset API error: {dataset_response.status_code}'
-                    else:
-                        debug_info['error'] = 'No dataset ID found'
-                else:
-                    debug_info['error'] = 'No runs found for this task'
-            else:
-                debug_info['error'] = f'Task API error: {response.status_code}'
-        except Exception as e:
-            debug_info['error'] = str(e)
-            debug_info['data_source'] = 'Error'
-    else:
-        debug_info['data_source'] = 'Dummy'
-        debug_info['error'] = 'Token or Task ID not configured'
-    return jsonify(debug_info)
-
-@app.route('/debug')
-def debug_page():
-    # (원문 디버그 페이지 템플릿 그대로 유지)
-    debug_html = """<!DOCTYPE html><html lang="ko"><head><meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Apify 디버그 - 연세대 공지사항</title>
-    <style>
-      body{font-family:'Courier New',monospace;background:#1e1e1e;color:#d4d4d4;padding:20px;margin:0}
-      .container{max-width:1200px;margin:0 auto}
-      h1{color:#4fc3f7;border-bottom:2px solid #4fc3f7;padding-bottom:10px}
-      .college-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:20px;margin-top:30px}
-      .college-card{background:#2d2d30;border:1px solid #3e3e42;border-radius:8px;padding:15px;cursor:pointer;transition:.3s}
-      .college-card:hover{border-color:#4fc3f7;background:#353537}
-      .college-name{font-size:1.2rem;color:#4fc3f7;margin-bottom:10px}
-      .status{padding:5px 10px;border-radius:4px;display:inline-block;font-size:.9rem;margin-top:5px}
-      .status.configured{background:#1b5e20;color:#81c784}
-      .status.not-configured{background:#b71c1c;color:#ef5350}
-      .debug-details{background:#1e1e1e;border:1px solid #3e3e42;border-radius:8px;padding:20px;margin-top:30px;display:none}
-      .debug-details.active{display:block}
-      pre{background:#2d2d30;padding:15px;border-radius:4px;overflow-x:auto;color:#d4d4d4}
-      .close-btn{background:#4fc3f7;color:#1e1e1e;border:none;padding:8px 16px;border-radius:4px;cursor:pointer;float:right}
-      .refresh-btn{background:#81c784;color:#1e1e1e;border:none;padding:10px 20px;border-radius:4px;cursor:pointer;margin-top:20px}
-      .summary{display:grid;grid-template-columns:repeat(3,1fr);gap:20px;margin-top:20px}
-      .summary-card{background:#2d2d30;padding:20px;border-radius:8px;text-align:center}
-      .summary-number{font-size:2rem;color:#4fc3f7;font-weight:bold}
-      .summary-label{color:#9e9e9e;margin-top:5px}
-    </style></head>
-    <body><div class="container"><h1>🔧 Apify 디버그 콘솔</h1>
-    <div class="summary">
-      <div class="summary-card"><div class="summary-number" id="total-colleges">18</div><div class="summary-label">전체 단과대학</div></div>
-      <div class="summary-card"><div class="summary-number" id="configured-colleges">0</div><div class="summary-label">설정 완료</div></div>
-      <div class="summary-card"><div class="summary-number" id="working-colleges">0</div><div class="summary-label">정상 작동</div></div>
-    </div>
-    <button class="refresh-btn" onclick="checkAllColleges()">전체 상태 확인</button>
-    <div class="college-grid" id="collegeGrid"></div>
-    <div class="debug-details" id="debugDetails"><button class="close-btn" onclick="closeDetails()">✕ 닫기</button>
-      <h2 id="detailsTitle"></h2><pre id="detailsContent"></pre></div></div>
-    <script>
-      const colleges = {{ colleges | tojson }};
-      function initializeGrid(){
-        const grid=document.getElementById('collegeGrid'); let html='';
-        for(const [key,college] of Object.entries(colleges)){
-          html+=\`
-          <div class="college-card" onclick="checkCollege('\${key}')" id="card-\${key}">
-            <div class="college-name">\${college.icon} \${college.name}</div>
-            <div>Task ID: <code>\${college.task_id.substring(0,20)}...</code></div>
-            <div class="status not-configured" id="status-\${key}">확인 필요</div>
-          </div>\`;
-        }
-        grid.innerHTML=html;
-      }
-      async function checkCollege(collegeKey){
-        const status=document.getElementById(\`status-\${collegeKey}\`);
-        status.textContent='확인 중...'; status.className='status';
-        try{
-          const res=await fetch(\`/api/debug/\${collegeKey}\`);
-          const data=await res.json();
-          if(data.data_source==='Apify' && data.dataset_items>0){
-            status.textContent=\`✓ 정상 (\${data.dataset_items}개)\`; status.className='status configured';
-          }else if(data.data_source==='Dummy'){
-            status.textContent='✗ 미설정'; status.className='status not-configured';
-          }else{
-            status.textContent=\`⚠ 오류: \${data.error}\`; status.className='status not-configured';
-          }
-          showDetails(colleges[collegeKey].name,data);
-        }catch(e){
-          status.textContent='✗ 연결 실패'; status.className='status not-configured';
-        }
-      }
-      async function checkAllColleges(){
-        let configured=0, working=0;
-        for(const key of Object.keys(colleges)){
-          const res=await fetch(\`/api/debug/\${key}\`);
-          const data=await res.json();
-          if(data.task_id_configured) configured++;
-          if(data.data_source==='Apify' && data.dataset_items>0) working++;
-          const status=document.getElementById(\`status-\${key}\`);
-          if(data.data_source==='Apify' && data.dataset_items>0){
-            status.textContent=\`✓ 정상 (\${data.dataset_items}개)\`; status.className='status configured';
-          }else if(data.data_source==='Dummy'){
-            status.textContent='✗ 미설정'; status.className='status not-configured';
-          }else{
-            status.textContent='⚠ 오류'; status.className='status not-configured';
-          }
-        }
-        document.getElementById('configured-colleges').textContent=configured;
-        document.getElementById('working-colleges').textContent=working;
-      }
-      function showDetails(name,data){
-        const d=document.getElementById('debugDetails');
-        document.getElementById('detailsTitle').textContent=name+' 상세 정보';
-        document.getElementById('detailsContent').textContent=JSON.stringify(data,null,2);
-        d.classList.add('active');
-      }
-      function closeDetails(){ document.getElementById('debugDetails').classList.remove('active'); }
-      initializeGrid();
-    </script></body></html>"""
-    return render_template_string(debug_html, colleges=COLLEGES)
 
 if __name__ == '__main__':
+    # DB 초기화
+    init_db()
+    
     PORT = 8080
     print("="*60)
     print("🎓 연세대학교 통합 공지사항 시스템")
     print("="*60)
     print(f"\n📚 지원 단과대학: {len(COLLEGES)}개")
-    for key, college in COLLEGES.items():   
-        print(f"   {college['icon']} {college['name']}")
     print(f"\n🌐 서버 주소: http://localhost:{PORT}")
     print("\n📋 현재 모드: ", end="")
-    print("실제 데이터 모드" if APIFY_TOKEN != 'apify_api_xxxxxxxxxx' else "테스트 모드 (더미 데이터)")
+    print("실제 데이터 모드" if APIFY_TOKEN != 'apify_api_xxxxxxxxxx' else "테스트 모드")
     print("\n"+"="*60)
     print("서버 시작중... (종료: Ctrl+C)")
     print("="*60+"\n")

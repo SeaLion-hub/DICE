@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>DICE — 로그인 및 회원가입</title>
+  <title>DICE – 로그인 및 회원가입</title>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;900&display=swap" rel="stylesheet">
   <style>
     :root{
@@ -28,7 +28,7 @@
       box-shadow:var(--shadow);
       padding:40px 32px;
       width:100%;
-      max-width:400px;
+      max-width:450px;
       text-align:center;
     }
     .card svg{width:32px;height:32px;margin-bottom:16px;}
@@ -37,13 +37,22 @@
 
     form{display:flex;flex-direction:column;gap:16px;text-align:left}
     label{font-size:14px;font-weight:600;color:var(--text)}
-    input{
+    input, select{
       padding:12px 14px;
       border:1px solid #d0d7e2;
       border-radius:var(--radius);
       font-size:15px;
+      font-family: inherit;
     }
-    input:focus{outline:2px solid var(--primary); border-color:var(--primary)}
+    input:focus, select:focus{outline:2px solid var(--primary); border-color:var(--primary)}
+    
+    select{
+      appearance: none;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2364748b' d='M6 9L1.5 4.5h9z'/%3E%3C/svg%3E");
+      background-repeat: no-repeat;
+      background-position: right 12px center;
+      padding-right: 36px;
+    }
 
     .btn{
       border:none;cursor:pointer;
@@ -63,6 +72,21 @@
       color:var(--primary);
       font-size:14px;
       font-weight:600;
+    }
+    
+    .form-row{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:12px;
+    }
+    
+    .form-section-title{
+      font-size:13px;
+      color:var(--muted);
+      margin-top:8px;
+      margin-bottom:-8px;
+      text-transform:uppercase;
+      letter-spacing:0.5px;
     }
 
     /* Hidden pages */
@@ -127,7 +151,7 @@
 
     <!-- 회원가입 -->
     <div id="signup" class="page">
-      <div class="card">
+      <div class="card" style="max-width:500px;">
         <svg viewBox="0 0 24 24" fill="currentColor">
           <rect x="2.5" y="4" width="14" height="14" rx="4" ry="4" />
           <circle cx="8" cy="10" r="1.5" fill="#fff"/>
@@ -137,19 +161,65 @@
         <h2>회원가입</h2>
         <p>새로운 계정을 생성하세요</p>
         <form onsubmit="handleSignup(event)">
+          <div class="form-section-title">기본 정보</div>
           <div>
-            <label for="newemail">이메일</label>
+            <label for="newemail">이메일 *</label>
             <input type="email" id="newemail" placeholder="your@email.com" required>
           </div>
           <div>
-            <label for="newpassword">비밀번호</label>
+            <label for="newpassword">비밀번호 *</label>
             <input type="password" id="newpassword" placeholder="비밀번호를 입력하세요" minlength="6" required>
           </div>
           <div>
-            <label for="confirmpassword">비밀번호 확인</label>
+            <label for="confirmpassword">비밀번호 확인 *</label>
             <input type="password" id="confirmpassword" placeholder="비밀번호를 다시 입력하세요" required>
           </div>
-          <button type="submit" class="btn">회원가입</button>
+          
+          <div class="form-section-title" style="margin-top:12px;">프로필 정보</div>
+          <div>
+            <label for="name">이름</label>
+            <input type="text" id="name" placeholder="홍길동">
+          </div>
+          <div>
+            <label for="student_id">학번</label>
+            <input type="text" id="student_id" placeholder="2024123456">
+          </div>
+          <div>
+            <label for="major">전공 (학과)</label>
+            <select id="major">
+              <option value="">선택하세요</option>
+              <option value="국어국문학과">국어국문학과</option>
+              <option value="철학과">철학과</option>
+              <option value="사학과">사학과</option>
+              <option value="심리학과">심리학과</option>
+              <option value="경제학과">경제학과</option>
+              <option value="경영학과">경영학과</option>
+              <option value="컴퓨터과학과">컴퓨터과학과</option>
+              <option value="전기전자공학과">전기전자공학과</option>
+              <option value="기계공학과">기계공학과</option>
+              <option value="화학공학과">화학공학과</option>
+              <option value="신소재공학과">신소재공학과</option>
+              <option value="생명공학과">생명공학과</option>
+              <option value="의학과">의학과</option>
+              <option value="치의학과">치의학과</option>
+              <option value="간호학과">간호학과</option>
+              <option value="약학과">약학과</option>
+              <option value="기타">기타</option>
+            </select>
+          </div>
+          
+          <div class="form-row">
+            <div>
+              <label for="gpa">학점 (GPA)</label>
+              <input type="number" id="gpa" placeholder="4.3" min="0" max="4.5" step="0.01">
+            </div>
+            <div>
+              <label for="toeic_score">토익 점수</label>
+              <input type="number" id="toeic_score" placeholder="900" min="0" max="990" step="5">
+            </div>
+          </div>
+          
+          <button type="submit" class="btn" style="margin-top:12px;">회원가입</button>
         </form>
         <div class="switch">이미 계정이 있으신가요? <a onclick="showPage('login')">로그인</a></div>
       </div>
@@ -177,62 +247,109 @@
     }
 
     // 로그인 처리
-    function handleLogin(event) {
+    async function handleLogin(event) {
       event.preventDefault();
       const email = document.getElementById('email').value;
       const password = document.getElementById('password').value;
       
-      // 저장된 사용자 정보 확인
-      const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
-      const user = users.find(u => u.email === email && u.password === password);
-      
-      if (user) {
-        // 로그인 상태 저장
-        localStorage.setItem('dice_current_user', JSON.stringify(user));
-        showPage('dashboard');
-      } else {
-        alert('이메일 또는 비밀번호가 잘못되었습니다.');
+      try {
+        const response = await fetch('http://localhost:8080/api/auth/login', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ email, password })
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+          localStorage.setItem('dice_current_user', JSON.stringify(data.user));
+          localStorage.setItem('dice_token', data.token);
+          showPage('dashboard');
+        } else {
+          alert(data.message || '이메일 또는 비밀번호가 잘못되었습니다.');
+        }
+      } catch (error) {
+        // 오프라인 모드 (로컬 스토리지)
+        const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
+        const user = users.find(u => u.email === email && u.password === password);
+        
+        if (user) {
+          localStorage.setItem('dice_current_user', JSON.stringify(user));
+          showPage('dashboard');
+        } else {
+          alert('이메일 또는 비밀번호가 잘못되었습니다.');
+        }
       }
     }
 
     // 회원가입 처리
-    function handleSignup(event) {
+    async function handleSignup(event) {
       event.preventDefault();
       const email = document.getElementById('newemail').value;
       const password = document.getElementById('newpassword').value;
       const confirmPassword = document.getElementById('confirmpassword').value;
+      const name = document.getElementById('name').value || null;
+      const student_id = document.getElementById('student_id').value || null;
+      const major = document.getElementById('major').value || null;
+      const gpa = document.getElementById('gpa').value ? parseFloat(document.getElementById('gpa').value) : null;
+      const toeic_score = document.getElementById('toeic_score').value ? parseInt(document.getElementById('toeic_score').value) : null;
       
       if (password !== confirmPassword) {
         alert('비밀번호가 일치하지 않습니다.');
         return;
       }
       
-      // 기존 사용자 확인
-      const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
-      if (users.find(u => u.email === email)) {
-        alert('이미 등록된 이메일입니다.');
-        return;
+      const userData = {
+        email,
+        password, // 실제 환경에서는 서버에서 해시 처리
+        name,
+        student_id,
+        major,
+        gpa,
+        toeic_score,
+        createdAt: new Date().toISOString()
+      };
+      
+      try {
+        const response = await fetch('http://localhost:8080/api/auth/register', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(userData)
+        });
+        
+        const data = await response.json();
+        if (data.success) {
+          localStorage.setItem('dice_current_user', JSON.stringify(data.user));
+          localStorage.setItem('dice_token', data.token);
+          alert('회원가입이 완료되었습니다!');
+          showPage('dashboard');
+        } else {
+          alert(data.message || '회원가입에 실패했습니다.');
+        }
+      } catch (error) {
+        // 오프라인 모드 (로컬 스토리지)
+        const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
+        if (users.find(u => u.email === email)) {
+          alert('이미 등록된 이메일입니다.');
+          return;
+        }
+        
+        users.push(userData);
+        localStorage.setItem('dice_users', JSON.stringify(users));
+        localStorage.setItem('dice_current_user', JSON.stringify(userData));
+        alert('회원가입이 완료되었습니다!');
+        showPage('dashboard');
       }
-      
-      // 새 사용자 추가
-      const newUser = { email, password, createdAt: new Date().toISOString() };
-      users.push(newUser);
-      localStorage.setItem('dice_users', JSON.stringify(users));
-      
-      // 자동 로그인
-      localStorage.setItem('dice_current_user', JSON.stringify(newUser));
-      showPage('dashboard');
     }
 
     // 로그아웃
     function logout() {
       localStorage.removeItem('dice_current_user');
+      localStorage.removeItem('dice_token');
       showPage('login');
     }
 
     // 대시보드로 이동
     function goToDashboard() {
-      // 실제로는 dashboard.html로 리다이렉트
       window.location.href = 'dashboard.html';
     }
 
@@ -240,7 +357,6 @@
     window.addEventListener('load', function() {
       const currentUser = localStorage.getItem('dice_current_user');
       if (currentUser) {
-        // 이미 로그인된 상태라면 대시보드 표시
         showPage('dashboard');
       }
     });

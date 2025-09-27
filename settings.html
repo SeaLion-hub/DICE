@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>DICE — 설정</title>
+  <title>DICE – 설정</title>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800;900&display=swap" rel="stylesheet">
   <style>
     :root{
@@ -78,6 +78,29 @@
     .profile-email{
       color:var(--muted);
       font-size:14px;
+    }
+
+    .profile-details{
+      margin-top:16px;
+      padding-top:16px;
+      border-top:1px solid var(--border);
+      display:flex;
+      justify-content:center;
+      gap:24px;
+      flex-wrap:wrap;
+    }
+
+    .profile-detail-item{
+      font-size:13px;
+    }
+
+    .profile-detail-item span{
+      color:var(--muted);
+    }
+
+    .profile-detail-item strong{
+      color:var(--text);
+      font-weight:600;
     }
 
     .settings-section{
@@ -261,6 +284,14 @@
     .logout-item:hover{
       background:#fef2f2;
     }
+    
+    .quick-links-section{
+      background:#fff;
+      border-radius:var(--radius);
+      padding:0;
+      margin-bottom:20px;
+      box-shadow:var(--shadow);
+    }
   </style>
 </head>
 <body>
@@ -286,6 +317,44 @@
       <div class="profile-avatar" id="profileAvatar">👤</div>
       <div class="profile-name" id="profileName">Y2D2</div>
       <div class="profile-email" id="profileEmail">user@email.com</div>
+      <div class="profile-details" id="profileDetails">
+        <div class="profile-detail-item">
+          <span>전공:</span> <strong id="profileMajor">미설정</strong>
+        </div>
+        <div class="profile-detail-item">
+          <span>학점:</span> <strong id="profileGpa">-</strong>
+        </div>
+        <div class="profile-detail-item">
+          <span>토익:</span> <strong id="profileToeic">-</strong>
+        </div>
+      </div>
+    </div>
+
+    <!-- 빠른 링크 -->
+    <div class="quick-links-section">
+      <div class="settings-header">🚀 빠른 링크</div>
+      
+      <div class="setting-item" onclick="goToNotices()">
+        <div class="setting-left">
+          <div class="setting-icon">📋</div>
+          <div class="setting-info">
+            <h4>공지사항 목록</h4>
+            <p>전체 공지사항 보기</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+      
+      <div class="setting-item" onclick="goToBookmarks()">
+        <div class="setting-left">
+          <div class="setting-icon">⭐</div>
+          <div class="setting-info">
+            <h4>북마크</h4>
+            <p>저장한 공지사항</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
     </div>
 
     <!-- 알림 설정 -->
@@ -341,6 +410,17 @@
         <div class="arrow">›</div>
       </div>
       
+      <div class="setting-item" onclick="openKeywordSettings()">
+        <div class="setting-left">
+          <div class="setting-icon">🔍</div>
+          <div class="setting-info">
+            <h4>키워드 필터</h4>
+            <p>관심 키워드 설정</p>
+          </div>
+        </div>
+        <div class="arrow">›</div>
+      </div>
+      
       <div class="setting-item" onclick="openCollegeSettings()">
         <div class="setting-left">
           <div class="setting-icon">🏫</div>
@@ -373,7 +453,7 @@
           <div class="setting-icon">✏️</div>
           <div class="setting-info">
             <h4>프로필 수정</h4>
-            <p>이름, 이메일 변경</p>
+            <p>이름, 전공, 학점 등 수정</p>
           </div>
         </div>
         <div class="arrow">›</div>
@@ -492,11 +572,22 @@
       }
       
       const email = currentUser.email;
-      const name = email.split('@')[0].toUpperCase();
+      const name = currentUser.name || email.split('@')[0].toUpperCase();
       
       document.getElementById('profileName').textContent = name;
       document.getElementById('profileEmail').textContent = email;
       document.getElementById('profileAvatar').textContent = name.charAt(0);
+      
+      // 프로필 세부사항 표시
+      if (currentUser.major) {
+        document.getElementById('profileMajor').textContent = currentUser.major;
+      }
+      if (currentUser.gpa) {
+        document.getElementById('profileGpa').textContent = currentUser.gpa;
+      }
+      if (currentUser.toeic_score) {
+        document.getElementById('profileToeic').textContent = currentUser.toeic_score;
+      }
     }
 
     function loadSettings() {
@@ -574,8 +665,26 @@
     }
 
     // 각 설정 페이지 함수들
+    function goToNotices() {
+      // 공지사항 목록 페이지로 이동
+      window.location.href = '/';  // 메인 크롤링 페이지로 이동
+    }
+
+    function goToBookmarks() {
+      alert('북마크한 공지사항을 표시합니다.\n(개발 중)');
+    }
+
     function openPreferences() {
       alert('관심 분야 설정 페이지로 이동합니다.\n(장학금, 인턴십, 공모전, 채용, 학사 등)');
+    }
+
+    function openKeywordSettings() {
+      const keywords = prompt('알림 받을 키워드를 입력하세요 (쉼표로 구분):\n예: AI, 장학금, 인턴십');
+      if (keywords && keywords.trim()) {
+        const keywordList = keywords.split(',').map(k => k.trim()).filter(k => k);
+        localStorage.setItem('dice_filter_keywords', JSON.stringify(keywordList));
+        showToast(`키워드가 설정되었습니다: ${keywordList.join(', ')}`);
+      }
     }
 
     function openCollegeSettings() {
@@ -583,12 +692,8 @@
     }
 
     function editProfile() {
-      const newName = prompt('새로운 이름을 입력하세요:', document.getElementById('profileName').textContent);
-      if (newName && newName.trim()) {
-        document.getElementById('profileName').textContent = newName.trim();
-        document.getElementById('profileAvatar').textContent = newName.trim().charAt(0).toUpperCase();
-        showToast('프로필이 업데이트되었습니다.');
-      }
+      alert('프로필 수정 페이지로 이동합니다.\n전공, 학점, 토익점수 등을 수정할 수 있습니다.');
+      // 실제로는 프로필 수정 페이지로 이동
     }
 
     function changePassword() {
@@ -607,13 +712,15 @@
     }
 
     function openPrivacy() {
-      alert('개인정보처리방침\n\n수집하는 정보:\n• 이메일 주소 (계정 식별용)\n• 관심 분야 (맞춤 추천용)\n\n제3자 제공: 하지 않음\n보관 기간: 탈퇴시까지');
+      alert('개인정보처리방침\n\n수집하는 정보:\n• 이메일 주소 (계정 식별용)\n• 전공, 학점, 토익점수 (맞춤 추천용)\n• 관심 분야 (맞춤 추천용)\n\n제3자 제공: 하지 않음\n보관 기간: 탈퇴시까지');
     }
 
     function logout() {
       if (confirm('정말 로그아웃하시겠습니까?')) {
         localStorage.removeItem('dice_current_user');
         localStorage.removeItem('dice_settings');
+        localStorage.removeItem('dice_token');
+        localStorage.removeItem('dice_filter_keywords');
         window.location.href = 'index.html';
       }
     }
