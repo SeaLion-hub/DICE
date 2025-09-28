@@ -1,14 +1,10 @@
 ﻿# yonsei_app.py
 """
 연세대학교 전체 단과대학 공지사항 통합 시스템 (DICE)
-- 18개 단과대학 공지사항 통합
-- PostgreSQL DB 연동
-- 회원가입/로그인 API
-- 크롤링 데이터 DB 저장
-- 업데이트된 스키마 지원
+Railway 배포 개선 버전
 """
 
-from flask import Flask, render_template_string, jsonify, send_from_directory, request
+from flask import Flask, render_template_string, jsonify, send_from_directory, request, redirect, url_for
 from datetime import datetime, timedelta
 import re
 import requests
@@ -23,74 +19,328 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import json
 import logging
+import traceback
 
 # 로깅 설정
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
 app = Flask(__name__, static_folder='.', static_url_path='')
-CORS(app)
+CORS(app, resources={r"/api/*": {"origins": "*"}})
 
 # ===== 환경 변수 설정 =====
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_xxxxxxxxxx")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-here")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-here-change-in-production")
 
-# Railway에서 제공하는 DATABASE_URL이 postgres://로 시작하는 경우 postgresql://로 변경
+# Railway의 postgres:// -> postgresql:// 변환
 if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+    logger.info("DATABASE_URL protocol updated to postgresql://")
 
-# ===== DB 연결 함수 =====
+# ===== DB 연결 함수 개선 =====
 def get_db_connection():
-    """PostgreSQL 데이터베이스 연결"""
+    """PostgreSQL 데이터베이스 연결 (에러 처리 강화)"""
     try:
         if not DATABASE_URL:
             logger.error("DATABASE_URL is not set")
             return None
-        conn = psycopg2.connect(DATABASE_URL)
+        
+        # 연결 파라미터 추가
+        conn = psycopg2.connect(
+            DATABASE_URL,
+            connect_timeout=10,
+            options='-c statement_timeout=30000'
+        )
+        conn.autocommit = False
         return conn
+    except psycopg2.OperationalError as e:
+        logger.error(f"DB 연결 실패 (OperationalError): {e}")
+        return None
     except Exception as e:
-        logger.error(f"DB 연결 실패: {e}")
+        logger.error(f"DB 연결 실패 (Exception): {e}")
+        logger.error(traceback.format_exc())
         return None
 
-def init_db():
-    """데이터베이스 초기화 - 테이블이 없으면 생성"""
+def test_db_connection():
+    """DB 연결 테스트"""
     conn = get_db_connection()
     if conn:
         try:
             with conn.cursor() as cur:
-                # 확장 설치 (권한이 없으면 무시)
-                try:
-                    cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
-                    cur.execute('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
-                except Exception as ext_err:
-                    logger.warning(f"Extension creation skipped: {ext_err}")
-                
-                # schema.sql 파일 실행 (존재하는 경우)
-                if os.path.exists('schema.sql'):
-                    with open('schema.sql', 'r', encoding='utf-8') as f:
-                        schema_content = f.read()
-                        # 여러 명령문을 나누어 실행
-                        statements = [s.strip() for s in schema_content.split(';') if s.strip()]
-                        for statement in statements:
-                            try:
-                                cur.execute(statement + ';')
-                            except psycopg2.errors.DuplicateObject:
-                                # 이미 존재하는 타입은 무시
-                                pass
-                            except Exception as e:
-                                logger.warning(f"Statement execution warning: {e}")
-                
-                conn.commit()
-                logger.info("DB 초기화 완료")
+                cur.execute("SELECT 1")
+                result = cur.fetchone()
+                logger.info(f"DB 연결 테스트 성공: {result}")
+                return True
         except Exception as e:
-            logger.error(f"DB 초기화 실패: {e}")
-            conn.rollback()
+            logger.error(f"DB 연결 테스트 실패: {e}")
+            return False
         finally:
             conn.close()
+    return False
 
+def init_db():
+    """데이터베이스 초기화 - 단계별 실행"""
+    logger.info("Starting DB initialization...")
+    
+    conn = get_db_connection()
+    if not conn:
+        logger.error("DB initialization failed - no connection")
+        return False
+    
+    try:
+        with conn.cursor() as cur:
+            # 1. Extensions 설치 시도
+            try:
+                cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
+                cur.execute('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
+                conn.commit()
+                logger.info("Extensions created successfully")
+            except Exception as ext_err:
+                logger.warning(f"Extension creation skipped: {ext_err}")
+                conn.rollback()
+            
+            # 2. ENUM 타입 생성
+            try:
+                cur.execute("""
+                    DO $$ 
+                    BEGIN
+                        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
+                            CREATE TYPE user_role AS ENUM ('student', 'admin', 'moderator');
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_category') THEN
+                            CREATE TYPE notice_category AS ENUM (
+                                'general','scholarship','internship','competition',
+                                'recruitment','academic','seminar','event'
+                            );
+                        END IF;
+                        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_status') THEN
+                            CREATE TYPE notice_status AS ENUM ('active', 'archived', 'deleted');
+                        END IF;
+                    END $$;
+                """)
+                conn.commit()
+                logger.info("ENUM types created successfully")
+            except Exception as e:
+                logger.error(f"ENUM creation error: {e}")
+                conn.rollback()
+            
+            # 3. 테이블 생성 - 순서대로
+            tables = [
+                # users 테이블
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    email VARCHAR(255) UNIQUE NOT NULL,
+                    password_hash VARCHAR(255) NOT NULL,
+                    name VARCHAR(100),
+                    student_id VARCHAR(20),
+                    major VARCHAR(100),
+                    gpa DECIMAL(3,2) CHECK (gpa >= 0 AND gpa <= 4.5),
+                    toeic_score INTEGER CHECK (toeic_score >= 0 AND toeic_score <= 990),
+                    role user_role DEFAULT 'student',
+                    is_active BOOLEAN DEFAULT true,
+                    email_verified BOOLEAN DEFAULT false,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    last_login_at TIMESTAMP WITH TIME ZONE
+                );
+                """,
+                
+                # colleges 테이블
+                """
+                CREATE TABLE IF NOT EXISTS colleges (
+                    id VARCHAR(50) PRIMARY KEY,
+                    name VARCHAR(100) NOT NULL,
+                    name_en VARCHAR(100),
+                    icon VARCHAR(10),
+                    color VARCHAR(7),
+                    url VARCHAR(255),
+                    apify_task_id VARCHAR(100),
+                    crawl_enabled BOOLEAN DEFAULT true,
+                    display_order INTEGER DEFAULT 0,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                """,
+                
+                # user_settings 테이블
+                """
+                CREATE TABLE IF NOT EXISTS user_settings (
+                    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                    push_notifications BOOLEAN DEFAULT true,
+                    email_notifications BOOLEAN DEFAULT true,
+                    deadline_alerts BOOLEAN DEFAULT true,
+                    ai_recommendations BOOLEAN DEFAULT true,
+                    notification_time TIME DEFAULT '09:00:00',
+                    deadline_alert_days INTEGER DEFAULT 3 CHECK (deadline_alert_days BETWEEN 1 AND 30),
+                    interested_categories notice_category[] DEFAULT ARRAY['general']::notice_category[],
+                    excluded_keywords TEXT[],
+                    filter_keywords TEXT[],
+                    notices_per_page INTEGER DEFAULT 20 CHECK (notices_per_page BETWEEN 10 AND 100),
+                    default_sort_order VARCHAR(20) DEFAULT 'date_desc',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                """,
+                
+                # notices 테이블
+                """
+                CREATE TABLE IF NOT EXISTS notices (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    college_id VARCHAR(50) NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
+                    title VARCHAR(500) NOT NULL,
+                    content TEXT,
+                    department VARCHAR(200),
+                    writer VARCHAR(100),
+                    original_id VARCHAR(100),
+                    original_url VARCHAR(500),
+                    category notice_category DEFAULT 'general',
+                    status notice_status DEFAULT 'active',
+                    published_date DATE,
+                    deadline_date DATE,
+                    event_date DATE,
+                    view_count INTEGER DEFAULT 0,
+                    click_count INTEGER DEFAULT 0,
+                    crawled_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    content_hash VARCHAR(64),
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT unique_notice_per_college UNIQUE (college_id, original_id)
+                );
+                """,
+                
+                # 나머지 테이블들
+                """
+                CREATE TABLE IF NOT EXISTS user_college_subscriptions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    college_id VARCHAR(50) NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
+                    notifications_enabled BOOLEAN DEFAULT true,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, college_id)
+                );
+                """,
+                
+                """
+                CREATE TABLE IF NOT EXISTS user_notice_interactions (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    notice_id UUID NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+                    viewed BOOLEAN DEFAULT false,
+                    clicked BOOLEAN DEFAULT false,
+                    bookmarked BOOLEAN DEFAULT false,
+                    hidden BOOLEAN DEFAULT false,
+                    viewed_at TIMESTAMP WITH TIME ZONE,
+                    clicked_at TIMESTAMP WITH TIME ZONE,
+                    bookmarked_at TIMESTAMP WITH TIME ZONE,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, notice_id)
+                );
+                """,
+                
+                """
+                CREATE TABLE IF NOT EXISTS crawl_logs (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    college_id VARCHAR(50) REFERENCES colleges(id) ON DELETE SET NULL,
+                    task_id VARCHAR(100),
+                    run_id VARCHAR(100),
+                    status VARCHAR(50),
+                    error_message TEXT,
+                    notices_fetched INTEGER DEFAULT 0,
+                    notices_new INTEGER DEFAULT 0,
+                    notices_updated INTEGER DEFAULT 0,
+                    started_at TIMESTAMP WITH TIME ZONE,
+                    completed_at TIMESTAMP WITH TIME ZONE,
+                    duration_seconds INTEGER,
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+                );
+                """
+            ]
+            
+            # 테이블 생성
+            for i, table_sql in enumerate(tables):
+                try:
+                    cur.execute(table_sql)
+                    conn.commit()
+                    logger.info(f"Table {i+1}/{len(tables)} created successfully")
+                except Exception as e:
+                    logger.error(f"Table {i+1} creation error: {e}")
+                    conn.rollback()
+            
+            # 4. 인덱스 생성
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);",
+                "CREATE INDEX IF NOT EXISTS idx_notices_college ON notices(college_id);",
+                "CREATE INDEX IF NOT EXISTS idx_notices_published ON notices(published_date DESC);",
+            ]
+            
+            for index_sql in indexes:
+                try:
+                    cur.execute(index_sql)
+                    conn.commit()
+                except Exception as e:
+                    logger.warning(f"Index creation warning: {e}")
+                    conn.rollback()
+            
+            # 5. 초기 데이터 삽입 (colleges)
+            cur.execute("SELECT COUNT(*) FROM colleges")
+            college_count = cur.fetchone()[0]
+            
+            if college_count == 0:
+                logger.info("Inserting initial college data...")
+                colleges_data = [
+                    ('main','메인 공지사항','🏫','#003876','https://www.yonsei.ac.kr','VsNDqFr5fLLIi2Xh1',0),
+                    ('liberal','문과대학','📚','#8B4513','https://liberal.yonsei.ac.kr','L5AS9TZWUMorttUJJ',1),
+                    ('business','상경대학','📊','#FFB700','https://soe.yonsei.ac.kr','yJ8Rp9AhTSVCw7Yt8',2),
+                    ('management','경영대학','💼','#1E90FF','https://ysb.yonsei.ac.kr','DjsOsls6pCpaQaKq9',3),
+                    ('engineering','공과대학','⚙️','#DC143C','https://engineering.yonsei.ac.kr','tdcYhb8OaDnBHI8jJr',4),
+                    ('life','생명시스템대학','🧬','#228B22','https://sys.yonsei.ac.kr','gOKavS1YNKhNUVsNQ',5),
+                    ('ai','인공지능융합대학','🤖','#9370DB','https://ai.yonsei.ac.kr','qb6M6hbdm2fnhxfeg',6),
+                    ('theology','신과대학','✝️','#4B0082','https://theology.yonsei.ac.kr','9akDlFeStRHdeps4t',7),
+                    ('social','사회과학대학','🏛️','#2E8B57','https://yeri.yonsei.ac.kr/socsci','hNSAPYSS35RscOWWm',8),
+                    ('music','음악대학','🎵','#FF1493','https://music.yonsei.ac.kr','B3xYzP1Jqo1jVH1Me',9),
+                    ('human','생활과학대학','🏠','#FF6347','https://che.yonsei.ac.kr','K5kXEuXSyZzY5uwpn',10),
+                    ('education','교육과학대학','🎓','#4169E1','https://educa.yonsei.ac.kr','9XfmKGnPdDQWZkUjW',11),
+                    ('underwood','언더우드국제대학','🌏','#FF8C00','https://uic.yonsei.ac.kr','Xz2t1SAdshoLSDslB',12),
+                    ('global','글로벌인재대학','🌐','#008B8B','https://global.yonsei.ac.kr','BwiB4aHdY2uyP4txl',13),
+                    ('medicine','의과대학','⚕️','#B22222','https://medicine.yonsei.ac.kr','oAgxPnIMOv2IYhZej',14),
+                    ('dentistry','치과대학','🦷','#5F9EA0','https://dentistry.yonsei.ac.kr','etPqNCyaZNI4A8sEl',15),
+                    ('nursing','간호대학','💊','#DB7093','https://nursing.yonsei.ac.kr','I04xneYTZMJ8jAn4r',16),
+                    ('pharmacy','약학대학','💉','#663399','https://pharmacy.yonsei.ac.kr','gjqRcgjHJr4frQhma',17)
+                ]
+                
+                for college in colleges_data:
+                    try:
+                        cur.execute("""
+                            INSERT INTO colleges (id, name, icon, color, url, apify_task_id, display_order)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (id) DO NOTHING
+                        """, college)
+                    except Exception as e:
+                        logger.warning(f"College insert warning: {e}")
+                
+                conn.commit()
+                logger.info("Initial college data inserted")
+            
+            logger.info("DB initialization completed successfully!")
+            return True
+            
+    except Exception as e:
+        logger.error(f"DB initialization failed: {e}")
+        logger.error(traceback.format_exc())
+        return False
+    finally:
+        conn.close()
+
+# ============= 기존 함수들 (변경 없음) =============
 def format_content(content):
     """공지사항 내용 포맷팅"""
     if not content:
@@ -101,8 +351,31 @@ def format_content(content):
     content = re.sub(r'\n{3,}', '\n\n', content)
     return content.strip()
 
+def detect_notice_category(notice):
+    """공지사항 카테고리 자동 감지"""
+    title = (notice.get('title', '') or '').lower()
+    content = (notice.get('content', '') or '').lower()
+    text = f"{title} {content}"
+    
+    if any(keyword in text for keyword in ['장학', 'scholarship']):
+        return 'scholarship'
+    elif any(keyword in text for keyword in ['인턴', 'intern']):
+        return 'internship'
+    elif any(keyword in text for keyword in ['공모', 'competition', '대회']):
+        return 'competition'
+    elif any(keyword in text for keyword in ['채용', 'recruit', '모집']):
+        return 'recruitment'
+    elif any(keyword in text for keyword in ['수강', '강의', '학사', 'academic']):
+        return 'academic'
+    elif any(keyword in text for keyword in ['세미나', 'seminar', '강연']):
+        return 'seminar'
+    elif any(keyword in text for keyword in ['행사', 'event', '축제']):
+        return 'event'
+    else:
+        return 'general'
+
 def save_notices_to_db(college_key, notices):
-    """크롤링한 공지사항을 DB에 저장 (새 스키마 버전)"""
+    """크롤링한 공지사항을 DB에 저장"""
     conn = get_db_connection()
     if not conn:
         return False
@@ -113,12 +386,10 @@ def save_notices_to_db(college_key, notices):
             notices_updated = 0
             
             for notice in notices:
-                # content_hash 생성
                 content_hash = hashlib.sha256(
                     f"{notice['title']}{notice.get('content', '')}".encode()
                 ).hexdigest()
                 
-                # 날짜 파싱
                 published_date = None
                 if notice.get('date'):
                     try:
@@ -126,10 +397,8 @@ def save_notices_to_db(college_key, notices):
                     except:
                         pass
                 
-                # 카테고리 자동 감지
                 category = detect_notice_category(notice)
                 
-                # notices 테이블에 저장 (중복 시 업데이트)
                 cur.execute("""
                     INSERT INTO notices (
                         college_id, title, content, department, writer,
@@ -158,12 +427,11 @@ def save_notices_to_db(college_key, notices):
                 ))
                 
                 result = cur.fetchone()
-                if result and result[0]:  # is_new
+                if result and result[0]:
                     notices_new += 1
                 else:
                     notices_updated += 1
             
-            # crawl_logs에 기록
             cur.execute("""
                 INSERT INTO crawl_logs (
                     college_id, status, notices_fetched,
@@ -186,38 +454,14 @@ def save_notices_to_db(college_key, notices):
     finally:
         conn.close()
 
-def detect_notice_category(notice):
-    """공지사항 카테고리 자동 감지"""
-    title = (notice.get('title', '') or '').lower()
-    content = (notice.get('content', '') or '').lower()
-    text = f"{title} {content}"
-    
-    if any(keyword in text for keyword in ['장학', 'scholarship']):
-        return 'scholarship'
-    elif any(keyword in text for keyword in ['인턴', 'intern']):
-        return 'internship'
-    elif any(keyword in text for keyword in ['공모', 'competition', '대회']):
-        return 'competition'
-    elif any(keyword in text for keyword in ['채용', 'recruit', '모집']):
-        return 'recruitment'
-    elif any(keyword in text for keyword in ['수강', '강의', '학사', 'academic']):
-        return 'academic'
-    elif any(keyword in text for keyword in ['세미나', 'seminar', '강연']):
-        return 'seminar'
-    elif any(keyword in text for keyword in ['행사', 'event', '축제']):
-        return 'event'
-    else:
-        return 'general'
-
 def get_notices_from_db(college_key, limit=50):
-    """DB에서 공지사항 조회 (새 스키마 버전)"""
+    """DB에서 공지사항 조회"""
     conn = get_db_connection()
     if not conn:
         return []
     
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # colleges 테이블에서 정보 가져오기
             if college_key == 'all':
                 cur.execute("""
                     SELECT n.id, n.title, n.content, n.department as writer,
@@ -246,13 +490,11 @@ def get_notices_from_db(college_key, limit=50):
                 """, (college_key, limit))
             
             notices = cur.fetchall()
-            # 날짜 및 조회수 포맷팅
             for notice in notices:
                 if notice['date']:
                     notice['date'] = notice['date'].strftime('%Y-%m-%d')
                 notice['views'] = f"{notice['views']:,}"
                 notice['id'] = str(notice['id'])
-                # college 정보 추가 (호환성을 위해)
                 notice['college'] = {
                     'key': notice['college_id'],
                     'name': notice['college_name'],
@@ -360,167 +602,185 @@ def get_apify_data(task_id):
         logger.error(f"Error fetching Apify data: {e}")
         return None
 
-# ============= AUTH API =============
+# ============= AUTH API 개선 =============
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """회원가입 API (새 스키마 버전)"""
-    data = request.get_json()
-    conn = get_db_connection()
-    
-    if not conn:
-        return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
-    
+    """회원가입 API"""
     try:
-        # 비밀번호 해싱
-        password_hash = bcrypt.hashpw(
-            data['password'].encode('utf-8'), 
-            bcrypt.gensalt()
-        ).decode('utf-8')
+        data = request.get_json()
         
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # 사용자 생성
-            cur.execute("""
-                INSERT INTO users (
-                    email, password_hash, name, student_id,
-                    major, gpa, toeic_score
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
-                RETURNING id, email, name, student_id, major, gpa, toeic_score
-            """, (
-                data['email'], password_hash, data.get('name'),
-                data.get('student_id'), data.get('major'),
-                data.get('gpa'), data.get('toeic_score')
-            ))
+        if not data or not data.get('email') or not data.get('password'):
+            return jsonify({'success': False, 'message': '이메일과 비밀번호는 필수입니다'}), 400
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Register: DB connection failed")
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            password_hash = bcrypt.hashpw(
+                data['password'].encode('utf-8'), 
+                bcrypt.gensalt()
+            ).decode('utf-8')
             
-            user = cur.fetchone()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    INSERT INTO users (
+                        email, password_hash, name, student_id,
+                        major, gpa, toeic_score
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id, email, name, student_id, major, gpa, toeic_score
+                """, (
+                    data['email'], password_hash, data.get('name'),
+                    data.get('student_id'), data.get('major'),
+                    data.get('gpa'), data.get('toeic_score')
+                ))
+                
+                user = cur.fetchone()
+                
+                cur.execute("""
+                    INSERT INTO user_settings (user_id)
+                    VALUES (%s)
+                """, (user['id'],))
+                
+                conn.commit()
+                
+                token = jwt.encode(
+                    {'user_id': str(user['id']), 'email': user['email']},
+                    JWT_SECRET_KEY,
+                    algorithm='HS256'
+                )
+                
+                logger.info(f"User registered successfully: {user['email']}")
+                
+                return jsonify({
+                    'success': True,
+                    'user': {
+                        'id': str(user['id']),
+                        'email': user['email'],
+                        'name': user['name'],
+                        'major': user['major'],
+                        'gpa': float(user['gpa']) if user['gpa'] else None,
+                        'toeic_score': user['toeic_score']
+                    },
+                    'token': token
+                })
+                
+        except psycopg2.IntegrityError:
+            conn.rollback()
+            return jsonify({'success': False, 'message': '이미 등록된 이메일입니다'}), 400
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"회원가입 오류: {e}")
+            return jsonify({'success': False, 'message': '회원가입 처리 중 오류가 발생했습니다'}), 500
+        finally:
+            conn.close()
             
-            # user_settings 기본값 생성
-            cur.execute("""
-                INSERT INTO user_settings (user_id)
-                VALUES (%s)
-            """, (user['id'],))
-            
-            conn.commit()
-            
-            # JWT 토큰 생성
-            token = jwt.encode(
-                {'user_id': str(user['id']), 'email': user['email']},
-                JWT_SECRET_KEY,
-                algorithm='HS256'
-            )
-            
-            return jsonify({
-                'success': True,
-                'user': {
-                    'id': str(user['id']),
-                    'email': user['email'],
-                    'name': user['name'],
-                    'major': user['major'],
-                    'gpa': float(user['gpa']) if user['gpa'] else None,
-                    'toeic_score': user['toeic_score']
-                },
-                'token': token
-            })
-            
-    except psycopg2.IntegrityError:
-        return jsonify({'success': False, 'message': '이미 등록된 이메일입니다'}), 400
     except Exception as e:
-        logger.error(f"회원가입 오류: {e}")
-        return jsonify({'success': False, 'message': '회원가입 실패'}), 500
-    finally:
-        conn.close()
+        logger.error(f"Register error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'message': '서버 오류가 발생했습니다'}), 500
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """로그인 API (새 스키마 버전)"""
-    data = request.get_json()
-    conn = get_db_connection()
-    
-    if not conn:
-        return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
-    
+    """로그인 API"""
     try:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id, email, password_hash, name, student_id,
-                       major, gpa, toeic_score
-                FROM users
-                WHERE email = %s AND is_active = true
-            """, (data['email'],))
-            
-            user = cur.fetchone()
-            
-            if not user:
-                return jsonify({'success': False, 'message': '사용자를 찾을 수 없습니다'}), 404
-            
-            # 비밀번호 검증
-            if not bcrypt.checkpw(data['password'].encode('utf-8'), 
-                                user['password_hash'].encode('utf-8')):
-                return jsonify({'success': False, 'message': '비밀번호가 일치하지 않습니다'}), 401
-            
-            # 마지막 로그인 시간 업데이트
-            cur.execute("""
-                UPDATE users SET last_login_at = CURRENT_TIMESTAMP
-                WHERE id = %s
-            """, (user['id'],))
-            conn.commit()
-            
-            # JWT 토큰 생성
-            token = jwt.encode(
-                {'user_id': str(user['id']), 'email': user['email']},
-                JWT_SECRET_KEY,
-                algorithm='HS256'
-            )
-            
-            return jsonify({
-                'success': True,
-                'user': {
-                    'id': str(user['id']),
-                    'email': user['email'],
-                    'name': user['name'],
-                    'major': user['major'],
-                    'gpa': float(user['gpa']) if user['gpa'] else None,
-                    'toeic_score': user['toeic_score']
-                },
-                'token': token
-            })
+        data = request.get_json()
+        
+        if not data or not data.get('email') or not data.get('password'):
+            return jsonify({'success': False, 'message': '이메일과 비밀번호를 입력해주세요'}), 400
+        
+        conn = get_db_connection()
+        if not conn:
+            logger.error("Login: DB connection failed")
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT id, email, password_hash, name, student_id,
+                           major, gpa, toeic_score
+                    FROM users
+                    WHERE email = %s AND is_active = true
+                """, (data['email'],))
+                
+                user = cur.fetchone()
+                
+                if not user:
+                    return jsonify({'success': False, 'message': '사용자를 찾을 수 없습니다'}), 404
+                
+                if not bcrypt.checkpw(data['password'].encode('utf-8'), 
+                                    user['password_hash'].encode('utf-8')):
+                    return jsonify({'success': False, 'message': '비밀번호가 일치하지 않습니다'}), 401
+                
+                cur.execute("""
+                    UPDATE users SET last_login_at = CURRENT_TIMESTAMP
+                    WHERE id = %s
+                """, (user['id'],))
+                conn.commit()
+                
+                token = jwt.encode(
+                    {'user_id': str(user['id']), 'email': user['email']},
+                    JWT_SECRET_KEY,
+                    algorithm='HS256'
+                )
+                
+                logger.info(f"User logged in successfully: {user['email']}")
+                
+                return jsonify({
+                    'success': True,
+                    'user': {
+                        'id': str(user['id']),
+                        'email': user['email'],
+                        'name': user['name'],
+                        'major': user['major'],
+                        'gpa': float(user['gpa']) if user['gpa'] else None,
+                        'toeic_score': user['toeic_score']
+                    },
+                    'token': token
+                })
+                
+        except Exception as e:
+            logger.error(f"로그인 처리 오류: {e}")
+            return jsonify({'success': False, 'message': '로그인 처리 중 오류가 발생했습니다'}), 500
+        finally:
+            conn.close()
             
     except Exception as e:
-        logger.error(f"로그인 오류: {e}")
-        return jsonify({'success': False, 'message': '로그인 실패'}), 500
-    finally:
-        conn.close()
+        logger.error(f"Login error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({'success': False, 'message': '서버 오류가 발생했습니다'}), 500
 
-# ============= 페이지 라우트 =============
+# ============= 페이지 라우트 개선 =============
 @app.route('/')
 def index():
-    """메인 페이지 - index.html 제공"""
+    """메인 페이지"""
     return send_from_directory(app.static_folder, 'index.html')
 
-@app.route('/auth')
+@app.route('/auth.html')
 def serve_auth():
     return send_from_directory(app.static_folder, 'auth.html')
 
-@app.route('/dashboard')
+@app.route('/dashboard.html')
 def serve_dashboard():
     return send_from_directory(app.static_folder, 'dashboard.html')
 
-@app.route('/settings')
+@app.route('/settings.html')
 def serve_settings():
     return send_from_directory(app.static_folder, 'settings.html')
 
-# SPA 라우팅을 위한 catch-all 라우트
-@app.route('/<path:path>')
-def catch_all(path):
-    """정적 파일이 있으면 서빙, 없으면 해당 HTML로 리다이렉트"""
-    file_path = os.path.join(app.static_folder, path)
-    if os.path.exists(file_path) and os.path.isfile(file_path):
-        return send_from_directory(app.static_folder, path)
-    else:
-        # HTML 페이지 요청인 경우 해당 파일로 리다이렉트
-        if path in ['auth', 'dashboard', 'settings']:
-            return send_from_directory(app.static_folder, f'{path}.html')
-        # 그 외의 경우 index.html로 리다이렉트
-        return send_from_directory(app.static_folder, 'index.html')
+# 추가 라우트 - Railway에서 필요
+@app.route('/auth')
+def auth_redirect():
+    return redirect('/auth.html')
+
+@app.route('/dashboard')
+def dashboard_redirect():
+    return redirect('/dashboard.html')
+
+@app.route('/settings')
+def settings_redirect():
+    return redirect('/settings.html')
 
 # ============= API 라우트 =============
 @app.route('/api/colleges')
@@ -535,27 +795,20 @@ def get_colleges():
 @app.route('/api/notices/<college_key>')
 def get_notices(college_key):
     """특정 단과대학 공지사항 조회"""
-    # DB에서 단과대학 정보 확인
     colleges = get_colleges_from_db()
     if college_key != 'all' and college_key not in colleges:
         return jsonify({'success': False, 'message': 'Invalid college'})
     
-    notices = []
-    
-    # 먼저 DB에서 조회
     notices = get_notices_from_db(college_key)
     
-    # DB에 데이터가 없고 특정 단과대학이며 Apify 토큰이 있으면 크롤링
     if not notices and college_key != 'all' and APIFY_TOKEN != 'apify_api_xxxxxxxxxx':
         college = colleges.get(college_key)
         if college and college.get('task_id'):
             apify_data = get_apify_data(college['task_id'])
             if apify_data:
-                # DB에 저장
                 save_notices_to_db(college_key, apify_data)
                 notices = get_notices_from_db(college_key)
     
-    # 응답 데이터 구성
     college_info = None
     if college_key == 'all':
         college_info = {
@@ -580,116 +833,13 @@ def get_notices(college_key):
         'notices': notices
     })
 
-@app.route('/notice/<college_key>/<notice_id>')
-def notice_detail(college_key, notice_id):
-    """공지사항 상세 페이지"""
-    colleges = get_colleges_from_db()
-    if college_key not in colleges:
-        return "잘못된 접근입니다.", 404
-    
-    college = colleges[college_key]
-    notice = None
-    
-    # DB에서 상세 정보 조회
-    conn = get_db_connection()
-    if conn:
-        try:
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("""
-                    SELECT n.*, c.name as college_name, c.icon as college_icon, c.color as college_color
-                    FROM notices n
-                    JOIN colleges c ON n.college_id = c.id
-                    WHERE n.id = %s OR n.original_id = %s
-                    LIMIT 1
-                """, (notice_id, notice_id))
-                
-                notice_data = cur.fetchone()
-                if notice_data:
-                    notice = {
-                        'id': str(notice_data['id']),
-                        'title': notice_data['title'],
-                        'content': notice_data['content'] or '',
-                        'date': notice_data['published_date'].strftime('%Y-%m-%d') if notice_data['published_date'] else '',
-                        'url': notice_data['original_url'] or college['url'],
-                        'department': notice_data['department'] or notice_data['college_name'],
-                        'views': f"{notice_data['view_count']:,}"
-                    }
-                    
-                    # 조회수 증가 함수 호출
-                    cur.execute("SELECT increment_notice_view_count(%s)", (notice_data['id'],))
-                    conn.commit()
-        except Exception as e:
-            logger.error(f"상세 조회 오류: {e}")
-        finally:
-            conn.close()
-    
-    if not notice:
-        return "공지사항을 찾을 수 없습니다.", 404
-    
-    notice['formatted_content'] = format_content(notice['content'])
-    
-    # 단과대학 정보 추가
-    college_info = {
-        'name': college['name'],
-        'icon': college['icon'],
-        'color': college['color']
-    }
-    
-    DETAIL_TEMPLATE = """
-    <!DOCTYPE html>
-    <html lang="ko">
-    <head>
-      <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>{{ notice.title }} - 연세대학교 공지사항</title>
-      <style>
-        *{margin:0;padding:0;box-sizing:border-box}
-        body{font-family:'Noto Sans KR',-apple-system,sans-serif;background:#f5f7fa;min-height:100vh;padding:20px}
-        .container{max-width:900px;margin:0 auto}
-        .header{background:linear-gradient(135deg,#003876 0%,#005BBB 100%);color:white;padding:30px;border-radius:20px 20px 0 0;box-shadow:0 5px 20px rgba(0,0,0,0.1)}
-        .back-button{display:inline-flex;gap:8px;background:rgba(255,255,255,0.2);padding:10px 20px;border-radius:10px;color:white;text-decoration:none;transition:.3s;margin-bottom:20px}
-        .back-button:hover{background:rgba(255,255,255,0.3); transform:translateX(-4px)}
-        .college-badge{display:inline-flex;gap:10px;background:rgba(255,255,255,0.2);padding:8px 16px;border-radius:20px;margin-bottom:15px}
-        .notice-title{font-size:1.8rem;font-weight:600;margin-bottom:20px;line-height:1.4}
-        .notice-meta{display:flex;gap:30px;font-size:.95rem;opacity:.9}
-        .content-wrapper{background:white;padding:40px;border-radius:0 0 20px 20px;box-shadow:0 5px 20px rgba(0,0,0,0.1);margin-bottom:30px}
-        .notice-content{font-size:1.05rem;line-height:1.8;color:#333;white-space:pre-wrap;word-wrap:break-word}
-        .action-buttons{background:white;padding:30px;border-radius:20px;box-shadow:0 5px 20px rgba(0,0,0,0.1);display:flex;gap:15px;justify-content:center;flex-wrap:wrap}
-        .btn{padding:12px 30px;border-radius:10px;text-decoration:none;font-weight:500;transition:.3s;display:inline-flex;gap:8px}
-        .btn-primary{background:#003876;color:white}.btn-primary:hover{background:#002855; transform:translateY(-2px); box-shadow:0 5px 15px rgba(0,0,0,0.2)}
-        .btn-secondary{background:#e0e0e0;color:#333}.btn-secondary:hover{background:#d0d0d0}
-        @media (max-width:768px){.header{padding:20px}.notice-title{font-size:1.4rem}.content-wrapper{padding:25px}.notice-meta{flex-direction:column;gap:10px}}
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <a href="/dashboard" class="back-button">← 목록으로 돌아가기</a>
-          <div class="college-badge"><span style="font-size:1.2rem">{{ college.icon }}</span><span>{{ college.name }}</span></div>
-          <h1 class="notice-title">{{ notice.title }}</h1>
-          <div class="notice-meta">
-            <div>📝 {{ notice.department }}</div>
-            <div>📅 {{ notice.date }}</div>
-            {% if notice.views %}<div>👁 조회 {{ notice.views }}</div>{% endif %}
-          </div>
-        </div>
-        <div class="content-wrapper">
-          <div class="notice-content">{{ notice.formatted_content }}</div>
-        </div>
-        <div class="action-buttons">
-          <a href="{{ notice.url }}" target="_blank" class="btn btn-primary">🔗 원본 페이지 보기</a>
-          <a href="/dashboard" class="btn btn-secondary">📋 목록으로</a>
-        </div>
-      </div>
-    </body>
-    </html>
-    """
-    return render_template_string(DETAIL_TEMPLATE, notice=notice, college=college_info)
-
 @app.route('/api/health')
 def health_check():
     """시스템 상태 확인"""
     db_connected = False
     colleges_count = 0
+    users_count = 0
+    notices_count = 0
     
     try:
         conn = get_db_connection()
@@ -698,21 +848,53 @@ def health_check():
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM colleges")
                 colleges_count = cur.fetchone()[0]
+                
+                cur.execute("SELECT COUNT(*) FROM users")
+                users_count = cur.fetchone()[0]
+                
+                cur.execute("SELECT COUNT(*) FROM notices")
+                notices_count = cur.fetchone()[0]
             conn.close()
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
     
     return jsonify({
-        'status': 'healthy',
-        'message': 'DICE 서버가 정상 작동 중입니다',
+        'status': 'healthy' if db_connected else 'degraded',
+        'message': 'DICE 서버가 정상 작동 중입니다' if db_connected else 'DB 연결 문제가 있습니다',
         'timestamp': datetime.now().isoformat(),
-        'colleges_count': colleges_count,
-        'db_connected': db_connected
+        'db_connected': db_connected,
+        'stats': {
+            'colleges': colleges_count,
+            'users': users_count,
+            'notices': notices_count
+        }
+    })
+
+@app.route('/api/db/test')
+def test_db():
+    """DB 연결 테스트 엔드포인트"""
+    result = test_db_connection()
+    return jsonify({
+        'success': result,
+        'database_url_configured': bool(DATABASE_URL),
+        'message': 'DB 연결 성공' if result else 'DB 연결 실패'
+    })
+
+@app.route('/api/db/init')
+def init_db_endpoint():
+    """DB 초기화 엔드포인트 (개발용)"""
+    result = init_db()
+    return jsonify({
+        'success': result,
+        'message': 'DB 초기화 성공' if result else 'DB 초기화 실패'
     })
 
 # 오류 핸들러
 @app.errorhandler(404)
 def not_found(error):
+    # HTML 파일 요청인 경우 index.html로 리다이렉트
+    if request.path.endswith('.html'):
+        return send_from_directory(app.static_folder, 'index.html')
     return jsonify({'error': 'Not found'}), 404
 
 @app.errorhandler(500)
@@ -721,17 +903,26 @@ def internal_error(error):
     return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
-    # DB 초기화
-    init_db()
-    
-    # Railway 환경에서는 PORT 환경 변수를 사용
-    PORT = int(os.getenv('PORT', 8080))
-    
+    # Railway 배포 시작
     logger.info("="*60)
     logger.info("🎓 연세대학교 통합 공지사항 시스템 (DICE)")
     logger.info("="*60)
+    logger.info(f"💾 DATABASE_URL 설정: {bool(DATABASE_URL)}")
+    
+    # DB 연결 테스트
+    if test_db_connection():
+        logger.info("✅ DB 연결 테스트 성공")
+        # DB 초기화
+        if init_db():
+            logger.info("✅ DB 초기화 완료")
+        else:
+            logger.warning("⚠️ DB 초기화 실패 - 수동으로 /api/db/init 접근 필요")
+    else:
+        logger.error("❌ DB 연결 실패 - DATABASE_URL 확인 필요")
+    
+    # Railway 환경에서는 PORT 환경 변수를 사용
+    PORT = int(os.getenv('PORT', 8080))
     logger.info(f"🌐 서버 포트: {PORT}")
-    logger.info(f"💾 DB 연결: {bool(DATABASE_URL)}")
     logger.info("="*60)
     
     app.run(debug=False, host='0.0.0.0', port=PORT)
