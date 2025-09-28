@@ -44,20 +44,26 @@ RE_INS   = re.compile(r"^\s*insert\b", re.I)
 RE_VIEW  = re.compile(r"^\s*create\s+(or\s+replace\s+)?view\b", re.I)
 
 def is_users_create(stmt: str) -> bool:
-    # users 테이블 생성문만 정확히 찾기 (user_settings 등 제외)
+    # users 테이블 생성문만 정확히 찾기
     n = normalize_sql(stmt)
     if not n.startswith("create table"):
         return False
     
-    # 정확한 users 테이블만 찾는 패턴
+    # 정확한 users 테이블만 찾는 패턴 (더 유연하게)
     patterns = [
         r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?(\"?public\"?\.)?\"?users\"?\s*\(",
-        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?users\s*\("
+        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?users\s*\(",
+        r"create\s+table.*if\s+not\s+exists\s+users\s*\("
     ]
     
     for pattern in patterns:
         if re.search(pattern, n):
+            print(f"✅ users 테이블 패턴 매치: {pattern}")
             return True
+    
+    # 디버깅을 위해 'users' 키워드가 있는 경우 출력
+    if 'users' in n and 'create table' in n:
+        print(f"🔍 users 키워드 발견하지만 패턴 불일치: {n[:100]}...")
     
     return False
 
@@ -172,7 +178,7 @@ def apply_schema(engine, sql: str):
             print("🚨 schema.sql에 users 테이블이 없음. 동적으로 생성합니다.")
             users_table_sql = """
             CREATE TABLE IF NOT EXISTS users (
-                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
                 email VARCHAR(255) UNIQUE NOT NULL,
                 password_hash VARCHAR(255) NOT NULL,
                 name VARCHAR(100),
@@ -185,7 +191,36 @@ def apply_schema(engine, sql: str):
                 email_verified BOOLEAN DEFAULT false,
                 created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                last_login_at TIMESTAMP WITH TIME ZONE
+                last_login_at TIMESTAMP WITH TIME ZONE,
+                CONSTRAINT email_format CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}
+
+    print(f"\n🚀 실행 순서:")
+    print(f"  1. Extensions: {len(buckets['ext'])} statements")
+    print(f"  2. Types: {len(buckets['type'])} statements") 
+    print(f"  3. Tables(users first): {len(buckets['table_users'])} statements")
+    print(f"  4. Tables(others): {len(buckets['table'])} statements")
+
+    # 실행 순서
+    run_statements(engine, buckets["ext"],         "Extensions")
+    run_statements(engine, buckets["type"],        "Types")
+    run_statements(engine, buckets["table_users"], "Tables(users first)")
+    run_statements(engine, buckets["table"],       "Tables(others)")
+    run_statements(engine, buckets["index"],       "Indexes")
+    run_statements(engine, buckets["func"],        "Functions")
+    run_statements(engine, buckets["trigger"],     "Triggers")
+    run_statements(engine, buckets["insert"],      "Initial Data")
+    run_statements(engine, buckets["view"],        "Views")
+    run_statements(engine, buckets["other"],       "Other")
+
+def main():
+    db_url = get_db_url()
+    engine = create_engine(db_url, pool_pre_ping=True)
+    schema_sql = load_schema_sql("schema.sql")
+    apply_schema(engine, schema_sql)
+    print("✅ schema.sql 적용 완료")
+
+if __name__ == "__main__":
+    main())
             );
             """
             buckets["table_users"].append(users_table_sql)
