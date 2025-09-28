@@ -8,3 +8,4 @@ bcrypt
 PyJWT
 SQLAlchemy==2.0.30
 psycopg[binary]==3.2.1
+sqlparse==0.5.1
