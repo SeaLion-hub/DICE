@@ -46,11 +46,27 @@ RE_VIEW  = re.compile(r"^\s*create\s+(or\s+replace\s+)?view\b", re.I)
 def is_users_create(stmt: str) -> bool:
     # users 테이블 생성문을 탄탄하게 잡기 (schema.qualify/개행/공백 모두 허용)
     n = normalize_sql(stmt)
-    return (
-        n.startswith("create table") and
-        re.search(r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?(\"?public\"?\.)?\"?users\"?\b", n)
-        is not None
-    )
+    if not n.startswith("create table"):
+        return False
+    
+    # 더 포괄적인 패턴으로 users 테이블 찾기
+    patterns = [
+        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?(\"?public\"?\.)?\"?users\"?\s*\(",
+        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?users\s*\(",
+        r"create\s+table.*\busers\s*\("
+    ]
+    
+    for pattern in patterns:
+        if re.search(pattern, n):
+            return True
+    
+    # 추가 체크: 'users' 단어가 있고 테이블 생성문인지 확인
+    if 'users' in n and 'create table' in n:
+        # 다른 테이블명에 users가 포함된 경우 제외 (user_settings 등)
+        if not any(word in n for word in ['user_settings', 'user_college', 'user_notice']):
+            return True
+    
+    return False
 
 def bucketize(statements):
     buckets = {
@@ -128,14 +144,50 @@ def apply_schema(engine, sql: str):
     stmts = split_statements(sql)
     buckets = bucketize(stmts)
 
+    # 디버그: 전체 테이블 생성문들 출력
+    print(f"\n🔍 디버그: 총 {len(stmts)} 개 문장 발견")
+    print(f"📊 버킷 상태:")
+    for bucket_name, bucket_stmts in buckets.items():
+        print(f"  {bucket_name}: {len(bucket_stmts)} statements")
+    
+    # 테이블 생성문들 검사
+    print(f"\n📋 테이블 생성문들:")
+    all_table_stmts = buckets["table_users"] + buckets["table"]
+    for i, stmt in enumerate(all_table_stmts):
+        normalized = normalize_sql(stmt)
+        table_name = "UNKNOWN"
+        if "create table" in normalized:
+            # 테이블 이름 추출 시도
+            match = re.search(r"create\s+table\s+(if\s+not\s+exists\s+)?(\w+)", normalized)
+            if match:
+                table_name = match.group(2)
+        print(f"  {i+1}. {table_name} - users 체크: {is_users_create(stmt)}")
+
     # users 테이블이 정말 버킷에 들어갔는지 가드
     if not buckets["table_users"]:
+        print("⚠️ users 테이블이 table_users 버킷에 없음. 다른 버킷에서 찾는 중...")
         # 최후의 보루: 테이블들 중에서 users 포함된 문장을 찾아 빼오기
         for s in list(buckets["table"]):
             if is_users_create(s):
+                print(f"✅ users 테이블 발견, table_users 버킷으로 이동")
                 buckets["table_users"].append(s)
                 buckets["table"].remove(s)
                 break
+        
+        # 여전히 없다면 모든 문장 검사
+        if not buckets["table_users"]:
+            print("🔍 모든 문장에서 users 테이블 검색 중...")
+            for bucket_name, bucket_stmts in buckets.items():
+                for s in bucket_stmts:
+                    if 'users' in normalize_sql(s) and 'create table' in normalize_sql(s):
+                        print(f"🎯 {bucket_name} 버킷에서 users 관련 문장 발견:")
+                        print(f"   {normalize_sql(s)[:100]}...")
+
+    print(f"\n🚀 실행 순서:")
+    print(f"  1. Extensions: {len(buckets['ext'])} statements")
+    print(f"  2. Types: {len(buckets['type'])} statements") 
+    print(f"  3. Tables(users first): {len(buckets['table_users'])} statements")
+    print(f"  4. Tables(others): {len(buckets['table'])} statements")
 
     # 실행 순서
     run_statements(engine, buckets["ext"],         "Extensions")
