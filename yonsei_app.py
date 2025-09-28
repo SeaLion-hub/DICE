@@ -85,7 +85,7 @@ def test_db_connection():
     return False
 
 def init_db():
-    """데이터베이스 초기화 - 단계별 실행"""
+    """데이터베이스 초기화 - 단계별 실행 (개선된 버전)"""
     logger.info("Starting DB initialization...")
     
     conn = get_db_connection()
@@ -94,245 +94,271 @@ def init_db():
         return False
     
     try:
-        with conn.cursor() as cur:
-            # 1. Extensions 설치 시도
+        # 1. Extensions 설치 시도 (개별 실행)
+        extensions = [
+            'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";',
+            'CREATE EXTENSION IF NOT EXISTS "pgcrypto";'
+        ]
+        
+        for ext_sql in extensions:
             try:
-                cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
-                cur.execute('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
-                conn.commit()
-                logger.info("Extensions created successfully")
+                with conn.cursor() as cur:
+                    cur.execute(ext_sql)
+                    conn.commit()
+                logger.info(f"Extension executed: {ext_sql}")
             except Exception as ext_err:
-                logger.warning(f"Extension creation skipped: {ext_err}")
+                logger.warning(f"Extension skipped: {ext_err}")
                 conn.rollback()
-            
-            # 2. ENUM 타입 생성
+        
+        # 2. ENUM 타입 생성 (개별 실행)
+        enum_types = [
+            """
+            DO $$ 
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
+                    CREATE TYPE user_role AS ENUM ('student', 'admin', 'moderator');
+                END IF;
+            END $$;
+            """,
+            """
+            DO $$ 
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_category') THEN
+                    CREATE TYPE notice_category AS ENUM (
+                        'general','scholarship','internship','competition',
+                        'recruitment','academic','seminar','event'
+                    );
+                END IF;
+            END $$;
+            """,
+            """
+            DO $$ 
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_status') THEN
+                    CREATE TYPE notice_status AS ENUM ('active', 'archived', 'deleted');
+                END IF;
+            END $$;
+            """
+        ]
+        
+        for enum_sql in enum_types:
             try:
-                cur.execute("""
-                    DO $$ 
-                    BEGIN
-                        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
-                            CREATE TYPE user_role AS ENUM ('student', 'admin', 'moderator');
-                        END IF;
-                        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_category') THEN
-                            CREATE TYPE notice_category AS ENUM (
-                                'general','scholarship','internship','competition',
-                                'recruitment','academic','seminar','event'
-                            );
-                        END IF;
-                        IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_status') THEN
-                            CREATE TYPE notice_status AS ENUM ('active', 'archived', 'deleted');
-                        END IF;
-                    END $$;
-                """)
-                conn.commit()
-                logger.info("ENUM types created successfully")
+                with conn.cursor() as cur:
+                    cur.execute(enum_sql)
+                    conn.commit()
+                logger.info("ENUM type created successfully")
             except Exception as e:
                 logger.error(f"ENUM creation error: {e}")
                 conn.rollback()
+        
+        # 3. 테이블 생성 - 순서대로 (개별 실행)
+        tables = [
+            # users 테이블
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                name VARCHAR(100),
+                student_id VARCHAR(20),
+                major VARCHAR(100),
+                gpa DECIMAL(3,2) CHECK (gpa >= 0 AND gpa <= 4.5),
+                toeic_score INTEGER CHECK (toeic_score >= 0 AND toeic_score <= 990),
+                role user_role DEFAULT 'student',
+                is_active BOOLEAN DEFAULT true,
+                email_verified BOOLEAN DEFAULT false,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TIMESTAMP WITH TIME ZONE
+            );
+            """,
             
-            # 3. 테이블 생성 - 순서대로
-            tables = [
-                # users 테이블
-                """
-                CREATE TABLE IF NOT EXISTS users (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    email VARCHAR(255) UNIQUE NOT NULL,
-                    password_hash VARCHAR(255) NOT NULL,
-                    name VARCHAR(100),
-                    student_id VARCHAR(20),
-                    major VARCHAR(100),
-                    gpa DECIMAL(3,2) CHECK (gpa >= 0 AND gpa <= 4.5),
-                    toeic_score INTEGER CHECK (toeic_score >= 0 AND toeic_score <= 990),
-                    role user_role DEFAULT 'student',
-                    is_active BOOLEAN DEFAULT true,
-                    email_verified BOOLEAN DEFAULT false,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    last_login_at TIMESTAMP WITH TIME ZONE
-                );
-                """,
-                
-                # colleges 테이블
-                """
-                CREATE TABLE IF NOT EXISTS colleges (
-                    id VARCHAR(50) PRIMARY KEY,
-                    name VARCHAR(100) NOT NULL,
-                    name_en VARCHAR(100),
-                    icon VARCHAR(10),
-                    color VARCHAR(7),
-                    url VARCHAR(255),
-                    apify_task_id VARCHAR(100),
-                    crawl_enabled BOOLEAN DEFAULT true,
-                    display_order INTEGER DEFAULT 0,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-                """,
-                
-                # user_settings 테이블
-                """
-                CREATE TABLE IF NOT EXISTS user_settings (
-                    user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-                    push_notifications BOOLEAN DEFAULT true,
-                    email_notifications BOOLEAN DEFAULT true,
-                    deadline_alerts BOOLEAN DEFAULT true,
-                    ai_recommendations BOOLEAN DEFAULT true,
-                    notification_time TIME DEFAULT '09:00:00',
-                    deadline_alert_days INTEGER DEFAULT 3 CHECK (deadline_alert_days BETWEEN 1 AND 30),
-                    interested_categories notice_category[] DEFAULT ARRAY['general']::notice_category[],
-                    excluded_keywords TEXT[],
-                    filter_keywords TEXT[],
-                    notices_per_page INTEGER DEFAULT 20 CHECK (notices_per_page BETWEEN 10 AND 100),
-                    default_sort_order VARCHAR(20) DEFAULT 'date_desc',
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-                """,
-                
-                # notices 테이블
-                """
-                CREATE TABLE IF NOT EXISTS notices (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    college_id VARCHAR(50) NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
-                    title VARCHAR(500) NOT NULL,
-                    content TEXT,
-                    department VARCHAR(200),
-                    writer VARCHAR(100),
-                    original_id VARCHAR(100),
-                    original_url VARCHAR(500),
-                    category notice_category DEFAULT 'general',
-                    status notice_status DEFAULT 'active',
-                    published_date DATE,
-                    deadline_date DATE,
-                    event_date DATE,
-                    view_count INTEGER DEFAULT 0,
-                    click_count INTEGER DEFAULT 0,
-                    crawled_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    content_hash VARCHAR(64),
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    CONSTRAINT unique_notice_per_college UNIQUE (college_id, original_id)
-                );
-                """,
-                
-                # 나머지 테이블들
-                """
-                CREATE TABLE IF NOT EXISTS user_college_subscriptions (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    college_id VARCHAR(50) NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
-                    notifications_enabled BOOLEAN DEFAULT true,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(user_id, college_id)
-                );
-                """,
-                
-                """
-                CREATE TABLE IF NOT EXISTS user_notice_interactions (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-                    notice_id UUID NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
-                    viewed BOOLEAN DEFAULT false,
-                    clicked BOOLEAN DEFAULT false,
-                    bookmarked BOOLEAN DEFAULT false,
-                    hidden BOOLEAN DEFAULT false,
-                    viewed_at TIMESTAMP WITH TIME ZONE,
-                    clicked_at TIMESTAMP WITH TIME ZONE,
-                    bookmarked_at TIMESTAMP WITH TIME ZONE,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE(user_id, notice_id)
-                );
-                """,
-                
-                """
-                CREATE TABLE IF NOT EXISTS crawl_logs (
-                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-                    college_id VARCHAR(50) REFERENCES colleges(id) ON DELETE SET NULL,
-                    task_id VARCHAR(100),
-                    run_id VARCHAR(100),
-                    status VARCHAR(50),
-                    error_message TEXT,
-                    notices_fetched INTEGER DEFAULT 0,
-                    notices_new INTEGER DEFAULT 0,
-                    notices_updated INTEGER DEFAULT 0,
-                    started_at TIMESTAMP WITH TIME ZONE,
-                    completed_at TIMESTAMP WITH TIME ZONE,
-                    duration_seconds INTEGER,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-                );
-                """
-            ]
+            # colleges 테이블
+            """
+            CREATE TABLE IF NOT EXISTS colleges (
+                id VARCHAR(50) PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                name_en VARCHAR(100),
+                icon VARCHAR(10),
+                color VARCHAR(7),
+                url VARCHAR(255),
+                apify_task_id VARCHAR(100),
+                crawl_enabled BOOLEAN DEFAULT true,
+                display_order INTEGER DEFAULT 0,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
             
-            # 테이블 생성
-            for i, table_sql in enumerate(tables):
-                try:
+            # user_settings 테이블
+            """
+            CREATE TABLE IF NOT EXISTS user_settings (
+                user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+                push_notifications BOOLEAN DEFAULT true,
+                email_notifications BOOLEAN DEFAULT true,
+                deadline_alerts BOOLEAN DEFAULT true,
+                ai_recommendations BOOLEAN DEFAULT true,
+                notification_time TIME DEFAULT '09:00:00',
+                deadline_alert_days INTEGER DEFAULT 3 CHECK (deadline_alert_days BETWEEN 1 AND 30),
+                interested_categories notice_category[] DEFAULT ARRAY['general']::notice_category[],
+                excluded_keywords TEXT[],
+                filter_keywords TEXT[],
+                notices_per_page INTEGER DEFAULT 20 CHECK (notices_per_page BETWEEN 10 AND 100),
+                default_sort_order VARCHAR(20) DEFAULT 'date_desc',
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """,
+            
+            # notices 테이블
+            """
+            CREATE TABLE IF NOT EXISTS notices (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                college_id VARCHAR(50) NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
+                title VARCHAR(500) NOT NULL,
+                content TEXT,
+                department VARCHAR(200),
+                writer VARCHAR(100),
+                original_id VARCHAR(100),
+                original_url VARCHAR(500),
+                category notice_category DEFAULT 'general',
+                status notice_status DEFAULT 'active',
+                published_date DATE,
+                deadline_date DATE,
+                event_date DATE,
+                view_count INTEGER DEFAULT 0,
+                click_count INTEGER DEFAULT 0,
+                crawled_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_checked_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                content_hash VARCHAR(64),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT unique_notice_per_college UNIQUE (college_id, original_id)
+            );
+            """,
+            
+            # 나머지 테이블들
+            """
+            CREATE TABLE IF NOT EXISTS user_college_subscriptions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                college_id VARCHAR(50) NOT NULL REFERENCES colleges(id) ON DELETE CASCADE,
+                notifications_enabled BOOLEAN DEFAULT true,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, college_id)
+            );
+            """,
+            
+            """
+            CREATE TABLE IF NOT EXISTS user_notice_interactions (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                notice_id UUID NOT NULL REFERENCES notices(id) ON DELETE CASCADE,
+                viewed BOOLEAN DEFAULT false,
+                clicked BOOLEAN DEFAULT false,
+                bookmarked BOOLEAN DEFAULT false,
+                hidden BOOLEAN DEFAULT false,
+                viewed_at TIMESTAMP WITH TIME ZONE,
+                clicked_at TIMESTAMP WITH TIME ZONE,
+                bookmarked_at TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(user_id, notice_id)
+            );
+            """,
+            
+            """
+            CREATE TABLE IF NOT EXISTS crawl_logs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                college_id VARCHAR(50) REFERENCES colleges(id) ON DELETE SET NULL,
+                task_id VARCHAR(100),
+                run_id VARCHAR(100),
+                status VARCHAR(50),
+                error_message TEXT,
+                notices_fetched INTEGER DEFAULT 0,
+                notices_new INTEGER DEFAULT 0,
+                notices_updated INTEGER DEFAULT 0,
+                started_at TIMESTAMP WITH TIME ZONE,
+                completed_at TIMESTAMP WITH TIME ZONE,
+                duration_seconds INTEGER,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            );
+            """
+        ]
+        
+        # 테이블 생성 (개별 실행)
+        for i, table_sql in enumerate(tables):
+            try:
+                with conn.cursor() as cur:
                     cur.execute(table_sql)
                     conn.commit()
-                    logger.info(f"Table {i+1}/{len(tables)} created successfully")
-                except Exception as e:
-                    logger.error(f"Table {i+1} creation error: {e}")
-                    conn.rollback()
-            
-            # 4. 인덱스 생성
-            indexes = [
-                "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);",
-                "CREATE INDEX IF NOT EXISTS idx_notices_college ON notices(college_id);",
-                "CREATE INDEX IF NOT EXISTS idx_notices_published ON notices(published_date DESC);",
-            ]
-            
-            for index_sql in indexes:
-                try:
+                logger.info(f"Table {i+1}/{len(tables)} created successfully")
+            except Exception as e:
+                logger.error(f"Table {i+1} creation error: {e}")
+                conn.rollback()
+        
+        # 4. 인덱스 생성 (개별 실행)
+        indexes = [
+            "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);",
+            "CREATE INDEX IF NOT EXISTS idx_notices_college ON notices(college_id);",
+            "CREATE INDEX IF NOT EXISTS idx_notices_published ON notices(published_date DESC);",
+        ]
+        
+        for index_sql in indexes:
+            try:
+                with conn.cursor() as cur:
                     cur.execute(index_sql)
                     conn.commit()
-                except Exception as e:
-                    logger.warning(f"Index creation warning: {e}")
-                    conn.rollback()
-            
-            # 5. 초기 데이터 삽입 (colleges)
+            except Exception as e:
+                logger.warning(f"Index creation warning: {e}")
+                conn.rollback()
+        
+        # 5. 초기 데이터 삽입 (colleges)
+        with conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM colleges")
             college_count = cur.fetchone()[0]
+        
+        if college_count == 0:
+            logger.info("Inserting initial college data...")
+            colleges_data = [
+                ('main','메인 공지사항','🏫','#003876','https://www.yonsei.ac.kr','VsNDqFr5fLLIi2Xh1',0),
+                ('liberal','문과대학','📚','#8B4513','https://liberal.yonsei.ac.kr','L5AS9TZWUMorttUJJ',1),
+                ('business','상경대학','📊','#FFB700','https://soe.yonsei.ac.kr','yJ8Rp9AhTSVCw7Yt8',2),
+                ('management','경영대학','💼','#1E90FF','https://ysb.yonsei.ac.kr','DjsOsls6pCpaQaKq9',3),
+                ('engineering','공과대학','⚙️','#DC143C','https://engineering.yonsei.ac.kr','tdcYhb8OaDnBHI8jJr',4),
+                ('life','생명시스템대학','🧬','#228B22','https://sys.yonsei.ac.kr','gOKavS1YNKhNUVsNQ',5),
+                ('ai','인공지능융합대학','🤖','#9370DB','https://ai.yonsei.ac.kr','qb6M6hbdm2fnhxfeg',6),
+                ('theology','신과대학','✝️','#4B0082','https://theology.yonsei.ac.kr','9akDlFeStRHdeps4t',7),
+                ('social','사회과학대학','🏛️','#2E8B57','https://yeri.yonsei.ac.kr/socsci','hNSAPYSS35RscOWWm',8),
+                ('music','음악대학','🎵','#FF1493','https://music.yonsei.ac.kr','B3xYzP1Jqo1jVH1Me',9),
+                ('human','생활과학대학','🏠','#FF6347','https://che.yonsei.ac.kr','K5kXEuXSyZzY5uwpn',10),
+                ('education','교육과학대학','🎓','#4169E1','https://educa.yonsei.ac.kr','9XfmKGnPdDQWZkUjW',11),
+                ('underwood','언더우드국제대학','🌏','#FF8C00','https://uic.yonsei.ac.kr','Xz2t1SAdshoLSDslB',12),
+                ('global','글로벌인재대학','🌐','#008B8B','https://global.yonsei.ac.kr','BwiB4aHdY2uyP4txl',13),
+                ('medicine','의과대학','⚕️','#B22222','https://medicine.yonsei.ac.kr','oAgxPnIMOv2IYhZej',14),
+                ('dentistry','치과대학','🦷','#5F9EA0','https://dentistry.yonsei.ac.kr','etPqNCyaZNI4A8sEl',15),
+                ('nursing','간호대학','💊','#DB7093','https://nursing.yonsei.ac.kr','I04xneYTZMJ8jAn4r',16),
+                ('pharmacy','약학대학','💉','#663399','https://pharmacy.yonsei.ac.kr','gjqRcgjHJr4frQhma',17)
+            ]
             
-            if college_count == 0:
-                logger.info("Inserting initial college data...")
-                colleges_data = [
-                    ('main','메인 공지사항','🏫','#003876','https://www.yonsei.ac.kr','VsNDqFr5fLLIi2Xh1',0),
-                    ('liberal','문과대학','📚','#8B4513','https://liberal.yonsei.ac.kr','L5AS9TZWUMorttUJJ',1),
-                    ('business','상경대학','📊','#FFB700','https://soe.yonsei.ac.kr','yJ8Rp9AhTSVCw7Yt8',2),
-                    ('management','경영대학','💼','#1E90FF','https://ysb.yonsei.ac.kr','DjsOsls6pCpaQaKq9',3),
-                    ('engineering','공과대학','⚙️','#DC143C','https://engineering.yonsei.ac.kr','tdcYhb8OaDnBHI8jJr',4),
-                    ('life','생명시스템대학','🧬','#228B22','https://sys.yonsei.ac.kr','gOKavS1YNKhNUVsNQ',5),
-                    ('ai','인공지능융합대학','🤖','#9370DB','https://ai.yonsei.ac.kr','qb6M6hbdm2fnhxfeg',6),
-                    ('theology','신과대학','✝️','#4B0082','https://theology.yonsei.ac.kr','9akDlFeStRHdeps4t',7),
-                    ('social','사회과학대학','🏛️','#2E8B57','https://yeri.yonsei.ac.kr/socsci','hNSAPYSS35RscOWWm',8),
-                    ('music','음악대학','🎵','#FF1493','https://music.yonsei.ac.kr','B3xYzP1Jqo1jVH1Me',9),
-                    ('human','생활과학대학','🏠','#FF6347','https://che.yonsei.ac.kr','K5kXEuXSyZzY5uwpn',10),
-                    ('education','교육과학대학','🎓','#4169E1','https://educa.yonsei.ac.kr','9XfmKGnPdDQWZkUjW',11),
-                    ('underwood','언더우드국제대학','🌏','#FF8C00','https://uic.yonsei.ac.kr','Xz2t1SAdshoLSDslB',12),
-                    ('global','글로벌인재대학','🌐','#008B8B','https://global.yonsei.ac.kr','BwiB4aHdY2uyP4txl',13),
-                    ('medicine','의과대학','⚕️','#B22222','https://medicine.yonsei.ac.kr','oAgxPnIMOv2IYhZej',14),
-                    ('dentistry','치과대학','🦷','#5F9EA0','https://dentistry.yonsei.ac.kr','etPqNCyaZNI4A8sEl',15),
-                    ('nursing','간호대학','💊','#DB7093','https://nursing.yonsei.ac.kr','I04xneYTZMJ8jAn4r',16),
-                    ('pharmacy','약학대학','💉','#663399','https://pharmacy.yonsei.ac.kr','gjqRcgjHJr4frQhma',17)
-                ]
-                
-                for college in colleges_data:
-                    try:
+            for college in colleges_data:
+                try:
+                    with conn.cursor() as cur:
                         cur.execute("""
                             INSERT INTO colleges (id, name, icon, color, url, apify_task_id, display_order)
                             VALUES (%s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (id) DO NOTHING
                         """, college)
-                    except Exception as e:
-                        logger.warning(f"College insert warning: {e}")
-                
-                conn.commit()
-                logger.info("Initial college data inserted")
+                        conn.commit()
+                except Exception as e:
+                    logger.warning(f"College insert warning: {e}")
+                    conn.rollback()
             
-            logger.info("DB initialization completed successfully!")
-            return True
-            
+            logger.info("Initial college data inserted")
+        
+        logger.info("DB initialization completed successfully!")
+        return True
+        
     except Exception as e:
         logger.error(f"DB initialization failed: {e}")
         logger.error(traceback.format_exc())

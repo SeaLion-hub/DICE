@@ -2,7 +2,7 @@
 import os
 import re
 import sqlparse
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
 # ---------- helpers ----------
@@ -105,20 +105,24 @@ def should_ignore_error(phase: str, err: DBAPIError) -> bool:
     return False
 
 def run_statements(engine, statements, title):
+    """각 문장을 개별 트랜잭션으로 실행"""
     if not statements:
         return
     print(f"▶ {title}: {len(statements)} statements")
-    with engine.begin() as conn:
-        for i, stmt in enumerate(statements, start=1):
-            try:
-                conn.exec_driver_sql(stmt)
-            except DBAPIError as e:
-                if should_ignore_error(title, e):
-                    # 이미 존재 → 스킵하고 계속
-                    continue
-                # 실패한 문장 로그 후 중단
-                print(f"\n❌ 실패 ({title} #{i}):\n{stmt}\n")
-                raise
+    
+    for i, stmt in enumerate(statements, start=1):
+        # 각 문장을 개별 트랜잭션으로 실행
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(stmt))
+        except DBAPIError as e:
+            if should_ignore_error(title, e):
+                # 이미 존재 → 스킵하고 계속
+                print(f"  ⚠️ 스킵 ({title} #{i}): 이미 존재")
+                continue
+            # 실패한 문장 로그 후 중단
+            print(f"\n❌ 실패 ({title} #{i}):\n{stmt}\n")
+            raise
 
 def apply_schema(engine, sql: str):
     stmts = split_statements(sql)
