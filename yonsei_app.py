@@ -21,6 +21,11 @@ import jwt
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import json
+import logging
+
+# 로깅 설정
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -29,17 +34,24 @@ CORS(app)
 
 # ===== 환경 변수 설정 =====
 APIFY_TOKEN = os.getenv("APIFY_TOKEN", "apify_api_xxxxxxxxxx")
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:password@localhost:5432/dice_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "")
 JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "your-secret-key-here")
+
+# Railway에서 제공하는 DATABASE_URL이 postgres://로 시작하는 경우 postgresql://로 변경
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # ===== DB 연결 함수 =====
 def get_db_connection():
     """PostgreSQL 데이터베이스 연결"""
     try:
+        if not DATABASE_URL:
+            logger.error("DATABASE_URL is not set")
+            return None
         conn = psycopg2.connect(DATABASE_URL)
         return conn
     except Exception as e:
-        print(f"DB 연결 실패: {e}")
+        logger.error(f"DB 연결 실패: {e}")
         return None
 
 def init_db():
@@ -48,14 +60,34 @@ def init_db():
     if conn:
         try:
             with conn.cursor() as cur:
+                # 확장 설치 (권한이 없으면 무시)
+                try:
+                    cur.execute('CREATE EXTENSION IF NOT EXISTS "uuid-ossp";')
+                    cur.execute('CREATE EXTENSION IF NOT EXISTS "pgcrypto";')
+                except Exception as ext_err:
+                    logger.warning(f"Extension creation skipped: {ext_err}")
+                
                 # schema.sql 파일 실행 (존재하는 경우)
                 if os.path.exists('schema.sql'):
                     with open('schema.sql', 'r', encoding='utf-8') as f:
-                        cur.execute(f.read())
+                        schema_content = f.read()
+                        # ENUM 타입 생성 시 에러 무시
+                        statements = schema_content.split(';')
+                        for statement in statements:
+                            if statement.strip():
+                                try:
+                                    cur.execute(statement + ';')
+                                except psycopg2.errors.DuplicateObject:
+                                    # 이미 존재하는 타입은 무시
+                                    pass
+                                except Exception as e:
+                                    logger.warning(f"Statement execution warning: {e}")
+                
                 conn.commit()
-                print("DB 초기화 완료")
+                logger.info("DB 초기화 완료")
         except Exception as e:
-            print(f"DB 초기화 실패: {e}")
+            logger.error(f"DB 초기화 실패: {e}")
+            conn.rollback()
         finally:
             conn.close()
 
@@ -209,7 +241,7 @@ def save_notices_to_db(college_key, notices):
             for notice in notices:
                 # content_hash 생성
                 content_hash = hashlib.sha256(
-                    f"{notice['title']}{notice['content']}".encode()
+                    f"{notice['title']}{notice.get('content', '')}".encode()
                 ).hexdigest()
                 
                 # 날짜 파싱
@@ -259,7 +291,7 @@ def save_notices_to_db(college_key, notices):
             conn.commit()
             return True
     except Exception as e:
-        print(f"DB 저장 실패: {e}")
+        logger.error(f"DB 저장 실패: {e}")
         conn.rollback()
         return False
     finally:
@@ -293,7 +325,7 @@ def get_notices_from_db(college_key):
             
             return notices
     except Exception as e:
-        print(f"DB 조회 실패: {e}")
+        logger.error(f"DB 조회 실패: {e}")
         return []
     finally:
         conn.close()
@@ -357,7 +389,7 @@ def get_apify_data(task_id):
         return valid_items or None
 
     except Exception as e:
-        print(f"Error fetching Apify data: {e}")
+        logger.error(f"Error fetching Apify data: {e}")
         return None
 
 # ============= AUTH API =============
@@ -424,7 +456,7 @@ def register():
     except psycopg2.IntegrityError:
         return jsonify({'success': False, 'message': '이미 등록된 이메일입니다'}), 400
     except Exception as e:
-        print(f"회원가입 오류: {e}")
+        logger.error(f"회원가입 오류: {e}")
         return jsonify({'success': False, 'message': '회원가입 실패'}), 500
     finally:
         conn.close()
@@ -485,14 +517,15 @@ def login():
             })
             
     except Exception as e:
-        print(f"로그인 오류: {e}")
+        logger.error(f"로그인 오류: {e}")
         return jsonify({'success': False, 'message': '로그인 실패'}), 500
     finally:
         conn.close()
 
-# ============= 기존 라우트 =============
-@app.route('/landing')
-def serve_landing():
+# ============= 페이지 라우트 (index.html이 첫 화면) =============
+@app.route('/')
+def index():
+    """메인 페이지 - index.html 제공"""
     return send_from_directory(app.static_folder, 'index.html')
 
 @app.route('/auth')
@@ -507,12 +540,7 @@ def serve_dashboard():
 def serve_settings():
     return send_from_directory(app.static_folder, 'settings.html')
 
-
-
-@app.route('/')
-def index():
-    return render_template_string(MAIN_TEMPLATE, colleges=COLLEGES)
-
+# ============= API 라우트 =============
 @app.route('/api/notices/<college_key>')
 def get_notices(college_key):
     if college_key not in COLLEGES:
@@ -581,7 +609,7 @@ def notice_detail(college_key, notice_id):
                     """, (notice_data['id'],))
                     conn.commit()
         except Exception as e:
-            print(f"상세 조회 오류: {e}")
+            logger.error(f"상세 조회 오류: {e}")
         finally:
             conn.close()
     
@@ -618,7 +646,7 @@ def notice_detail(college_key, notice_id):
     <body>
       <div class="container">
         <div class="header">
-          <a href="/notices" class="back-button">← 목록으로 돌아가기</a>
+          <a href="/" class="back-button">← 목록으로 돌아가기</a>
           <div class="college-badge"><span style="font-size:1.2rem">{{ college.icon }}</span><span>{{ college.name }}</span></div>
           <h1 class="notice-title">{{ notice.title }}</h1>
           <div class="notice-meta">
@@ -632,7 +660,7 @@ def notice_detail(college_key, notice_id):
         </div>
         <div class="action-buttons">
           <a href="{{ notice.url }}" target="_blank" class="btn btn-primary">🔗 원본 페이지 보기</a>
-          <a href="/notices" class="btn btn-secondary">📋 목록으로</a>
+          <a href="/" class="btn btn-secondary">📋 목록으로</a>
         </div>
       </div>
     </body>
@@ -642,27 +670,46 @@ def notice_detail(college_key, notice_id):
 
 @app.route('/api/health')
 def health_check():
+    db_connected = False
+    try:
+        conn = get_db_connection()
+        if conn:
+            db_connected = True
+            conn.close()
+    except:
+        pass
+    
     return jsonify({
         'status': 'healthy',
         'message': 'DICE 서버가 정상 작동 중입니다',
         'timestamp': datetime.now().isoformat(),
         'colleges_count': len(COLLEGES),
-        'db_connected': get_db_connection() is not None
+        'db_connected': db_connected
     })
+
+# 오류 핸들러
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({'error': 'Not found'}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    logger.error(f"Internal error: {error}")
+    return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
     # DB 초기화
     init_db()
     
-    PORT = 8080
-    print("="*60)
-    print("🎓 연세대학교 통합 공지사항 시스템")
-    print("="*60)
-    print(f"\n📚 지원 단과대학: {len(COLLEGES)}개")
-    print(f"\n🌐 서버 주소: http://localhost:{PORT}")
-    print("\n📋 현재 모드: ", end="")
-    print("실제 데이터 모드" if APIFY_TOKEN != 'apify_api_xxxxxxxxxx' else "테스트 모드")
-    print("\n"+"="*60)
-    print("서버 시작중... (종료: Ctrl+C)")
-    print("="*60+"\n")
-    app.run(debug=True, host='0.0.0.0', port=PORT)
+    # Railway 환경에서는 PORT 환경 변수를 사용
+    PORT = int(os.getenv('PORT', 8080))
+    
+    logger.info("="*60)
+    logger.info("🎓 연세대학교 통합 공지사항 시스템")
+    logger.info("="*60)
+    logger.info(f"📚 지원 단과대학: {len(COLLEGES)}개")
+    logger.info(f"🌐 서버 포트: {PORT}")
+    logger.info(f"💾 DB 연결: {bool(DATABASE_URL)}")
+    logger.info("="*60)
+    
+    app.run(debug=False, host='0.0.0.0', port=PORT)
