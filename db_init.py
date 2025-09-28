@@ -33,70 +33,6 @@ def split_statements(sql: str):
     statements = [s for s in statements if not s.strip().startswith("--")]
     return statements
 
-# 패턴
-RE_EXT   = re.compile(r"^\s*create\s+extension\b", re.I)
-RE_TYPE  = re.compile(r"^\s*create\s+type\b", re.I)
-RE_TABLE = re.compile(r"^\s*create\s+table\b", re.I)
-RE_INDEX = re.compile(r"^\s*create\s+index\b", re.I)
-RE_FUNC  = re.compile(r"^\s*create\s+or\s+replace\s+function\b|\breturns\s+trigger\b", re.I)
-RE_TRIG  = re.compile(r"^\s*(create\s+trigger|drop\s+trigger)\b", re.I)
-RE_INS   = re.compile(r"^\s*insert\b", re.I)
-RE_VIEW  = re.compile(r"^\s*create\s+(or\s+replace\s+)?view\b", re.I)
-
-def is_users_create(stmt: str) -> bool:
-    # users 테이블 생성문만 정확히 찾기
-    n = normalize_sql(stmt)
-    if not n.startswith("create table"):
-        return False
-    
-    # 정확한 users 테이블만 찾는 패턴 (더 유연하게)
-    patterns = [
-        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?(\"?public\"?\.)?\"?users\"?\s*\(",
-        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?users\s*\(",
-        r"create\s+table.*if\s+not\s+exists\s+users\s*\("
-    ]
-    
-    for pattern in patterns:
-        if re.search(pattern, n):
-            print(f"✅ users 테이블 패턴 매치: {pattern}")
-            return True
-    
-    # 디버깅을 위해 'users' 키워드가 있는 경우 출력
-    if 'users' in n and 'create table' in n:
-        print(f"🔍 users 키워드 발견하지만 패턴 불일치: {n[:100]}...")
-    
-    return False
-
-def bucketize(statements):
-    buckets = {
-        "ext": [], "type": [], "table_users": [], "table": [],
-        "index": [], "func": [], "trigger": [], "insert": [], "view": [], "other": []
-    }
-    for stmt in statements:
-        t = stmt.strip()
-        if RE_EXT.match(t):
-            buckets["ext"].append(stmt)
-        elif RE_TYPE.match(t):
-            buckets["type"].append(stmt)
-        elif RE_TABLE.match(t):
-            if is_users_create(t):
-                buckets["table_users"].append(stmt)
-            else:
-                buckets["table"].append(stmt)
-        elif RE_INDEX.match(t):
-            buckets["index"].append(stmt)
-        elif RE_FUNC.match(t):
-            buckets["func"].append(stmt)
-        elif RE_TRIG.match(t):
-            buckets["trigger"].append(stmt)
-        elif RE_INS.match(t):
-            buckets["insert"].append(stmt)
-        elif RE_VIEW.match(t):
-            buckets["view"].append(stmt)
-        else:
-            buckets["other"].append(stmt)
-    return buckets
-
 # PostgreSQL SQLSTATE codes we want to ignore in idempotent runs
 PG_DUPLICATE_OBJECT = "42710"  # duplicate_object (type, function 등)
 PG_DUPLICATE_TABLE  = "42P07"  # duplicate_table
@@ -139,110 +75,116 @@ def run_statements(engine, statements, title):
             print(f"\n❌ 실패 ({title} #{i}):\n{stmt}\n")
             raise
 
-def apply_schema(engine, sql: str):
-    stmts = split_statements(sql)
-    buckets = bucketize(stmts)
-
-    # 디버그: 전체 테이블 생성문들 출력
-    print(f"\n🔍 디버그: 총 {len(stmts)} 개 문장 발견")
-    print(f"📊 버킷 상태:")
-    for bucket_name, bucket_stmts in buckets.items():
-        print(f"  {bucket_name}: {len(bucket_stmts)} statements")
+def categorize_statements(statements):
+    """간단하고 확실한 방법으로 SQL 문장들을 분류"""
     
-    # 테이블 생성문들 검사
-    print(f"\n📋 테이블 생성문들:")
-    all_table_stmts = buckets["table_users"] + buckets["table"]
-    for i, stmt in enumerate(all_table_stmts):
+    categories = {
+        "extensions": [],
+        "types": [],
+        "users_table": [],
+        "other_tables": [],
+        "indexes": [],
+        "functions": [],
+        "triggers": [],
+        "inserts": [],
+        "views": [],
+        "other": []
+    }
+    
+    for stmt in statements:
         normalized = normalize_sql(stmt)
-        table_name = "UNKNOWN"
-        if "create table" in normalized:
-            # 테이블 이름 추출 시도
-            match = re.search(r"create\s+table\s+(if\s+not\s+exists\s+)?(\w+)", normalized)
-            if match:
-                table_name = match.group(2)
-        print(f"  {i+1}. {table_name} - users 체크: {is_users_create(stmt)}")
-
-    # users 테이블이 정말 버킷에 들어갔는지 가드
-    if not buckets["table_users"]:
-        print("⚠️ users 테이블이 table_users 버킷에 없음. 다른 버킷에서 찾는 중...")
-        # 최후의 보루: 테이블들 중에서 users 포함된 문장을 찾아 빼오기
-        for s in list(buckets["table"]):
-            if is_users_create(s):
-                print(f"✅ users 테이블 발견, table_users 버킷으로 이동")
-                buckets["table_users"].append(s)
-                buckets["table"].remove(s)
-                break
         
-        # 여전히 없다면 users 테이블을 동적으로 생성
-        if not buckets["table_users"]:
-            print("🚨 schema.sql에 users 테이블이 없음. 동적으로 생성합니다.")
-            users_table_sql = """
-            CREATE TABLE IF NOT EXISTS users (
-                id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-                email VARCHAR(255) UNIQUE NOT NULL,
-                password_hash VARCHAR(255) NOT NULL,
-                name VARCHAR(100),
-                student_id VARCHAR(20),
-                major VARCHAR(100),
-                gpa DECIMAL(3,2) CHECK (gpa >= 0 AND gpa <= 4.5),
-                toeic_score INTEGER CHECK (toeic_score >= 0 AND toeic_score <= 990),
-                role user_role DEFAULT 'student',
-                is_active BOOLEAN DEFAULT true,
-                email_verified BOOLEAN DEFAULT false,
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                last_login_at TIMESTAMP WITH TIME ZONE,
-                CONSTRAINT email_format CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}
+        if re.match(r"^\s*create\s+extension", normalized):
+            categories["extensions"].append(stmt)
+        elif re.match(r"^\s*create\s+type", normalized):
+            categories["types"].append(stmt)
+        elif re.search(r"create\s+table.*\busers\s*\(", normalized) and not re.search(r"user_", normalized):
+            # users 테이블만 정확히 찾기 (user_settings 등 제외)
+            categories["users_table"].append(stmt)
+            print(f"✅ USERS 테이블 발견!")
+        elif re.match(r"^\s*create\s+table", normalized):
+            categories["other_tables"].append(stmt)
+        elif re.match(r"^\s*create\s+(unique\s+)?index", normalized):
+            categories["indexes"].append(stmt)
+        elif re.match(r"^\s*create\s+(or\s+replace\s+)?function", normalized):
+            categories["functions"].append(stmt)
+        elif re.match(r"^\s*(create|drop)\s+trigger", normalized):
+            categories["triggers"].append(stmt)
+        elif re.match(r"^\s*insert\s+into", normalized):
+            categories["inserts"].append(stmt)
+        elif re.match(r"^\s*create\s+(or\s+replace\s+)?view", normalized):
+            categories["views"].append(stmt)
+        else:
+            categories["other"].append(stmt)
+    
+    return categories
 
+def apply_schema(engine, sql: str):
+    statements = split_statements(sql)
+    categories = categorize_statements(statements)
+    
+    print(f"\n🔍 디버그: 총 {len(statements)} 개 문장 발견")
+    print(f"📊 카테고리별 분류:")
+    for name, stmts in categories.items():
+        print(f"  {name}: {len(stmts)} statements")
+    
+    # users 테이블이 없으면 동적으로 생성
+    if not categories["users_table"]:
+        print("🚨 users 테이블이 없습니다. 동적으로 생성합니다.")
+        users_sql = """
+        CREATE TABLE IF NOT EXISTS users (
+            id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+            email VARCHAR(255) UNIQUE NOT NULL,
+            password_hash VARCHAR(255) NOT NULL,
+            name VARCHAR(100),
+            student_id VARCHAR(20),
+            major VARCHAR(100),
+            gpa DECIMAL(3,2) CHECK (gpa >= 0 AND gpa <= 4.5),
+            toeic_score INTEGER CHECK (toeic_score >= 0 AND toeic_score <= 990),
+            role user_role DEFAULT 'student',
+            is_active BOOLEAN DEFAULT true,
+            email_verified BOOLEAN DEFAULT false,
+            created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+            last_login_at TIMESTAMP WITH TIME ZONE,
+            CONSTRAINT email_format CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$')
+        );
+        """
+        categories["users_table"].append(users_sql)
+        print("✅ users 테이블을 동적으로 추가했습니다.")
+    
+    # 실행 순서 (의존성 고려)
     print(f"\n🚀 실행 순서:")
-    print(f"  1. Extensions: {len(buckets['ext'])} statements")
-    print(f"  2. Types: {len(buckets['type'])} statements") 
-    print(f"  3. Tables(users first): {len(buckets['table_users'])} statements")
-    print(f"  4. Tables(others): {len(buckets['table'])} statements")
-
-    # 실행 순서
-    run_statements(engine, buckets["ext"],         "Extensions")
-    run_statements(engine, buckets["type"],        "Types")
-    run_statements(engine, buckets["table_users"], "Tables(users first)")
-    run_statements(engine, buckets["table"],       "Tables(others)")
-    run_statements(engine, buckets["index"],       "Indexes")
-    run_statements(engine, buckets["func"],        "Functions")
-    run_statements(engine, buckets["trigger"],     "Triggers")
-    run_statements(engine, buckets["insert"],      "Initial Data")
-    run_statements(engine, buckets["view"],        "Views")
-    run_statements(engine, buckets["other"],       "Other")
-
-def main():
-    db_url = get_db_url()
-    engine = create_engine(db_url, pool_pre_ping=True)
-    schema_sql = load_schema_sql("schema.sql")
-    apply_schema(engine, schema_sql)
-    print("✅ schema.sql 적용 완료")
-
-if __name__ == "__main__":
-    main())
-            );
-            """
-            buckets["table_users"].append(users_table_sql)
-            print("✅ users 테이블을 동적으로 추가했습니다.")
-
-    print(f"\n🚀 실행 순서:")
-    print(f"  1. Extensions: {len(buckets['ext'])} statements")
-    print(f"  2. Types: {len(buckets['type'])} statements") 
-    print(f"  3. Tables(users first): {len(buckets['table_users'])} statements")
-    print(f"  4. Tables(others): {len(buckets['table'])} statements")
-
-    # 실행 순서
-    run_statements(engine, buckets["ext"],         "Extensions")
-    run_statements(engine, buckets["type"],        "Types")
-    run_statements(engine, buckets["table_users"], "Tables(users first)")
-    run_statements(engine, buckets["table"],       "Tables(others)")
-    run_statements(engine, buckets["index"],       "Indexes")
-    run_statements(engine, buckets["func"],        "Functions")
-    run_statements(engine, buckets["trigger"],     "Triggers")
-    run_statements(engine, buckets["insert"],      "Initial Data")
-    run_statements(engine, buckets["view"],        "Views")
-    run_statements(engine, buckets["other"],       "Other")
+    
+    # 1. Extensions
+    run_statements(engine, categories["extensions"], "Extensions")
+    
+    # 2. Types (ENUM 등)
+    run_statements(engine, categories["types"], "Types")
+    
+    # 3. Users 테이블 먼저
+    run_statements(engine, categories["users_table"], "Users Table")
+    
+    # 4. 나머지 테이블들
+    run_statements(engine, categories["other_tables"], "Other Tables")
+    
+    # 5. 인덱스
+    run_statements(engine, categories["indexes"], "Indexes")
+    
+    # 6. 함수
+    run_statements(engine, categories["functions"], "Functions")
+    
+    # 7. 트리거
+    run_statements(engine, categories["triggers"], "Triggers")
+    
+    # 8. 초기 데이터
+    run_statements(engine, categories["inserts"], "Initial Data")
+    
+    # 9. 뷰
+    run_statements(engine, categories["views"], "Views")
+    
+    # 10. 기타
+    run_statements(engine, categories["other"], "Other")
 
 def main():
     db_url = get_db_url()
