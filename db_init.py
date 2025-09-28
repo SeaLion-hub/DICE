@@ -47,13 +47,68 @@ def should_ignore_error(phase: str, err: DBAPIError) -> bool:
     pgcode = getattr(getattr(err, "orig", None), "pgcode", None)
     if not pgcode:
         return False
+    
     # 타입/인덱스/뷰/트리거/함수/테이블 재실행 시의 중복은 무시
     if pgcode in {PG_DUPLICATE_OBJECT, PG_DUPLICATE_TABLE, PG_DUPLICATE_SCHEMA, PG_DUPLICATE_ALIAS, PG_DUPLICATE_COLUMN}:
         return True
     # 초기데이터 중복(유니크 위반)도 무시
     if phase == "Initial Data" and pgcode == PG_DUPLICATE_PKEY:
         return True
+    
     return False
+
+def ensure_enums_exist(engine):
+    """ENUM 타입들이 확실히 존재하도록 강제 생성"""
+    print("🔧 ENUM 타입 존재 확인 및 생성...")
+    
+    enum_sqls = [
+        """
+        DO $ 
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'user_role') THEN
+                CREATE TYPE user_role AS ENUM ('student', 'admin', 'moderator');
+                RAISE NOTICE 'user_role ENUM created';
+            ELSE
+                RAISE NOTICE 'user_role ENUM already exists';
+            END IF;
+        END $;
+        """,
+        """
+        DO $ 
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_category') THEN
+                CREATE TYPE notice_category AS ENUM (
+                    'general','scholarship','internship','competition',
+                    'recruitment','academic','seminar','event'
+                );
+                RAISE NOTICE 'notice_category ENUM created';
+            ELSE
+                RAISE NOTICE 'notice_category ENUM already exists';
+            END IF;
+        END $;
+        """,
+        """
+        DO $ 
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'notice_status') THEN
+                CREATE TYPE notice_status AS ENUM ('active', 'archived', 'deleted');
+                RAISE NOTICE 'notice_status ENUM created';
+            ELSE
+                RAISE NOTICE 'notice_status ENUM already exists';
+            END IF;
+        END $;
+        """
+    ]
+    
+    for i, enum_sql in enumerate(enum_sqls, 1):
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(enum_sql))
+            print(f"  ✅ ENUM {i}/3 처리 완료")
+        except Exception as e:
+            print(f"  ❌ ENUM {i}/3 처리 실패: {e}")
+            # ENUM 생성 실패 시 계속 진행하지 않음
+            raise
 
 def run_statements(engine, statements, title):
     """각 문장을 개별 트랜잭션으로 실행"""
@@ -147,7 +202,17 @@ def apply_schema(engine, sql: str):
             created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
             last_login_at TIMESTAMP WITH TIME ZONE,
-            CONSTRAINT email_format CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}$')
+            CONSTRAINT email_format CHECK (email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}
+
+def main():
+    db_url = get_db_url()
+    engine = create_engine(db_url, pool_pre_ping=True)
+    schema_sql = load_schema_sql("schema.sql")
+    apply_schema(engine, schema_sql)
+    print("✅ schema.sql 적용 완료")
+
+if __name__ == "__main__":
+    main())
         );
         """
         categories["users_table"].append(users_sql)
@@ -159,8 +224,8 @@ def apply_schema(engine, sql: str):
     # 1. Extensions
     run_statements(engine, categories["extensions"], "Extensions")
     
-    # 2. Types (ENUM 등)
-    run_statements(engine, categories["types"], "Types")
+    # 2. ENUM 타입 강제 확인 및 생성
+    ensure_enums_exist(engine)
     
     # 3. Users 테이블 먼저
     run_statements(engine, categories["users_table"], "Users Table")
