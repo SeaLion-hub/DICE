@@ -1,10 +1,11 @@
 ﻿# yonsei_app.py
 """
-연세대학교 전체 단과대학 공지사항 통합 시스템
+연세대학교 전체 단과대학 공지사항 통합 시스템 (DICE)
 - 18개 단과대학 공지사항 통합
 - PostgreSQL DB 연동
 - 회원가입/로그인 API
 - 크롤링 데이터 DB 저장
+- 업데이트된 스키마 지원
 """
 
 from flask import Flask, render_template_string, jsonify, send_from_directory, request
@@ -71,17 +72,16 @@ def init_db():
                 if os.path.exists('schema.sql'):
                     with open('schema.sql', 'r', encoding='utf-8') as f:
                         schema_content = f.read()
-                        # ENUM 타입 생성 시 에러 무시
-                        statements = schema_content.split(';')
+                        # 여러 명령문을 나누어 실행
+                        statements = [s.strip() for s in schema_content.split(';') if s.strip()]
                         for statement in statements:
-                            if statement.strip():
-                                try:
-                                    cur.execute(statement + ';')
-                                except psycopg2.errors.DuplicateObject:
-                                    # 이미 존재하는 타입은 무시
-                                    pass
-                                except Exception as e:
-                                    logger.warning(f"Statement execution warning: {e}")
+                            try:
+                                cur.execute(statement + ';')
+                            except psycopg2.errors.DuplicateObject:
+                                # 이미 존재하는 타입은 무시
+                                pass
+                            except Exception as e:
+                                logger.warning(f"Statement execution warning: {e}")
                 
                 conn.commit()
                 logger.info("DB 초기화 완료")
@@ -91,137 +91,8 @@ def init_db():
         finally:
             conn.close()
 
-# 단과대학 정보
-COLLEGES = {
-    'main': {
-        'name': '메인 공지사항',
-        'icon': '🏫',
-        'color': '#003876',
-        'task_id': 'VsNDqFr5fLLIi2Xh1',
-        'url': 'https://www.yonsei.ac.kr'
-    },
-    'liberal': {
-        'name': '문과대학',
-        'icon': '📚',
-        'color': '#8B4513',
-        'task_id': 'L5AS9TZWUMorttUJJ',
-        'url': 'https://liberal.yonsei.ac.kr'
-    },
-    'business': {
-        'name': '상경대학',
-        'icon': '📊',
-        'color': '#FFB700',
-        'task_id': 'yJ8Rp9AhTSVCw7Yt8',
-        'url': 'https://soe.yonsei.ac.kr'
-    },
-    'management': {
-        'name': '경영대학',
-        'icon': '💼',
-        'color': '#1E90FF',
-        'task_id': 'DjsOsls6pCpaQaKq9',
-        'url': 'https://ysb.yonsei.ac.kr'
-    },
-    'engineering': {
-        'name': '공과대학',
-        'icon': '⚙️',
-        'color': '#DC143C',
-        'task_id': 'tdcYhb8OaDnBHI8jJr',
-        'url': 'https://engineering.yonsei.ac.kr'
-    },
-    'life': {
-        'name': '생명시스템대학',
-        'icon': '🧬',
-        'color': '#228B22',
-        'task_id': 'gOKavS1YNKhNUVsNQ',
-        'url': 'https://sys.yonsei.ac.kr'
-    },
-    'ai': {
-        'name': '인공지능융합대학',
-        'icon': '🤖',
-        'color': '#9370DB',
-        'task_id': 'qb6M6hbdm2fnhxfeg',
-        'url': 'https://ai.yonsei.ac.kr'
-    },
-    'theology': {
-        'name': '신과대학',
-        'icon': '✝️',
-        'color': '#4B0082',
-        'task_id': '9akDlFeStRHdeps4t',
-        'url': 'https://theology.yonsei.ac.kr'
-    },
-    'social': {
-        'name': '사회과학대학',
-        'icon': '🏛️',
-        'color': '#2E8B57',
-        'task_id': 'hNSAPYSS35RscOWWm',
-        'url': 'https://yeri.yonsei.ac.kr/socsci'
-    },
-    'music': {
-        'name': '음악대학',
-        'icon': '🎵',
-        'color': '#FF1493',
-        'task_id': 'B3xYzP1Jqo1jVH1Me',
-        'url': 'https://music.yonsei.ac.kr'
-    },
-    'human': {
-        'name': '생활과학대학',
-        'icon': '🏠',
-        'color': '#FF6347',
-        'task_id': 'K5kXEuXSyZzY5uwpn',
-        'url': 'https://che.yonsei.ac.kr'
-    },
-    'education': {
-        'name': '교육과학대학',
-        'icon': '🎓',
-        'color': '#4169E1',
-        'task_id': '9XfmKGnPdDQWZkUjW',
-        'url': 'https://educa.yonsei.ac.kr'
-    },
-    'underwood': {
-        'name': '언더우드국제대학',
-        'icon': '🌏',
-        'color': '#FF8C00',
-        'task_id': 'Xz2t1SAdshoLSDslB',
-        'url': 'https://uic.yonsei.ac.kr'
-    },
-    'global': {
-        'name': '글로벌인재대학',
-        'icon': '🌐',
-        'color': '#008B8B',
-        'task_id': 'BwiB4aHdY2uyP4txl',
-        'url': 'https://global.yonsei.ac.kr'
-    },
-    'medicine': {
-        'name': '의과대학',
-        'icon': '⚕️',
-        'color': '#B22222',
-        'task_id': 'oAgxPnIMOv2IYhZej',
-        'url': 'https://medicine.yonsei.ac.kr'
-    },
-    'dentistry': {
-        'name': '치과대학',
-        'icon': '🦷',
-        'color': '#5F9EA0',
-        'task_id': 'etPqNCyaZNI4A8sEl',
-        'url': 'https://dentistry.yonsei.ac.kr'
-    },
-    'nursing': {
-        'name': '간호대학',
-        'icon': '💊',
-        'color': '#DB7093',
-        'task_id': 'I04xneYTZMJ8jAn4r',
-        'url': 'https://nursing.yonsei.ac.kr'
-    },
-    'pharmacy': {
-        'name': '약학대학',
-        'icon': '💉',
-        'color': '#663399',
-        'task_id': 'gjqRcgjHJr4frQhma',
-        'url': 'https://pharmacy.yonsei.ac.kr'
-    }
-}
-
 def format_content(content):
+    """공지사항 내용 포맷팅"""
     if not content:
         return ""
     content = re.sub(r'(?<!\n)(\d+\.)', r'\n\n\1', content)
@@ -231,13 +102,16 @@ def format_content(content):
     return content.strip()
 
 def save_notices_to_db(college_key, notices):
-    """크롤링한 공지사항을 DB에 저장"""
+    """크롤링한 공지사항을 DB에 저장 (새 스키마 버전)"""
     conn = get_db_connection()
     if not conn:
         return False
     
     try:
         with conn.cursor() as cur:
+            notices_new = 0
+            notices_updated = 0
+            
             for notice in notices:
                 # content_hash 생성
                 content_hash = hashlib.sha256(
@@ -252,13 +126,16 @@ def save_notices_to_db(college_key, notices):
                     except:
                         pass
                 
+                # 카테고리 자동 감지
+                category = detect_notice_category(notice)
+                
                 # notices 테이블에 저장 (중복 시 업데이트)
                 cur.execute("""
                     INSERT INTO notices (
                         college_id, title, content, department, writer,
                         original_id, original_url, published_date,
-                        content_hash, view_count
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        content_hash, view_count, category
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (college_id, original_id) 
                     DO UPDATE SET
                         title = EXCLUDED.title,
@@ -268,27 +145,39 @@ def save_notices_to_db(college_key, notices):
                         original_url = EXCLUDED.original_url,
                         published_date = EXCLUDED.published_date,
                         content_hash = EXCLUDED.content_hash,
+                        category = EXCLUDED.category,
                         last_checked_at = CURRENT_TIMESTAMP
+                    RETURNING (xmax = 0) AS is_new
                 """, (
                     college_key, notice['title'], notice.get('content'),
                     notice.get('department'), notice.get('writer'),
                     notice.get('id'), notice.get('url'),
                     published_date, content_hash,
-                    int(notice.get('views', '0').replace(',', ''))
+                    int(notice.get('views', '0').replace(',', '') if isinstance(notice.get('views'), str) else notice.get('views', 0)),
+                    category
                 ))
+                
+                result = cur.fetchone()
+                if result and result[0]:  # is_new
+                    notices_new += 1
+                else:
+                    notices_updated += 1
             
             # crawl_logs에 기록
             cur.execute("""
                 INSERT INTO crawl_logs (
                     college_id, status, notices_fetched,
+                    notices_new, notices_updated,
                     started_at, completed_at
-                ) VALUES (%s, %s, %s, %s, %s)
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
             """, (
                 college_key, 'success', len(notices),
+                notices_new, notices_updated,
                 datetime.now(), datetime.now()
             ))
             
             conn.commit()
+            logger.info(f"저장 완료 - {college_key}: 신규 {notices_new}, 업데이트 {notices_updated}")
             return True
     except Exception as e:
         logger.error(f"DB 저장 실패: {e}")
@@ -297,23 +186,64 @@ def save_notices_to_db(college_key, notices):
     finally:
         conn.close()
 
-def get_notices_from_db(college_key):
-    """DB에서 공지사항 조회"""
+def detect_notice_category(notice):
+    """공지사항 카테고리 자동 감지"""
+    title = (notice.get('title', '') or '').lower()
+    content = (notice.get('content', '') or '').lower()
+    text = f"{title} {content}"
+    
+    if any(keyword in text for keyword in ['장학', 'scholarship']):
+        return 'scholarship'
+    elif any(keyword in text for keyword in ['인턴', 'intern']):
+        return 'internship'
+    elif any(keyword in text for keyword in ['공모', 'competition', '대회']):
+        return 'competition'
+    elif any(keyword in text for keyword in ['채용', 'recruit', '모집']):
+        return 'recruitment'
+    elif any(keyword in text for keyword in ['수강', '강의', '학사', 'academic']):
+        return 'academic'
+    elif any(keyword in text for keyword in ['세미나', 'seminar', '강연']):
+        return 'seminar'
+    elif any(keyword in text for keyword in ['행사', 'event', '축제']):
+        return 'event'
+    else:
+        return 'general'
+
+def get_notices_from_db(college_key, limit=50):
+    """DB에서 공지사항 조회 (새 스키마 버전)"""
     conn = get_db_connection()
     if not conn:
         return []
     
     try:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-                SELECT id, title, content, department as writer,
-                       published_date as date, original_url as url,
-                       view_count as views
-                FROM notices
-                WHERE college_id = %s AND status = 'active'
-                ORDER BY published_date DESC
-                LIMIT 50
-            """, (college_key,))
+            # colleges 테이블에서 정보 가져오기
+            if college_key == 'all':
+                cur.execute("""
+                    SELECT n.id, n.title, n.content, n.department as writer,
+                           n.published_date as date, n.original_url as url,
+                           n.view_count as views, n.category,
+                           c.name as college_name, c.icon as college_icon, 
+                           c.color as college_color, n.college_id
+                    FROM notices n
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE n.status = 'active'
+                    ORDER BY n.published_date DESC
+                    LIMIT %s
+                """, (limit,))
+            else:
+                cur.execute("""
+                    SELECT n.id, n.title, n.content, n.department as writer,
+                           n.published_date as date, n.original_url as url,
+                           n.view_count as views, n.category,
+                           c.name as college_name, c.icon as college_icon, 
+                           c.color as college_color, n.college_id
+                    FROM notices n
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE n.college_id = %s AND n.status = 'active'
+                    ORDER BY n.published_date DESC
+                    LIMIT %s
+                """, (college_key, limit))
             
             notices = cur.fetchall()
             # 날짜 및 조회수 포맷팅
@@ -322,11 +252,49 @@ def get_notices_from_db(college_key):
                     notice['date'] = notice['date'].strftime('%Y-%m-%d')
                 notice['views'] = f"{notice['views']:,}"
                 notice['id'] = str(notice['id'])
+                # college 정보 추가 (호환성을 위해)
+                notice['college'] = {
+                    'key': notice['college_id'],
+                    'name': notice['college_name'],
+                    'icon': notice['college_icon'],
+                    'color': notice['college_color']
+                }
             
             return notices
     except Exception as e:
         logger.error(f"DB 조회 실패: {e}")
         return []
+    finally:
+        conn.close()
+
+def get_colleges_from_db():
+    """DB에서 단과대학 정보 조회"""
+    conn = get_db_connection()
+    if not conn:
+        return {}
+    
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, name, icon, color, url, apify_task_id
+                FROM colleges
+                WHERE crawl_enabled = true
+                ORDER BY display_order, name
+            """)
+            
+            colleges = {}
+            for row in cur.fetchall():
+                colleges[row['id']] = {
+                    'name': row['name'],
+                    'icon': row['icon'],
+                    'color': row['color'],
+                    'url': row['url'],
+                    'task_id': row['apify_task_id']
+                }
+            return colleges
+    except Exception as e:
+        logger.error(f"단과대학 조회 실패: {e}")
+        return {}
     finally:
         conn.close()
 
@@ -395,7 +363,7 @@ def get_apify_data(task_id):
 # ============= AUTH API =============
 @app.route('/api/auth/register', methods=['POST'])
 def register():
-    """회원가입 API"""
+    """회원가입 API (새 스키마 버전)"""
     data = request.get_json()
     conn = get_db_connection()
     
@@ -463,7 +431,7 @@ def register():
 
 @app.route('/api/auth/login', methods=['POST'])
 def login():
-    """로그인 API"""
+    """로그인 API (새 스키마 버전)"""
     data = request.get_json()
     conn = get_db_connection()
     
@@ -476,7 +444,7 @@ def login():
                 SELECT id, email, password_hash, name, student_id,
                        major, gpa, toeic_score
                 FROM users
-                WHERE email = %s
+                WHERE email = %s AND is_active = true
             """, (data['email'],))
             
             user = cur.fetchone()
@@ -522,7 +490,7 @@ def login():
     finally:
         conn.close()
 
-# ============= 페이지 라우트 (index.html이 첫 화면) =============
+# ============= 페이지 라우트 =============
 @app.route('/')
 def index():
     """메인 페이지 - index.html 제공"""
@@ -540,43 +508,86 @@ def serve_dashboard():
 def serve_settings():
     return send_from_directory(app.static_folder, 'settings.html')
 
+# SPA 라우팅을 위한 catch-all 라우트
+@app.route('/<path:path>')
+def catch_all(path):
+    """정적 파일이 있으면 서빙, 없으면 해당 HTML로 리다이렉트"""
+    file_path = os.path.join(app.static_folder, path)
+    if os.path.exists(file_path) and os.path.isfile(file_path):
+        return send_from_directory(app.static_folder, path)
+    else:
+        # HTML 페이지 요청인 경우 해당 파일로 리다이렉트
+        if path in ['auth', 'dashboard', 'settings']:
+            return send_from_directory(app.static_folder, f'{path}.html')
+        # 그 외의 경우 index.html로 리다이렉트
+        return send_from_directory(app.static_folder, 'index.html')
+
 # ============= API 라우트 =============
+@app.route('/api/colleges')
+def get_colleges():
+    """단과대학 목록 조회"""
+    colleges = get_colleges_from_db()
+    return jsonify({
+        'success': True,
+        'colleges': colleges
+    })
+
 @app.route('/api/notices/<college_key>')
 def get_notices(college_key):
-    if college_key not in COLLEGES:
+    """특정 단과대학 공지사항 조회"""
+    # DB에서 단과대학 정보 확인
+    colleges = get_colleges_from_db()
+    if college_key != 'all' and college_key not in colleges:
         return jsonify({'success': False, 'message': 'Invalid college'})
     
-    college = COLLEGES[college_key]
     notices = []
     
     # 먼저 DB에서 조회
     notices = get_notices_from_db(college_key)
     
-    # DB에 데이터가 없으면 Apify에서 가져오기
-    if not notices and APIFY_TOKEN != 'apify_api_xxxxxxxxxx':
-        apify_data = get_apify_data(college['task_id'])
-        if apify_data:
-            # DB에 저장
-            save_notices_to_db(college_key, apify_data)
-            notices = apify_data
+    # DB에 데이터가 없고 특정 단과대학이며 Apify 토큰이 있으면 크롤링
+    if not notices and college_key != 'all' and APIFY_TOKEN != 'apify_api_xxxxxxxxxx':
+        college = colleges.get(college_key)
+        if college and college.get('task_id'):
+            apify_data = get_apify_data(college['task_id'])
+            if apify_data:
+                # DB에 저장
+                save_notices_to_db(college_key, apify_data)
+                notices = get_notices_from_db(college_key)
+    
+    # 응답 데이터 구성
+    college_info = None
+    if college_key == 'all':
+        college_info = {
+            'key': 'all',
+            'name': '전체 공지사항',
+            'icon': '📋',
+            'color': '#2563eb'
+        }
+    else:
+        college = colleges.get(college_key)
+        if college:
+            college_info = {
+                'key': college_key,
+                'name': college['name'],
+                'icon': college['icon'],
+                'color': college['color']
+            }
     
     return jsonify({
         'success': True,
-        'college': {
-            'key': college_key,
-            'name': college['name'],
-            'icon': college['icon'],
-            'color': college['color']
-        },
+        'college': college_info,
         'notices': notices
     })
 
 @app.route('/notice/<college_key>/<notice_id>')
 def notice_detail(college_key, notice_id):
-    if college_key not in COLLEGES:
+    """공지사항 상세 페이지"""
+    colleges = get_colleges_from_db()
+    if college_key not in colleges:
         return "잘못된 접근입니다.", 404
     
-    college = COLLEGES[college_key]
+    college = colleges[college_key]
     notice = None
     
     # DB에서 상세 정보 조회
@@ -585,8 +596,10 @@ def notice_detail(college_key, notice_id):
         try:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("""
-                    SELECT * FROM notices
-                    WHERE id = %s OR original_id = %s
+                    SELECT n.*, c.name as college_name, c.icon as college_icon, c.color as college_color
+                    FROM notices n
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE n.id = %s OR n.original_id = %s
                     LIMIT 1
                 """, (notice_id, notice_id))
                 
@@ -598,15 +611,12 @@ def notice_detail(college_key, notice_id):
                         'content': notice_data['content'] or '',
                         'date': notice_data['published_date'].strftime('%Y-%m-%d') if notice_data['published_date'] else '',
                         'url': notice_data['original_url'] or college['url'],
-                        'department': notice_data['department'] or college['name'],
+                        'department': notice_data['department'] or notice_data['college_name'],
                         'views': f"{notice_data['view_count']:,}"
                     }
                     
-                    # 조회수 증가
-                    cur.execute("""
-                        UPDATE notices SET view_count = view_count + 1
-                        WHERE id = %s
-                    """, (notice_data['id'],))
+                    # 조회수 증가 함수 호출
+                    cur.execute("SELECT increment_notice_view_count(%s)", (notice_data['id'],))
                     conn.commit()
         except Exception as e:
             logger.error(f"상세 조회 오류: {e}")
@@ -617,6 +627,13 @@ def notice_detail(college_key, notice_id):
         return "공지사항을 찾을 수 없습니다.", 404
     
     notice['formatted_content'] = format_content(notice['content'])
+    
+    # 단과대학 정보 추가
+    college_info = {
+        'name': college['name'],
+        'icon': college['icon'],
+        'color': college['color']
+    }
     
     DETAIL_TEMPLATE = """
     <!DOCTYPE html>
@@ -646,7 +663,7 @@ def notice_detail(college_key, notice_id):
     <body>
       <div class="container">
         <div class="header">
-          <a href="/" class="back-button">← 목록으로 돌아가기</a>
+          <a href="/dashboard" class="back-button">← 목록으로 돌아가기</a>
           <div class="college-badge"><span style="font-size:1.2rem">{{ college.icon }}</span><span>{{ college.name }}</span></div>
           <h1 class="notice-title">{{ notice.title }}</h1>
           <div class="notice-meta">
@@ -660,21 +677,27 @@ def notice_detail(college_key, notice_id):
         </div>
         <div class="action-buttons">
           <a href="{{ notice.url }}" target="_blank" class="btn btn-primary">🔗 원본 페이지 보기</a>
-          <a href="/" class="btn btn-secondary">📋 목록으로</a>
+          <a href="/dashboard" class="btn btn-secondary">📋 목록으로</a>
         </div>
       </div>
     </body>
     </html>
     """
-    return render_template_string(DETAIL_TEMPLATE, notice=notice, college=college)
+    return render_template_string(DETAIL_TEMPLATE, notice=notice, college=college_info)
 
 @app.route('/api/health')
 def health_check():
+    """시스템 상태 확인"""
     db_connected = False
+    colleges_count = 0
+    
     try:
         conn = get_db_connection()
         if conn:
             db_connected = True
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM colleges")
+                colleges_count = cur.fetchone()[0]
             conn.close()
     except:
         pass
@@ -683,7 +706,7 @@ def health_check():
         'status': 'healthy',
         'message': 'DICE 서버가 정상 작동 중입니다',
         'timestamp': datetime.now().isoformat(),
-        'colleges_count': len(COLLEGES),
+        'colleges_count': colleges_count,
         'db_connected': db_connected
     })
 
@@ -705,9 +728,8 @@ if __name__ == '__main__':
     PORT = int(os.getenv('PORT', 8080))
     
     logger.info("="*60)
-    logger.info("🎓 연세대학교 통합 공지사항 시스템")
+    logger.info("🎓 연세대학교 통합 공지사항 시스템 (DICE)")
     logger.info("="*60)
-    logger.info(f"📚 지원 단과대학: {len(COLLEGES)}개")
     logger.info(f"🌐 서버 포트: {PORT}")
     logger.info(f"💾 DB 연결: {bool(DATABASE_URL)}")
     logger.info("="*60)

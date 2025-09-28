@@ -253,11 +253,11 @@
       const password = document.getElementById('password').value;
       
       try {
-        const response = await fetch('http://localhost:8080/api/auth/login', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({ email, password })
-        });
+        const response = await fetch('/api/auth/login', {  // 상대경로 사용
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ email, password })
+      });
         
         const data = await response.json();
         if (data.success) {
@@ -310,11 +310,11 @@
       };
       
       try {
-        const response = await fetch('http://localhost:8080/api/auth/register', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify(userData)
-        });
+        const response = await fetch('/api/auth/register', {  // 상대경로 사용
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(userData)
+      });
         
         const data = await response.json();
         if (data.success) {
@@ -350,8 +350,8 @@
 
     // 대시보드로 이동
     function goToDashboard() {
-      window.location.href = 'dashboard.html';
-    }
+      window.location.href = '/dashboard';  // 상대경로 사용
+  }
 
     // 페이지 로드시 로그인 상태 확인
     window.addEventListener('load', function() {
