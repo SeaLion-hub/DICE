@@ -44,26 +44,19 @@ RE_INS   = re.compile(r"^\s*insert\b", re.I)
 RE_VIEW  = re.compile(r"^\s*create\s+(or\s+replace\s+)?view\b", re.I)
 
 def is_users_create(stmt: str) -> bool:
-    # users 테이블 생성문을 탄탄하게 잡기 (schema.qualify/개행/공백 모두 허용)
+    # users 테이블 생성문만 정확히 찾기 (user_settings 등 제외)
     n = normalize_sql(stmt)
     if not n.startswith("create table"):
         return False
     
-    # 더 포괄적인 패턴으로 users 테이블 찾기
+    # 정확한 users 테이블만 찾는 패턴
     patterns = [
         r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?(\"?public\"?\.)?\"?users\"?\s*\(",
-        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?users\s*\(",
-        r"create\s+table.*\busers\s*\("
+        r"\bcreate\s+table\s+(if\s+not\s+exists\s+)?users\s*\("
     ]
     
     for pattern in patterns:
         if re.search(pattern, n):
-            return True
-    
-    # 추가 체크: 'users' 단어가 있고 테이블 생성문인지 확인
-    if 'users' in n and 'create table' in n:
-        # 다른 테이블명에 users가 포함된 경우 제외 (user_settings 등)
-        if not any(word in n for word in ['user_settings', 'user_college', 'user_notice']):
             return True
     
     return False
@@ -174,14 +167,29 @@ def apply_schema(engine, sql: str):
                 buckets["table"].remove(s)
                 break
         
-        # 여전히 없다면 모든 문장 검사
+        # 여전히 없다면 users 테이블을 동적으로 생성
         if not buckets["table_users"]:
-            print("🔍 모든 문장에서 users 테이블 검색 중...")
-            for bucket_name, bucket_stmts in buckets.items():
-                for s in bucket_stmts:
-                    if 'users' in normalize_sql(s) and 'create table' in normalize_sql(s):
-                        print(f"🎯 {bucket_name} 버킷에서 users 관련 문장 발견:")
-                        print(f"   {normalize_sql(s)[:100]}...")
+            print("🚨 schema.sql에 users 테이블이 없음. 동적으로 생성합니다.")
+            users_table_sql = """
+            CREATE TABLE IF NOT EXISTS users (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                email VARCHAR(255) UNIQUE NOT NULL,
+                password_hash VARCHAR(255) NOT NULL,
+                name VARCHAR(100),
+                student_id VARCHAR(20),
+                major VARCHAR(100),
+                gpa DECIMAL(3,2) CHECK (gpa >= 0 AND gpa <= 4.5),
+                toeic_score INTEGER CHECK (toeic_score >= 0 AND toeic_score <= 990),
+                role user_role DEFAULT 'student',
+                is_active BOOLEAN DEFAULT true,
+                email_verified BOOLEAN DEFAULT false,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TIMESTAMP WITH TIME ZONE
+            );
+            """
+            buckets["table_users"].append(users_table_sql)
+            print("✅ users 테이블을 동적으로 추가했습니다.")
 
     print(f"\n🚀 실행 순서:")
     print(f"  1. Extensions: {len(buckets['ext'])} statements")
