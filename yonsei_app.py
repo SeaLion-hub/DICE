@@ -750,7 +750,7 @@ def notice_detail(college_key, notice_id):
     <body>
       <div class="container">
         <div class="header">
-          <a href="/" class="back-button">← 목록으로 돌아가기</a>
+          <a href="/notices" class="back-button">← 목록으로 돌아가기</a>
           <div class="college-badge"><span style="font-size:1.2rem">{{ college.icon }}</span><span>{{ college.name }}</span></div>
           <h1 class="notice-title">{{ notice.title }}</h1>
           <div class="notice-meta">
@@ -764,7 +764,7 @@ def notice_detail(college_key, notice_id):
         </div>
         <div class="action-buttons">
           <a href="{{ notice.url }}" target="_blank" class="btn btn-primary">🔗 원본 페이지 보기</a>
-          <a href="/" class="btn btn-secondary">🏠 메인으로</a>
+          <a href="/notices" class="btn btn-secondary">📋 목록으로</a>
         </div>
       </div>
     </body>
