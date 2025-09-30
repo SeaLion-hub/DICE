@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>DICE – 설정</title>
+  <title>DICE — 설정</title>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800;900&display=swap" rel="stylesheet">
   <style>
     :root{
@@ -292,6 +292,27 @@
       margin-bottom:20px;
       box-shadow:var(--shadow);
     }
+
+    .loading-state{
+      text-align:center;
+      padding:40px;
+      color:var(--muted);
+    }
+
+    .spinner{
+      width:32px;
+      height:32px;
+      border:3px solid #f3f3f3;
+      border-top:3px solid var(--primary);
+      border-radius:50%;
+      animation:spin 1s linear infinite;
+      margin:0 auto 16px;
+    }
+
+    @keyframes spin{
+      0%{transform:rotate(0deg)}
+      100%{transform:rotate(360deg)}
+    }
   </style>
 </head>
 <body>
@@ -312,219 +333,130 @@
 
   <!-- Main Content -->
   <main class="main">
-    <!-- Profile Section -->
-    <div class="profile-section">
-      <div class="profile-avatar" id="profileAvatar">👤</div>
-      <div class="profile-name" id="profileName">Y2D2</div>
-      <div class="profile-email" id="profileEmail">user@email.com</div>
-      <div class="profile-details" id="profileDetails">
-        <div class="profile-detail-item">
-          <span>전공:</span> <strong id="profileMajor">미설정</strong>
-        </div>
-        <div class="profile-detail-item">
-          <span>학점:</span> <strong id="profileGpa">-</strong>
-        </div>
-        <div class="profile-detail-item">
-          <span>토익:</span> <strong id="profileToeic">-</strong>
-        </div>
-      </div>
+    <!-- Loading State -->
+    <div id="loadingState" class="loading-state">
+      <div class="spinner"></div>
+      <p>사용자 정보를 불러오는 중...</p>
     </div>
 
-    <!-- 빠른 링크 -->
-    <div class="quick-links-section">
-      <div class="settings-header">🚀 빠른 링크</div>
-      
-      <div class="setting-item" onclick="goToNotices()">
-        <div class="setting-left">
-          <div class="setting-icon">📋</div>
-          <div class="setting-info">
-            <h4>공지사항 목록</h4>
-            <p>전체 공지사항 보기</p>
+    <!-- Main Content (hidden until loaded) -->
+    <div id="mainContent" style="display:none;">
+      <!-- Profile Section -->
+      <div class="profile-section">
+        <div class="profile-avatar" id="profileAvatar">👤</div>
+        <div class="profile-name" id="profileName">사용자</div>
+        <div class="profile-email" id="profileEmail">user@email.com</div>
+        <div class="profile-details" id="profileDetails">
+          <div class="profile-detail-item">
+            <span>전공:</span> <strong id="profileMajor">미설정</strong>
+          </div>
+          <div class="profile-detail-item">
+            <span>학점:</span> <strong id="profileGpa">-</strong>
+          </div>
+          <div class="profile-detail-item">
+            <span>토익:</span> <strong id="profileToeic">-</strong>
           </div>
         </div>
-        <div class="arrow">›</div>
       </div>
-      
-      <div class="setting-item" onclick="goToBookmarks()">
-        <div class="setting-left">
-          <div class="setting-icon">⭐</div>
-          <div class="setting-info">
-            <h4>북마크</h4>
-            <p>저장한 공지사항</p>
-          </div>
-        </div>
-        <div class="arrow">›</div>
-      </div>
-    </div>
 
-    <!-- 알림 설정 -->
-    <div class="settings-section">
-      <div class="settings-header">🔔 알림 설정</div>
-      
-      <div class="setting-item" onclick="toggleSetting('pushNotifications')">
-        <div class="setting-left">
-          <div class="setting-icon">📱</div>
-          <div class="setting-info">
-            <h4>푸시 알림</h4>
-            <p>새로운 공지사항 알림 받기</p>
+      <!-- 빠른 링크 -->
+      <div class="quick-links-section">
+        <div class="settings-header">🚀 빠른 링크</div>
+        
+        <div class="setting-item" onclick="toggleSetting('aiRecommendations')">
+          <div class="setting-left">
+            <div class="setting-icon">🤖</div>
+            <div class="setting-info">
+              <h4>AI 맞춤 추천</h4>
+              <p>AI 기반 개인화 공지사항 추천</p>
+            </div>
           </div>
+          <button class="setting-toggle on" id="aiRecommendations"></button>
         </div>
-        <button class="setting-toggle on" id="pushNotifications"></button>
       </div>
-      
-      <div class="setting-item" onclick="toggleSetting('emailNotifications')">
-        <div class="setting-left">
-          <div class="setting-icon">📧</div>
-          <div class="setting-info">
-            <h4>이메일 알림</h4>
-            <p>중요한 공지사항 이메일로 받기</p>
-          </div>
-        </div>
-        <button class="setting-toggle on" id="emailNotifications"></button>
-      </div>
-      
-      <div class="setting-item" onclick="toggleSetting('deadlineAlerts')">
-        <div class="setting-left">
-          <div class="setting-icon">⏰</div>
-          <div class="setting-info">
-            <h4>마감일 알림</h4>
-            <p>신청 마감 3일 전 알림</p>
-          </div>
-        </div>
-        <button class="setting-toggle on" id="deadlineAlerts"></button>
-      </div>
-    </div>
 
-    <!-- 개인화 설정 -->
-    <div class="settings-section">
-      <div class="settings-header">🎯 개인화 설정</div>
-      
-      <div class="setting-item" onclick="openPreferences()">
-        <div class="setting-left">
-          <div class="setting-icon">❤️</div>
-          <div class="setting-info">
-            <h4>관심 분야</h4>
-            <p>장학금, 인턴십, 공모전 등</p>
+      <!-- 계정 설정 -->
+      <div class="settings-section">
+        <div class="settings-header">👤 계정 설정</div>
+        
+        <div class="setting-item" onclick="editProfile()">
+          <div class="setting-left">
+            <div class="setting-icon">✏️</div>
+            <div class="setting-info">
+              <h4>프로필 수정</h4>
+              <p>이름, 전공, 학점 등 수정</p>
+            </div>
           </div>
+          <div class="arrow">›</div>
         </div>
-        <div class="arrow">›</div>
-      </div>
-      
-      <div class="setting-item" onclick="openKeywordSettings()">
-        <div class="setting-left">
-          <div class="setting-icon">🔍</div>
-          <div class="setting-info">
-            <h4>키워드 필터</h4>
-            <p>관심 키워드 설정</p>
+        
+        <div class="setting-item" onclick="changePassword()">
+          <div class="setting-left">
+            <div class="setting-icon">🔑</div>
+            <div class="setting-info">
+              <h4>비밀번호 변경</h4>
+              <p>계정 보안 관리</p>
+            </div>
           </div>
+          <div class="arrow">›</div>
         </div>
-        <div class="arrow">›</div>
       </div>
-      
-      <div class="setting-item" onclick="openCollegeSettings()">
-        <div class="setting-left">
-          <div class="setting-icon">🏫</div>
-          <div class="setting-info">
-            <h4>구독 단과대학</h4>
-            <p>관심 있는 단과대학 선택</p>
-          </div>
-        </div>
-        <div class="arrow">›</div>
-      </div>
-      
-      <div class="setting-item" onclick="toggleSetting('aiRecommendations')">
-        <div class="setting-left">
-          <div class="setting-icon">🤖</div>
-          <div class="setting-info">
-            <h4>AI 맞춤 추천</h4>
-            <p>AI 기반 개인화 공지사항 추천</p>
-          </div>
-        </div>
-        <button class="setting-toggle on" id="aiRecommendations"></button>
-      </div>
-    </div>
 
-    <!-- 계정 설정 -->
-    <div class="settings-section">
-      <div class="settings-header">👤 계정 설정</div>
-      
-      <div class="setting-item" onclick="editProfile()">
-        <div class="setting-left">
-          <div class="setting-icon">✏️</div>
-          <div class="setting-info">
-            <h4>프로필 수정</h4>
-            <p>이름, 전공, 학점 등 수정</p>
+      <!-- 기타 설정 -->
+      <div class="settings-section">
+        <div class="settings-header">⚙️ 기타 설정</div>
+        
+        <div class="setting-item" onclick="openHelp()">
+          <div class="setting-left">
+            <div class="setting-icon">❓</div>
+            <div class="setting-info">
+              <h4>도움말</h4>
+              <p>사용법 및 FAQ</p>
+            </div>
           </div>
+          <div class="arrow">›</div>
         </div>
-        <div class="arrow">›</div>
-      </div>
-      
-      <div class="setting-item" onclick="changePassword()">
-        <div class="setting-left">
-          <div class="setting-icon">🔐</div>
-          <div class="setting-info">
-            <h4>비밀번호 변경</h4>
-            <p>계정 보안 관리</p>
+        
+        <div class="setting-item" onclick="openFeedback()">
+          <div class="setting-left">
+            <div class="setting-icon">💬</div>
+            <div class="setting-info">
+              <h4>피드백 보내기</h4>
+              <p>개선 사항이나 버그 제보</p>
+            </div>
           </div>
+          <div class="arrow">›</div>
         </div>
-        <div class="arrow">›</div>
+        
+        <div class="setting-item" onclick="openPrivacy()">
+          <div class="setting-left">
+            <div class="setting-icon">🔒</div>
+            <div class="setting-info">
+              <h4>개인정보처리방침</h4>
+              <p>데이터 사용 정책</p>
+            </div>
+          </div>
+          <div class="arrow">›</div>
+        </div>
       </div>
-    </div>
 
-    <!-- 기타 설정 -->
-    <div class="settings-section">
-      <div class="settings-header">⚙️ 기타 설정</div>
-      
-      <div class="setting-item" onclick="openHelp()">
-        <div class="setting-left">
-          <div class="setting-icon">❓</div>
+      <!-- 로그아웃 -->
+      <div class="logout-section">
+        <div class="logout-item" onclick="logout()">
+          <div class="setting-icon">🚪</div>
           <div class="setting-info">
-            <h4>도움말</h4>
-            <p>사용법 및 FAQ</p>
+            <h4>로그아웃</h4>
           </div>
         </div>
-        <div class="arrow">›</div>
       </div>
-      
-      <div class="setting-item" onclick="openFeedback()">
-        <div class="setting-left">
-          <div class="setting-icon">💬</div>
-          <div class="setting-info">
-            <h4>피드백 보내기</h4>
-            <p>개선 사항이나 버그 제보</p>
-          </div>
-        </div>
-        <div class="arrow">›</div>
-      </div>
-      
-      <div class="setting-item" onclick="openPrivacy()">
-        <div class="setting-left">
-          <div class="setting-icon">🔒</div>
-          <div class="setting-info">
-            <h4>개인정보처리방침</h4>
-            <p>데이터 사용 정책</p>
-          </div>
-        </div>
-        <div class="arrow">›</div>
-      </div>
-    </div>
 
-    <!-- 로그아웃 -->
-    <div class="logout-section">
-      <div class="logout-item" onclick="logout()">
-        <div class="setting-icon">🚪</div>
-        <div class="setting-info">
-          <h4>로그아웃</h4>
-        </div>
+      <!-- Version Info -->
+      <div class="version-info">
+        <div class="logo">🎲</div>
+        <h3>DICE v1.0.0</h3>
+        <p>연세대학교 통합 공지사항 시스템</p>
+        <p>© 2025 DICE Team</p>
       </div>
-    </div>
-
-    <!-- Version Info -->
-    <div class="version-info">
-      <div class="logo">🎲</div>
-      <h3>DICE v1.0.0</h3>
-      <p>연세대학교 통합 공지사항 시스템</p>
-      <p>© 2025 DICE Team</p>
     </div>
   </main>
 
@@ -549,7 +481,8 @@
   </nav>
 
   <script>
-    // 설정 상태 관리
+    // ===== 전역 변수 =====
+    let currentUser = null;
     let settings = {
       pushNotifications: true,
       emailNotifications: true,
@@ -557,19 +490,40 @@
       aiRecommendations: true
     };
 
-    // 초기화
-    window.addEventListener('load', function() {
-      loadUserProfile();
-      loadSettings();
+    // ===== 초기화 =====
+    window.addEventListener('load', async function() {
+      await checkAuthStatus();
+      await loadUserProfile();
+      await loadSettings();
+      showMainContent();
     });
 
-    function loadUserProfile() {
-      const currentUser = JSON.parse(localStorage.getItem('dice_current_user') || 'null');
-      
-      if (!currentUser) {
-        window.location.href = 'auth.html';
-        return;
+    // ===== 인증 상태 확인 =====
+    async function checkAuthStatus() {
+      try {
+        const response = await fetch('/api/auth/me', {
+          credentials: 'include'
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.authenticated) {
+            currentUser = data.user;
+            return;
+          }
+        }
+        
+        // 인증되지 않은 경우 로그인 페이지로 리다이렉트
+        window.location.href = '/auth';
+      } catch (error) {
+        console.error('Auth check error:', error);
+        window.location.href = '/auth';
       }
+    }
+
+    // ===== 사용자 프로필 로드 =====
+    async function loadUserProfile() {
+      if (!currentUser) return;
       
       const email = currentUser.email;
       const name = currentUser.name || email.split('@')[0].toUpperCase();
@@ -590,9 +544,23 @@
       }
     }
 
-    function loadSettings() {
-      const savedSettings = JSON.parse(localStorage.getItem('dice_settings') || '{}');
-      settings = { ...settings, ...savedSettings };
+    // ===== 설정 로드 =====
+    async function loadSettings() {
+      try {
+        const response = await fetch('/api/user/settings', {
+          credentials: 'include'
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.success && data.settings) {
+            settings = { ...settings, ...data.settings };
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load settings:', error);
+        // 기본값 사용
+      }
       
       // UI 업데이트
       Object.keys(settings).forEach(key => {
@@ -603,10 +571,29 @@
       });
     }
 
-    function saveSettings() {
-      localStorage.setItem('dice_settings', JSON.stringify(settings));
+    // ===== 설정 저장 =====
+    async function saveSettings() {
+      try {
+        await fetch('/api/user/settings', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(settings),
+          credentials: 'include'
+        });
+      } catch (error) {
+        console.error('Failed to save settings:', error);
+      }
     }
 
+    // ===== UI 표시 =====
+    function showMainContent() {
+      document.getElementById('loadingState').style.display = 'none';
+      document.getElementById('mainContent').style.display = 'block';
+    }
+
+    // ===== 설정 토글 =====
     function toggleSetting(settingName) {
       settings[settingName] = !settings[settingName];
       const toggle = document.getElementById(settingName);
@@ -664,10 +651,9 @@
       }, 2000);
     }
 
-    // 각 설정 페이지 함수들
+    // ===== 각 설정 페이지 함수들 =====
     function goToNotices() {
-      // 공지사항 목록 페이지로 이동
-      window.location.href = '/notices';  // 공지사항 선택 페이지로 이동
+      window.location.href = '/dashboard';
     }
 
     function goToBookmarks() {
@@ -678,12 +664,48 @@
       alert('관심 분야 설정 페이지로 이동합니다.\n(장학금, 인턴십, 공모전, 채용, 학사 등)');
     }
 
-    function openKeywordSettings() {
-      const keywords = prompt('알림 받을 키워드를 입력하세요 (쉼표로 구분):\n예: AI, 장학금, 인턴십');
-      if (keywords && keywords.trim()) {
-        const keywordList = keywords.split(',').map(k => k.trim()).filter(k => k);
-        localStorage.setItem('dice_filter_keywords', JSON.stringify(keywordList));
-        showToast(`키워드가 설정되었습니다: ${keywordList.join(', ')}`);
+    async function openKeywordSettings() {
+      try {
+        // 현재 설정된 키워드 가져오기
+        const response = await fetch('/api/user/keywords', {
+          credentials: 'include'
+        });
+        
+        let currentKeywords = [];
+        if (response.ok) {
+          const data = await response.json();
+          currentKeywords = data.keywords || [];
+        }
+        
+        const keywords = prompt(
+          '알림 받을 키워드를 입력하세요 (쉼표로 구분):\n' +
+          `현재 설정: ${currentKeywords.join(', ')}\n\n` +
+          '예: AI, 장학금, 인턴십',
+          currentKeywords.join(', ')
+        );
+        
+        if (keywords !== null) {
+          const keywordList = keywords.split(',').map(k => k.trim()).filter(k => k);
+          
+          // 서버에 저장
+          const saveResponse = await fetch('/api/user/keywords', {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ keywords: keywordList }),
+            credentials: 'include'
+          });
+          
+          if (saveResponse.ok) {
+            showToast(`키워드가 설정되었습니다: ${keywordList.join(', ')}`);
+          } else {
+            alert('키워드 설정에 실패했습니다.');
+          }
+        }
+      } catch (error) {
+        console.error('Keyword settings error:', error);
+        alert('키워드 설정 중 오류가 발생했습니다.');
       }
     }
 
@@ -693,7 +715,6 @@
 
     function editProfile() {
       alert('프로필 수정 페이지로 이동합니다.\n전공, 학점, 토익점수 등을 수정할 수 있습니다.');
-      // 실제로는 프로필 수정 페이지로 이동
     }
 
     function changePassword() {
@@ -707,7 +728,19 @@
     function openFeedback() {
       const feedback = prompt('개선 사항이나 버그를 알려주세요:');
       if (feedback && feedback.trim()) {
-        showToast('피드백이 전송되었습니다. 감사합니다!');
+        // 서버에 피드백 전송
+        fetch('/api/feedback', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ message: feedback }),
+          credentials: 'include'
+        }).then(() => {
+          showToast('피드백이 전송되었습니다. 감사합니다!');
+        }).catch(() => {
+          showToast('피드백 전송에 실패했습니다.');
+        });
       }
     }
 
@@ -715,29 +748,36 @@
       alert('개인정보처리방침\n\n수집하는 정보:\n• 이메일 주소 (계정 식별용)\n• 전공, 학점, 토익점수 (맞춤 추천용)\n• 관심 분야 (맞춤 추천용)\n\n제3자 제공: 하지 않음\n보관 기간: 탈퇴시까지');
     }
 
-    function logout() {
+    // ===== 로그아웃 =====
+    async function logout() {
       if (confirm('정말 로그아웃하시겠습니까?')) {
-        localStorage.removeItem('dice_current_user');
-        localStorage.removeItem('dice_settings');
-        localStorage.removeItem('dice_token');
-        localStorage.removeItem('dice_filter_keywords');
-        window.location.href = 'index.html';
+        try {
+          await fetch('/api/auth/logout', {
+            method: 'POST',
+            credentials: 'include'
+          });
+        } catch (error) {
+          console.error('Logout error:', error);
+        } finally {
+          window.location.href = '/';
+        }
       }
     }
 
+    // ===== 네비게이션 =====
     function goToPage(page) {
       document.querySelectorAll('.nav-item').forEach(item => item.classList.remove('active'));
       event.target.closest('.nav-item').classList.add('active');
 
       switch(page) {
         case 'home':
-          window.location.href = 'dashboard.html';
+          window.location.href = '/dashboard';
           break;
         case 'calendar':
-          window.location.href = 'calendar.html';
+          window.location.href = '/calendar';
           break;
         case 'ai':
-          window.location.href = 'ai-chat.html';
+          window.location.href = '/ai-chat';
           break;
         case 'settings':
           // 현재 페이지
@@ -746,4 +786,102 @@
     }
   </script>
 </body>
-</html>
+</html>="goToNotices()">
+          <div class="setting-left">
+            <div class="setting-icon">📋</div>
+            <div class="setting-info">
+              <h4>공지사항 목록</h4>
+              <p>전체 공지사항 보기</p>
+            </div>
+          </div>
+          <div class="arrow">›</div>
+        </div>
+        
+        <div class="setting-item" onclick="goToBookmarks()">
+          <div class="setting-left">
+            <div class="setting-icon">⭐</div>
+            <div class="setting-info">
+              <h4>북마크</h4>
+              <p>저장한 공지사항</p>
+            </div>
+          </div>
+          <div class="arrow">›</div>
+        </div>
+      </div>
+
+      <!-- 알림 설정 -->
+      <div class="settings-section">
+        <div class="settings-header">🔔 알림 설정</div>
+        
+        <div class="setting-item" onclick="toggleSetting('pushNotifications')">
+          <div class="setting-left">
+            <div class="setting-icon">📱</div>
+            <div class="setting-info">
+              <h4>푸시 알림</h4>
+              <p>새로운 공지사항 알림 받기</p>
+            </div>
+          </div>
+          <button class="setting-toggle on" id="pushNotifications"></button>
+        </div>
+        
+        <div class="setting-item" onclick="toggleSetting('emailNotifications')">
+          <div class="setting-left">
+            <div class="setting-icon">📧</div>
+            <div class="setting-info">
+              <h4>이메일 알림</h4>
+              <p>중요한 공지사항 이메일로 받기</p>
+            </div>
+          </div>
+          <button class="setting-toggle on" id="emailNotifications"></button>
+        </div>
+        
+        <div class="setting-item" onclick="toggleSetting('deadlineAlerts')">
+          <div class="setting-left">
+            <div class="setting-icon">⏰</div>
+            <div class="setting-info">
+              <h4>마감일 알림</h4>
+              <p>신청 마감 3일 전 알림</p>
+            </div>
+          </div>
+          <button class="setting-toggle on" id="deadlineAlerts"></button>
+        </div>
+      </div>
+
+      <!-- 개인화 설정 -->
+      <div class="settings-section">
+        <div class="settings-header">🎯 개인화 설정</div>
+        
+        <div class="setting-item" onclick="openPreferences()">
+          <div class="setting-left">
+            <div class="setting-icon">❤️</div>
+            <div class="setting-info">
+              <h4>관심 분야</h4>
+              <p>장학금, 인턴십, 공모전 등</p>
+            </div>
+          </div>
+          <div class="arrow">›</div>
+        </div>
+        
+        <div class="setting-item" onclick="openKeywordSettings()">
+          <div class="setting-left">
+            <div class="setting-icon">🔍</div>
+            <div class="setting-info">
+              <h4>키워드 필터</h4>
+              <p>관심 키워드 설정</p>
+            </div>
+          </div>
+          <div class="arrow">›</div>
+        </div>
+        
+        <div class="setting-item" onclick="openCollegeSettings()">
+          <div class="setting-left">
+            <div class="setting-icon">🏫</div>
+            <div class="setting-info">
+              <h4>구독 단과대학</h4>
+              <p>관심 있는 단과대학 선택</p>
+            </div>
+          </div>
+          <div class="arrow">›</div>
+        </div>
+        
+        <div class="setting-item" onclicks

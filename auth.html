@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>DICE – 로그인 및 회원가입</title>
+  <title>DICE — 로그인 및 회원가입</title>
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;900&display=swap" rel="stylesheet">
   <style>
     :root{
@@ -63,6 +63,7 @@
       transition:.2s ease;
     }
     .btn:hover{background:var(--primary-700)}
+    .btn:disabled{background:#94a3b8;cursor:not-allowed}
 
     .switch{text-align:center;margin-top:18px;font-size:14px}
     .back-link{
@@ -102,6 +103,38 @@
       font-size:14px;
       font-weight:600;
     }
+
+    .error-message{
+      background:#fee2e2;
+      color:#dc2626;
+      padding:12px 16px;
+      border-radius:8px;
+      margin-bottom:20px;
+      font-size:14px;
+      font-weight:600;
+    }
+
+    .loading{
+      display:none;
+      align-items:center;
+      gap:8px;
+      color:var(--muted);
+      font-size:14px;
+    }
+
+    .spinner{
+      width:16px;
+      height:16px;
+      border:2px solid #f3f3f3;
+      border-top:2px solid var(--primary);
+      border-radius:50%;
+      animation:spin 1s linear infinite;
+    }
+
+    @keyframes spin{
+      0%{transform:rotate(0deg)}
+      100%{transform:rotate(360deg)}
+    }
   </style>
 </head>
 <body>
@@ -134,6 +167,9 @@
         </svg>
         <h2>로그인</h2>
         <p>DICE 계정으로 로그인하세요</p>
+        
+        <div id="loginError" class="error-message" style="display:none"></div>
+        
         <form onsubmit="handleLogin(event)">
           <div>
             <label for="email">이메일</label>
@@ -143,7 +179,13 @@
             <label for="password">비밀번호</label>
             <input type="password" id="password" placeholder="비밀번호를 입력하세요" required>
           </div>
-          <button type="submit" class="btn">로그인</button>
+          <button type="submit" class="btn" id="loginBtn">
+            <span class="btn-text">로그인</span>
+            <div class="loading">
+              <div class="spinner"></div>
+              <span>로그인 중...</span>
+            </div>
+          </button>
         </form>
         <div class="switch">계정이 없으신가요? <a onclick="showPage('signup')">회원가입</a></div>
       </div>
@@ -160,6 +202,9 @@
         </svg>
         <h2>회원가입</h2>
         <p>새로운 계정을 생성하세요</p>
+        
+        <div id="signupError" class="error-message" style="display:none"></div>
+        
         <form onsubmit="handleSignup(event)">
           <div class="form-section-title">기본 정보</div>
           <div>
@@ -219,7 +264,13 @@
             </div>
           </div>
           
-          <button type="submit" class="btn" style="margin-top:12px;">회원가입</button>
+          <button type="submit" class="btn" id="signupBtn" style="margin-top:12px;">
+            <span class="btn-text">회원가입</span>
+            <div class="loading">
+              <div class="spinner"></div>
+              <span>가입 중...</span>
+            </div>
+          </button>
         </form>
         <div class="switch">이미 계정이 있으신가요? <a onclick="showPage('login')">로그인</a></div>
       </div>
@@ -244,46 +295,78 @@
     function showPage(id){
       document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
       document.getElementById(id).classList.add('active');
+      clearErrors();
+    }
+
+    // 에러 메시지 관리
+    function showError(elementId, message) {
+      const errorEl = document.getElementById(elementId);
+      errorEl.textContent = message;
+      errorEl.style.display = 'block';
+    }
+
+    function clearErrors() {
+      document.getElementById('loginError').style.display = 'none';
+      document.getElementById('signupError').style.display = 'none';
+    }
+
+    // 로딩 상태 관리
+    function setLoading(buttonId, isLoading) {
+      const btn = document.getElementById(buttonId);
+      const btnText = btn.querySelector('.btn-text');
+      const loading = btn.querySelector('.loading');
+      
+      if (isLoading) {
+        btn.disabled = true;
+        btnText.style.display = 'none';
+        loading.style.display = 'flex';
+      } else {
+        btn.disabled = false;
+        btnText.style.display = 'block';
+        loading.style.display = 'none';
+      }
     }
 
     // 로그인 처리
     async function handleLogin(event) {
       event.preventDefault();
+      clearErrors();
+      setLoading('loginBtn', true);
+      
       const email = document.getElementById('email').value;
       const password = document.getElementById('password').value;
       
       try {
-        const response = await fetch('/api/auth/login', {  // 상대경로 사용
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ email, password })
-      });
+        const response = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({ email, password }),
+          credentials: 'include' // 쿠키 포함
+        });
         
         const data = await response.json();
-        if (data.success) {
-          localStorage.setItem('dice_current_user', JSON.stringify(data.user));
-          localStorage.setItem('dice_token', data.token);
+        
+        if (response.ok && data.success) {
           showPage('dashboard');
         } else {
-          alert(data.message || '이메일 또는 비밀번호가 잘못되었습니다.');
+          showError('loginError', data.message || '이메일 또는 비밀번호가 잘못되었습니다.');
         }
       } catch (error) {
-        // 오프라인 모드 (로컬 스토리지)
-        const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
-        const user = users.find(u => u.email === email && u.password === password);
-        
-        if (user) {
-          localStorage.setItem('dice_current_user', JSON.stringify(user));
-          showPage('dashboard');
-        } else {
-          alert('이메일 또는 비밀번호가 잘못되었습니다.');
-        }
+        console.error('Login error:', error);
+        showError('loginError', '서버 연결에 실패했습니다. 잠시 후 다시 시도해주세요.');
+      } finally {
+        setLoading('loginBtn', false);
       }
     }
 
     // 회원가입 처리
     async function handleSignup(event) {
       event.preventDefault();
+      clearErrors();
+      setLoading('signupBtn', true);
+      
       const email = document.getElementById('newemail').value;
       const password = document.getElementById('newpassword').value;
       const confirmPassword = document.getElementById('confirmpassword').value;
@@ -294,71 +377,87 @@
       const toeic_score = document.getElementById('toeic_score').value ? parseInt(document.getElementById('toeic_score').value) : null;
       
       if (password !== confirmPassword) {
-        alert('비밀번호가 일치하지 않습니다.');
+        showError('signupError', '비밀번호가 일치하지 않습니다.');
+        setLoading('signupBtn', false);
         return;
       }
       
       const userData = {
         email,
-        password, // 실제 환경에서는 서버에서 해시 처리
+        password,
         name,
         student_id,
         major,
         gpa,
-        toeic_score,
-        createdAt: new Date().toISOString()
+        toeic_score
       };
       
       try {
-        const response = await fetch('/api/auth/register', {  // 상대경로 사용
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(userData)
-      });
+        const response = await fetch('/api/auth/register', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(userData),
+          credentials: 'include' // 쿠키 포함
+        });
         
         const data = await response.json();
-        if (data.success) {
-          localStorage.setItem('dice_current_user', JSON.stringify(data.user));
-          localStorage.setItem('dice_token', data.token);
-          alert('회원가입이 완료되었습니다!');
+        
+        if (response.ok && data.success) {
           showPage('dashboard');
         } else {
-          alert(data.message || '회원가입에 실패했습니다.');
+          showError('signupError', data.message || '회원가입에 실패했습니다.');
         }
       } catch (error) {
-        // 오프라인 모드 (로컬 스토리지)
-        const users = JSON.parse(localStorage.getItem('dice_users') || '[]');
-        if (users.find(u => u.email === email)) {
-          alert('이미 등록된 이메일입니다.');
-          return;
-        }
-        
-        users.push(userData);
-        localStorage.setItem('dice_users', JSON.stringify(users));
-        localStorage.setItem('dice_current_user', JSON.stringify(userData));
-        alert('회원가입이 완료되었습니다!');
-        showPage('dashboard');
+        console.error('Signup error:', error);
+        showError('signupError', '서버 연결에 실패했습니다. 잠시 후 다시 시도해주세요.');
+      } finally {
+        setLoading('signupBtn', false);
       }
     }
 
     // 로그아웃
-    function logout() {
-      localStorage.removeItem('dice_current_user');
-      localStorage.removeItem('dice_token');
-      showPage('login');
+    async function logout() {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          credentials: 'include'
+        });
+      } catch (error) {
+        console.error('Logout error:', error);
+      } finally {
+        // 로그아웃은 항상 성공한 것으로 처리
+        window.location.href = '/';
+      }
     }
 
     // 대시보드로 이동
     function goToDashboard() {
-      window.location.href = '/dashboard';  // 상대경로 사용
-  }
+      window.location.href = '/dashboard';
+    }
 
-    // 페이지 로드시 로그인 상태 확인
-    window.addEventListener('load', function() {
-      const currentUser = localStorage.getItem('dice_current_user');
-      if (currentUser) {
-        showPage('dashboard');
+    // 페이지 로드시 인증 상태 확인
+    window.addEventListener('load', async function() {
+      try {
+        const response = await fetch('/api/auth/me', {
+          credentials: 'include'
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.authenticated) {
+            // 이미 로그인된 상태면 대시보드로 리다이렉트
+            window.location.href = '/dashboard';
+            return;
+          }
+        }
+      } catch (error) {
+        console.error('Auth check error:', error);
       }
+      
+      // 로그인되지 않은 상태면 로그인 페이지 표시
+      showPage('login');
     });
   </script>
 </body>

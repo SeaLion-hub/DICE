@@ -75,6 +75,10 @@
     .empty-state{ text-align:center; padding:60px; color:var(--muted); }
     .empty-state .icon{ font-size:48px; margin-bottom:16px; opacity:0.5 }
 
+    .error-state{ text-align:center; padding:60px; color:#dc2626; }
+    .error-state .icon{ font-size:48px; margin-bottom:16px; opacity:0.5 }
+    .retry-btn{ background:var(--primary); color:white; border:none; padding:10px 20px; border-radius:8px; cursor:pointer; margin-top:16px; }
+
     .bottom-nav{ position:fixed; bottom:0; left:0; right:0; background:#fff; border-top:1px solid var(--border); display:flex; justify-content:space-around; padding:8px 0; z-index:1000; }
     .nav-item{ display:flex; flex-direction:column; align-items:center; background:none; border:none; padding:8px 12px; cursor:pointer; transition:.2s ease; color:var(--muted); }
     .nav-item.active{ color:var(--primary); }
@@ -97,7 +101,7 @@
         <span class="name">DICE</span>
       </div>
       <div class="user-menu">
-        <span class="user-email" id="userEmail">user@email.com</span>
+        <span class="user-email" id="userEmail">로딩중...</span>
         <button class="logout-btn" onclick="logout()">로그아웃</button>
       </div>
     </div>
@@ -105,13 +109,13 @@
 
   <main class="main">
     <div class="welcome">
-      <h1>안녕하세요, Y2D2님!</h1>
+      <h1 id="welcomeMessage">안녕하세요!</h1>
       <p>오늘 새로운 공지사항 <span id="todayCount">0</span>개가 있습니다.</p>
       <div class="stats">
         <div class="stat-item"><div class="stat-number" id="totalNotices">0</div><div class="stat-label">지원 가능</div></div>
         <div class="stat-item"><div class="stat-number" id="urgentNotices">0</div><div class="stat-label">마감임박</div></div>
-        <div class="stat-item"><div class="stat-number" id="scholarships">1</div><div class="stat-label">장학금</div></div>
-        <div class="stat-item"><div class="stat-number" id="internships">1</div><div class="stat-label">인턴십</div></div>
+        <div class="stat-item"><div class="stat-number" id="scholarships">0</div><div class="stat-label">장학금</div></div>
+        <div class="stat-item"><div class="stat-number" id="internships">0</div><div class="stat-label">인턴십</div></div>
       </div>
     </div>
 
@@ -151,9 +155,16 @@
         <p>공지사항을 불러오는 중...</p>
       </div>
 
+      <div id="errorContainer" class="error-state" style="display:none">
+        <div class="icon">⚠️</div>
+        <h3>데이터를 불러올 수 없습니다</h3>
+        <p id="errorMessage">서버 연결에 실패했습니다.</p>
+        <button class="retry-btn" onclick="loadAllNotices()">다시 시도</button>
+      </div>
+
       <div class="notices-grid" id="noticesGrid"></div>
       <div id="emptyState" class="empty-state" style="display:none">
-        <div class="icon">📭</div>
+        <div class="icon">🔭</div>
         <p>표시할 공지사항이 없습니다.</p>
       </div>
     </div>
@@ -175,109 +186,154 @@
   </nav>
 
   <script>
-    // ===== 전역 =====
+    // ===== 전역 변수 =====
     let allNotices = [];
     let filteredNotices = [];
     let currentCollege = 'all';
-    const FLASK_API_URL = ''; // 같은 오리진에서 서빙하므로 빈 문자열
+    let currentUser = null;
+    let colleges = {}; // 서버에서 로드
 
-    const colleges = {
-      'main': { name: '메인 공지사항', icon: '🏫', color: '#003876' },
-      'liberal': { name: '문과대학', icon: '📚', color: '#8B4513' },
-      'business': { name: '상경대학', icon: '📊', color: '#FFB700' },
-      'management': { name: '경영대학', icon: '💼', color: '#1E90FF' },
-      'engineering': { name: '공과대학', icon: '⚙️', color: '#DC143C' },
-      'life': { name: '생명시스템대학', icon: '🧬', color: '#228B22' },
-      'ai': { name: '인공지능융합대학', icon: '🤖', color: '#9370DB' },
-      'theology': { name: '신과대학', icon: '✝️', color: '#4B0082' },
-      'social': { name: '사회과학대학', icon: '🏛️', color: '#2E8B57' },
-      'music': { name: '음악대학', icon: '🎵', color: '#FF1493' },
-      'human': { name: '생활과학대학', icon: '🏠', color: '#FF6347' },
-      'education': { name: '교육과학대학', icon: '🎓', color: '#4169E1' },
-      'underwood': { name: '언더우드국제대학', icon: '🌍', color: '#FF8C00' },
-      'global': { name: '글로벌인재대학', icon: '🌏', color: '#008B8B' },
-      'medicine': { name: '의과대학', icon: '⚕️', color: '#B22222' },
-      'dentistry': { name: '치과대학', icon: '🦷', color: '#5F9EA0' },
-      'nursing': { name: '간호대학', icon: '💊', color: '#DB7093' },
-      'pharmacy': { name: '약학대학', icon: '💉', color: '#663399' }
-    };
-
-    // 초기화
-    window.addEventListener('load', () => {
-      checkAuthStatus();
+    // ===== 초기화 =====
+    window.addEventListener('load', async () => {
+      await checkAuthStatus();
+      await loadColleges();
       initializeCollegeTabs();
-      loadAllNotices();
+      await loadAllNotices();
     });
 
-    function checkAuthStatus() {
-      const currentUser = JSON.parse(localStorage.getItem('dice_current_user') || 'null');
-      if (!currentUser) { window.location.href = 'auth.html'; return; }
-      document.getElementById('userEmail').textContent = currentUser.email;
+    // ===== 인증 상태 확인 =====
+    async function checkAuthStatus() {
+      try {
+        const response = await fetch('/api/auth/me', {
+          credentials: 'include'
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          if (data.authenticated) {
+            currentUser = data.user;
+            document.getElementById('userEmail').textContent = currentUser.email;
+            const name = currentUser.name || currentUser.email.split('@')[0];
+            document.getElementById('welcomeMessage').textContent = `안녕하세요, ${name}님!`;
+            return;
+          }
+        }
+        
+        // 인증되지 않은 경우 로그인 페이지로 리다이렉트
+        window.location.href = '/auth';
+      } catch (error) {
+        console.error('Auth check error:', error);
+        window.location.href = '/auth';
+      }
     }
 
+    // ===== 단과대학 목록 로드 =====
+    async function loadColleges() {
+      try {
+        const response = await fetch('/api/colleges', {
+          credentials: 'include'
+        });
+        
+        if (response.ok) {
+          const data = await response.json();
+          colleges = data.colleges || {};
+        } else {
+          console.error('Failed to load colleges');
+          // 기본값 사용
+          colleges = {
+            'main': { name: '메인 공지사항', icon: '🏫', color: '#003876' },
+            'liberal': { name: '문과대학', icon: '📚', color: '#8B4513' },
+            'business': { name: '상경대학', icon: '📊', color: '#FFB700' },
+            'engineering': { name: '공과대학', icon: '⚙️', color: '#DC143C' }
+          };
+        }
+      } catch (error) {
+        console.error('Error loading colleges:', error);
+        // 기본값 사용
+        colleges = {
+          'main': { name: '메인 공지사항', icon: '🏫', color: '#003876' },
+          'liberal': { name: '문과대학', icon: '📚', color: '#8B4513' },
+          'business': { name: '상경대학', icon: '📊', color: '#FFB700' },
+          'engineering': { name: '공과대학', icon: '⚙️', color: '#DC143C' }
+        };
+      }
+    }
+
+    // ===== 단과대학 탭 초기화 =====
     function initializeCollegeTabs() {
       const tabsContainer = document.getElementById('collegeTabs');
       let tabsHtml = `<button class="tab active" onclick="selectCollege('all', this)">전체</button>`;
+      
       for (const [key, college] of Object.entries(colleges)) {
         tabsHtml += `<button class="tab" onclick="selectCollege('${key}', this)">${college.icon} ${college.name}</button>`;
       }
+      
       tabsContainer.innerHTML = tabsHtml;
     }
 
+    // ===== 공지사항 로드 =====
     async function loadAllNotices() {
       showLoading(true);
+      hideError();
       allNotices = [];
+      
       try {
-        // 서버 헬스 체크
-        const ok = await fetch(`${FLASK_API_URL}/api/health`).then(r => r.ok).catch(() => false);
-        if (!ok) throw new Error('Flask 서버에 연결할 수 없습니다');
-
-        // 모든 단과대학 호출
-        const collegeKeys = Object.keys(colleges);
-        const batchSize = 5;
-        for (let i = 0; i < collegeKeys.length; i += batchSize) {
-          const batch = collegeKeys.slice(i, i + batchSize);
-          const batchResults = await Promise.all(batch.map(async (key) => {
-            try {
-              const res = await fetch(`${FLASK_API_URL}/api/notices/${key}`, { headers: { 'Cache-Control': 'no-cache' }});
-              if (!res.ok) return [];
-              const data = await res.json();
-              if (!data.success || !data.notices) return [];
-              return data.notices.map(n => ({ ...n, college: data.college, collegeKey: key }));
-            } catch { return []; }
-          }));
-          allNotices.push(...batchResults.flat());
+        const response = await fetch('/api/notices/all', {
+          credentials: 'include'
+        });
+        
+        if (!response.ok) {
+          throw new Error(`서버 오류: ${response.status}`);
         }
-
-        if (allNotices.length === 0) throw new Error('크롤링된 공지사항이 없습니다');
-
-        // 최신순 정렬
-        allNotices.sort((a,b) => new Date(b.date) - new Date(a.date));
-
-        updateStats();
-        filterAndDisplayNotices();
-
-      } catch (e) {
-        console.error('크롤링 데이터 로드 실패:', e);
-        showError('실시간 공지사항을 불러올 수 없습니다. Flask 서버(yonsei_app.py)를 실행해주세요.');
+        
+        const data = await response.json();
+        
+        if (data.success && data.notices) {
+          allNotices = data.notices.map(notice => ({
+            ...notice,
+            college: colleges[notice.collegeKey] || { name: '알 수 없음', icon: '❓', color: '#666' }
+          }));
+          
+          // 최신순 정렬
+          allNotices.sort((a, b) => new Date(b.date) - new Date(a.date));
+          
+          updateStats();
+          filterAndDisplayNotices();
+        } else {
+          throw new Error(data.message || '공지사항을 불러올 수 없습니다.');
+        }
+        
+      } catch (error) {
+        console.error('Load notices error:', error);
+        showError(error.message || '공지사항을 불러오는 중 오류가 발생했습니다.');
       } finally {
         showLoading(false);
       }
     }
 
+    // ===== 통계 업데이트 =====
     function updateStats() {
       const today = new Date().toISOString().split('T')[0];
       const todayNotices = allNotices.filter(n => n.date === today);
       document.getElementById('todayCount').textContent = todayNotices.length;
       document.getElementById('totalNotices').textContent = allNotices.length;
 
-      const scholarships = allNotices.filter(n => (n.title||'').includes('장학') || (n.content||'').includes('장학')).length;
-      const internships = allNotices.filter(n => (n.title||'').includes('인턴') || (n.content||'').includes('인턴')).length;
+      const scholarships = allNotices.filter(n => 
+        (n.title||'').toLowerCase().includes('장학') || 
+        (n.content||'').toLowerCase().includes('장학')
+      ).length;
+      
+      const internships = allNotices.filter(n => 
+        (n.title||'').toLowerCase().includes('인턴') || 
+        (n.content||'').toLowerCase().includes('인턴')
+      ).length;
+      
       document.getElementById('scholarships').textContent = scholarships;
       document.getElementById('internships').textContent = internships;
       document.getElementById('urgentNotices').textContent = Math.floor(allNotices.length * 0.1);
     }
 
+    // ===== 단과대학 선택 =====
     function selectCollege(collegeKey, btn) {
       currentCollege = collegeKey;
       document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -285,19 +341,31 @@
       filterAndDisplayNotices();
     }
 
+    // ===== 필터링 및 정렬 =====
     function filterAndDisplayNotices() {
       let notices = [...allNotices];
 
-      if (currentCollege !== 'all') notices = notices.filter(n => n.collegeKey === currentCollege);
-
-      const searchTerm = (document.getElementById('searchInput').value || '').toLowerCase();
-      if (searchTerm) {
-        notices = notices.filter(n => (n.title||'').toLowerCase().includes(searchTerm) || (n.content||'').toLowerCase().includes(searchTerm));
+      // 단과대학 필터
+      if (currentCollege !== 'all') {
+        notices = notices.filter(n => n.collegeKey === currentCollege);
       }
 
+      // 검색어 필터
+      const searchTerm = (document.getElementById('searchInput').value || '').toLowerCase();
+      if (searchTerm) {
+        notices = notices.filter(n => 
+          (n.title||'').toLowerCase().includes(searchTerm) || 
+          (n.content||'').toLowerCase().includes(searchTerm)
+        );
+      }
+
+      // 카테고리 필터
       const category = document.getElementById('categoryFilter').value;
       if (category) {
-        notices = notices.filter(n => (n.title||'').includes(category) || (n.content||'').includes(category));
+        notices = notices.filter(n => 
+          (n.title||'').includes(category) || 
+          (n.content||'').includes(category)
+        );
       }
 
       filteredNotices = notices;
@@ -307,10 +375,16 @@
     function sortNotices() {
       const sortBy = document.getElementById('sortFilter').value;
       switch (sortBy) {
-        case 'title': filteredNotices.sort((a,b) => (a.title||'').localeCompare(b.title||'')); break;
-        case 'college': filteredNotices.sort((a,b) => (a.college?.name||'').localeCompare(b.college?.name||'')); break;
+        case 'title':
+          filteredNotices.sort((a, b) => (a.title||'').localeCompare(b.title||''));
+          break;
+        case 'college':
+          filteredNotices.sort((a, b) => (a.college?.name||'').localeCompare(b.college?.name||''));
+          break;
         case 'date':
-        default: filteredNotices.sort((a,b) => new Date(b.date) - new Date(a.date)); break;
+        default:
+          filteredNotices.sort((a, b) => new Date(b.date) - new Date(a.date));
+          break;
       }
       displayNotices();
     }
@@ -319,12 +393,16 @@
       const container = document.getElementById('noticesGrid');
       const title = document.getElementById('noticesTitle');
 
-      if (!filteredNotices.length) { showEmptyState('조건에 맞는 공지사항이 없습니다.'); return; }
+      if (!filteredNotices.length) {
+        showEmptyState('조건에 맞는 공지사항이 없습니다.');
+        return;
+      }
+      
       hideEmptyState();
 
       title.textContent = currentCollege === 'all'
         ? `전체 공지사항 (${filteredNotices.length}개)`
-        : `${colleges[currentCollege].name} (${filteredNotices.length}개)`;
+        : `${colleges[currentCollege]?.name || '알 수 없음'} (${filteredNotices.length}개)`;
 
       const html = filteredNotices.map(notice => {
         const category = detectCategory(notice);
@@ -340,9 +418,11 @@
             </div>
           </div>`;
       }).join('');
+      
       container.innerHTML = html;
     }
 
+    // ===== 유틸리티 함수들 =====
     function detectCategory(n) {
       const t = (n.title||'').toLowerCase(), c = (n.content||'').toLowerCase();
       if (t.includes('장학')||c.includes('장학')) return '장학금';
@@ -361,26 +441,79 @@
     }
 
     function viewNotice(collegeKey, noticeId) {
-      window.open(`${FLASK_API_URL}/notice/${collegeKey}/${noticeId}`, '_blank');
+      window.open(`/notice/${collegeKey}/${noticeId}`, '_blank');
     }
 
-    function filterNotices(){ filterAndDisplayNotices(); }
-    function refreshNotices(){ loadAllNotices(); }
+    // ===== UI 상태 관리 =====
+    function showLoading(show) {
+      document.getElementById('loadingContainer').style.display = show ? 'block' : 'none';
+      document.getElementById('noticesGrid').style.display = show ? 'none' : 'block';
+    }
 
-    function showLoading(show){ document.getElementById('loadingContainer').style.display = show ? 'block' : 'none'; }
-    function showEmptyState(msg){ const e=document.getElementById('emptyState'); e.style.display='block'; e.querySelector('p').textContent=msg; document.getElementById('noticesGrid').style.display='none'; }
-    function hideEmptyState(){ document.getElementById('emptyState').style.display='none'; document.getElementById('noticesGrid').style.display='block'; }
+    function showError(message) {
+      document.getElementById('errorContainer').style.display = 'block';
+      document.getElementById('errorMessage').textContent = message;
+      document.getElementById('noticesGrid').style.display = 'none';
+      document.getElementById('emptyState').style.display = 'none';
+    }
 
-    function logout(){ localStorage.removeItem('dice_current_user'); window.location.href='index.html'; }
+    function hideError() {
+      document.getElementById('errorContainer').style.display = 'none';
+    }
 
-    function goToPage(page, btn){
-      document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
-      if (btn) btn.classList.add('active');
-      switch(page){
-        case 'home': window.location.reload(); break;
-        case 'calendar': window.location.href='calendar.html'; break;
-        case 'ai': window.location.href='ai-chat.html'; break;
-        case 'settings': window.location.href='settings.html'; break;
+    function showEmptyState(msg) {
+      const e = document.getElementById('emptyState');
+      e.style.display = 'block';
+      e.querySelector('p').textContent = msg;
+      document.getElementById('noticesGrid').style.display = 'none';
+    }
+
+    function hideEmptyState() {
+      document.getElementById('emptyState').style.display = 'none';
+      document.getElementById('noticesGrid').style.display = 'block';
+    }
+
+    // ===== 이벤트 핸들러 =====
+    function filterNotices() {
+      filterAndDisplayNotices();
+    }
+
+    function refreshNotices() {
+      loadAllNotices();
+    }
+
+    async function logout() {
+      try {
+        await fetch('/api/auth/logout', {
+          method: 'POST',
+          credentials: 'include'
+        });
+      } catch (error) {
+        console.error('Logout error:', error);
+      } finally {
+        window.location.href = '/';
+      }
+    }
+
+    function goToPage(page, btn) {
+      if (btn) {
+        document.querySelectorAll('.nav-item').forEach(i => i.classList.remove('active'));
+        btn.classList.add('active');
+      }
+      
+      switch(page) {
+        case 'home':
+          window.location.reload();
+          break;
+        case 'calendar':
+          window.location.href = '/calendar';
+          break;
+        case 'ai':
+          window.location.href = '/ai-chat';
+          break;
+        case 'settings':
+          window.location.href = '/settings';
+          break;
       }
     }
   </script>
