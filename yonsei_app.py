@@ -915,6 +915,658 @@ def init_db_endpoint():
         'message': 'DB 초기화 성공' if result else 'DB 초기화 실패'
     })
 
+
+# ============= API 라우트 (기존 라우트 아래에 추가) =============
+
+@app.route('/api/notices/detail/<notice_id>')
+def get_notice_detail(notice_id):
+    """개별 공지사항 상세 조회"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 공지사항 상세 정보 조회
+                cur.execute("""
+                    SELECT n.id, n.title, n.content, n.department, n.writer,
+                           n.published_date as date, n.original_url as url,
+                           n.view_count as views, n.category, n.deadline_date,
+                           n.event_date, n.created_at, n.updated_at,
+                           c.name as college_name, c.icon as college_icon, 
+                           c.color as college_color, c.url as college_url,
+                           n.college_id
+                    FROM notices n
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE n.id = %s AND n.status = 'active'
+                """, (notice_id,))
+                
+                notice = cur.fetchone()
+                
+                if not notice:
+                    return jsonify({
+                        'success': False, 
+                        'message': '공지사항을 찾을 수 없습니다'
+                    }), 404
+                
+                # 조회수 증가
+                cur.execute("""
+                    UPDATE notices 
+                    SET view_count = view_count + 1 
+                    WHERE id = %s
+                """, (notice_id,))
+                conn.commit()
+                
+                # 응답 데이터 포맷팅
+                notice_data = {
+                    'id': str(notice['id']),
+                    'title': notice['title'],
+                    'content': format_content(notice['content'] or ''),
+                    'department': notice['department'],
+                    'writer': notice['writer'],
+                    'date': notice['date'].strftime('%Y-%m-%d') if notice['date'] else None,
+                    'deadline_date': notice['deadline_date'].strftime('%Y-%m-%d') if notice['deadline_date'] else None,
+                    'event_date': notice['event_date'].strftime('%Y-%m-%d') if notice['event_date'] else None,
+                    'url': notice['url'],
+                    'views': f"{notice['views'] + 1:,}",  # 증가된 조회수 반영
+                    'category': notice['category'],
+                    'created_at': notice['created_at'].isoformat() if notice['created_at'] else None,
+                    'updated_at': notice['updated_at'].isoformat() if notice['updated_at'] else None,
+                    'college': {
+                        'id': notice['college_id'],
+                        'name': notice['college_name'],
+                        'icon': notice['college_icon'],
+                        'color': notice['college_color'],
+                        'url': notice['college_url']
+                    }
+                }
+                
+                return jsonify({
+                    'success': True,
+                    'notice': notice_data
+                })
+                
+        except Exception as e:
+            logger.error(f"공지사항 상세 조회 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '공지사항 조회 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Notice detail error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False, 
+            'message': '서버 오류가 발생했습니다'
+        }), 500
+
+# ============= 사용자 상호작용 API =============
+
+def get_user_from_token():
+    """JWT 토큰에서 사용자 정보 추출"""
+    try:
+        token = request.headers.get('Authorization', '').replace('Bearer ', '')
+        if not token:
+            return None
+        
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=['HS256'])
+        return payload.get('user_id')
+    except:
+        return None
+
+@app.route('/api/notices/<notice_id>/bookmark', methods=['POST', 'DELETE'])
+def toggle_bookmark(notice_id):
+    """공지사항 북마크 토글"""
+    try:
+        user_id = get_user_from_token()
+        if not user_id:
+            return jsonify({'success': False, 'message': '로그인이 필요합니다'}), 401
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor() as cur:
+                if request.method == 'POST':
+                    # 북마크 추가
+                    cur.execute("""
+                        INSERT INTO user_notice_interactions (user_id, notice_id, bookmarked, bookmarked_at)
+                        VALUES (%s, %s, true, CURRENT_TIMESTAMP)
+                        ON CONFLICT (user_id, notice_id) 
+                        DO UPDATE SET bookmarked = true, bookmarked_at = CURRENT_TIMESTAMP
+                    """, (user_id, notice_id))
+                    message = '북마크가 추가되었습니다'
+                    bookmarked = True
+                else:
+                    # 북마크 제거
+                    cur.execute("""
+                        UPDATE user_notice_interactions 
+                        SET bookmarked = false, bookmarked_at = NULL
+                        WHERE user_id = %s AND notice_id = %s
+                    """, (user_id, notice_id))
+                    message = '북마크가 제거되었습니다'
+                    bookmarked = False
+                
+                conn.commit()
+                
+                return jsonify({
+                    'success': True,
+                    'message': message,
+                    'bookmarked': bookmarked
+                })
+                
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"북마크 처리 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '북마크 처리 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Bookmark error: {e}")
+        return jsonify({'success': False, 'message': '서버 오류가 발생했습니다'}), 500
+
+@app.route('/api/notices/<notice_id>/hide', methods=['POST', 'DELETE'])
+def toggle_hide_notice(notice_id):
+    """공지사항 숨기기 토글"""
+    try:
+        user_id = get_user_from_token()
+        if not user_id:
+            return jsonify({'success': False, 'message': '로그인이 필요합니다'}), 401
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor() as cur:
+                if request.method == 'POST':
+                    # 숨기기
+                    cur.execute("""
+                        INSERT INTO user_notice_interactions (user_id, notice_id, hidden)
+                        VALUES (%s, %s, true)
+                        ON CONFLICT (user_id, notice_id) 
+                        DO UPDATE SET hidden = true
+                    """, (user_id, notice_id))
+                    message = '공지사항이 숨겨졌습니다'
+                    hidden = True
+                else:
+                    # 숨기기 해제
+                    cur.execute("""
+                        UPDATE user_notice_interactions 
+                        SET hidden = false
+                        WHERE user_id = %s AND notice_id = %s
+                    """, (user_id, notice_id))
+                    message = '공지사항 숨기기가 해제되었습니다'
+                    hidden = False
+                
+                conn.commit()
+                
+                return jsonify({
+                    'success': True,
+                    'message': message,
+                    'hidden': hidden
+                })
+                
+        except Exception as e:
+            conn.rollback()
+            logger.error(f"숨기기 처리 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '숨기기 처리 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Hide notice error: {e}")
+        return jsonify({'success': False, 'message': '서버 오류가 발생했습니다'}), 500
+
+@app.route('/api/user/bookmarks')
+def get_user_bookmarks():
+    """사용자 북마크 목록 조회"""
+    try:
+        user_id = get_user_from_token()
+        if not user_id:
+            return jsonify({'success': False, 'message': '로그인이 필요합니다'}), 401
+        
+        limit = min(int(request.args.get('limit', 50)), 100)
+        offset = int(request.args.get('offset', 0))
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT n.id, n.title, n.department, n.writer,
+                           n.published_date as date, n.original_url as url,
+                           n.view_count as views, n.category,
+                           c.name as college_name, c.icon as college_icon, 
+                           c.color as college_color, n.college_id,
+                           uni.bookmarked_at
+                    FROM user_notice_interactions uni
+                    JOIN notices n ON uni.notice_id = n.id
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE uni.user_id = %s AND uni.bookmarked = true
+                    AND n.status = 'active'
+                    ORDER BY uni.bookmarked_at DESC
+                    LIMIT %s OFFSET %s
+                """, (user_id, limit, offset))
+                
+                bookmarks = cur.fetchall()
+                
+                formatted_bookmarks = []
+                for bookmark in bookmarks:
+                    formatted_bookmark = {
+                        'id': str(bookmark['id']),
+                        'title': bookmark['title'],
+                        'department': bookmark['department'],
+                        'writer': bookmark['writer'],
+                        'date': bookmark['date'].strftime('%Y-%m-%d') if bookmark['date'] else None,
+                        'url': bookmark['url'],
+                        'views': f"{bookmark['views']:,}",
+                        'category': bookmark['category'],
+                        'bookmarked_at': bookmark['bookmarked_at'].isoformat() if bookmark['bookmarked_at'] else None,
+                        'college': {
+                            'id': bookmark['college_id'],
+                            'name': bookmark['college_name'],
+                            'icon': bookmark['college_icon'],
+                            'color': bookmark['college_color']
+                        }
+                    }
+                    formatted_bookmarks.append(formatted_bookmark)
+                
+                # 전체 북마크 수 조회
+                cur.execute("""
+                    SELECT COUNT(*)
+                    FROM user_notice_interactions uni
+                    JOIN notices n ON uni.notice_id = n.id
+                    WHERE uni.user_id = %s AND uni.bookmarked = true
+                    AND n.status = 'active'
+                """, (user_id,))
+                total_count = cur.fetchone()[0]
+                
+                return jsonify({
+                    'success': True,
+                    'bookmarks': formatted_bookmarks,
+                    'pagination': {
+                        'total': total_count,
+                        'limit': limit,
+                        'offset': offset,
+                        'has_more': offset + limit < total_count
+                    }
+                })
+                
+        except Exception as e:
+            logger.error(f"북마크 조회 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '북마크 조회 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Get bookmarks error: {e}")
+        return jsonify({'success': False, 'message': '서버 오류가 발생했습니다'}), 500
+
+@app.route('/api/user/reading-history')
+def get_reading_history():
+    """사용자 읽은 공지사항 기록"""
+    try:
+        user_id = get_user_from_token()
+        if not user_id:
+            return jsonify({'success': False, 'message': '로그인이 필요합니다'}), 401
+        
+        limit = min(int(request.args.get('limit', 20)), 100)
+        offset = int(request.args.get('offset', 0))
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT n.id, n.title, n.department,
+                           n.published_date as date, n.category,
+                           c.name as college_name, c.icon as college_icon, 
+                           c.color as college_color, n.college_id,
+                           uni.viewed_at
+                    FROM user_notice_interactions uni
+                    JOIN notices n ON uni.notice_id = n.id
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE uni.user_id = %s AND uni.viewed = true
+                    AND n.status = 'active'
+                    ORDER BY uni.viewed_at DESC
+                    LIMIT %s OFFSET %s
+                """, (user_id, limit, offset))
+                
+                history = cur.fetchall()
+                
+                formatted_history = []
+                for item in history:
+                    formatted_item = {
+                        'id': str(item['id']),
+                        'title': item['title'],
+                        'department': item['department'],
+                        'date': item['date'].strftime('%Y-%m-%d') if item['date'] else None,
+                        'category': item['category'],
+                        'viewed_at': item['viewed_at'].isoformat() if item['viewed_at'] else None,
+                        'college': {
+                            'id': item['college_id'],
+                            'name': item['college_name'],
+                            'icon': item['college_icon'],
+                            'color': item['college_color']
+                        }
+                    }
+                    formatted_history.append(formatted_item)
+                
+                return jsonify({
+                    'success': True,
+                    'history': formatted_history,
+                    'pagination': {
+                        'limit': limit,
+                        'offset': offset,
+                        'has_more': len(history) == limit
+                    }
+                })
+                
+        except Exception as e:
+            logger.error(f"읽기 기록 조회 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '읽기 기록 조회 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Reading history error: {e}")
+        return jsonify({'success': False, 'message': '서버 오류가 발생했습니다'}), 500
+
+@app.route('/api/notices/search')
+def search_notices():
+    """공지사항 검색 API"""
+    try:
+        # 쿼리 파라미터 받기
+        query = request.args.get('q', '').strip()
+        college_id = request.args.get('college', 'all')
+        category = request.args.get('category', 'all')
+        limit = min(int(request.args.get('limit', 50)), 100)
+        offset = int(request.args.get('offset', 0))
+        
+        if not query:
+            return jsonify({
+                'success': False, 
+                'message': '검색어를 입력해주세요'
+            }), 400
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # 동적 쿼리 구성
+                base_query = """
+                    SELECT n.id, n.title, n.content, n.department, n.writer,
+                           n.published_date as date, n.original_url as url,
+                           n.view_count as views, n.category,
+                           c.name as college_name, c.icon as college_icon, 
+                           c.color as college_color, n.college_id,
+                           ts_rank(to_tsvector('korean', n.title || ' ' || COALESCE(n.content, '')), 
+                                  plainto_tsquery('korean', %s)) as rank
+                    FROM notices n
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE n.status = 'active'
+                    AND (n.title ILIKE %s OR n.content ILIKE %s)
+                """
+                
+                params = [query, f'%{query}%', f'%{query}%']
+                
+                # 단과대학 필터 추가
+                if college_id != 'all':
+                    base_query += " AND n.college_id = %s"
+                    params.append(college_id)
+                
+                # 카테고리 필터 추가
+                if category != 'all':
+                    base_query += " AND n.category = %s"
+                    params.append(category)
+                
+                # 정렬 및 페이징
+                base_query += """
+                    ORDER BY rank DESC, n.published_date DESC
+                    LIMIT %s OFFSET %s
+                """
+                params.extend([limit, offset])
+                
+                cur.execute(base_query, params)
+                notices = cur.fetchall()
+                
+                # 전체 검색 결과 수 조회
+                count_query = """
+                    SELECT COUNT(*)
+                    FROM notices n
+                    WHERE n.status = 'active'
+                    AND (n.title ILIKE %s OR n.content ILIKE %s)
+                """
+                count_params = [f'%{query}%', f'%{query}%']
+                
+                if college_id != 'all':
+                    count_query += " AND n.college_id = %s"
+                    count_params.append(college_id)
+                
+                if category != 'all':
+                    count_query += " AND n.category = %s"
+                    count_params.append(category)
+                
+                cur.execute(count_query, count_params)
+                total_count = cur.fetchone()[0]
+                
+                # 결과 포맷팅
+                formatted_notices = []
+                for notice in notices:
+                    formatted_notice = {
+                        'id': str(notice['id']),
+                        'title': notice['title'],
+                        'content': notice['content'][:200] + '...' if notice['content'] and len(notice['content']) > 200 else notice['content'],
+                        'department': notice['department'],
+                        'writer': notice['writer'],
+                        'date': notice['date'].strftime('%Y-%m-%d') if notice['date'] else None,
+                        'url': notice['url'],
+                        'views': f"{notice['views']:,}",
+                        'category': notice['category'],
+                        'college': {
+                            'id': notice['college_id'],
+                            'name': notice['college_name'],
+                            'icon': notice['college_icon'],
+                            'color': notice['college_color']
+                        }
+                    }
+                    formatted_notices.append(formatted_notice)
+                
+                return jsonify({
+                    'success': True,
+                    'notices': formatted_notices,
+                    'pagination': {
+                        'total': total_count,
+                        'limit': limit,
+                        'offset': offset,
+                        'has_more': offset + limit < total_count
+                    },
+                    'search': {
+                        'query': query,
+                        'college': college_id,
+                        'category': category
+                    }
+                })
+                
+        except Exception as e:
+            logger.error(f"공지사항 검색 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '검색 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Search notices error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False, 
+            'message': '서버 오류가 발생했습니다'
+        }), 500
+
+@app.route('/api/notices/recent')
+def get_recent_notices():
+    """최근 공지사항 조회 (대시보드용)"""
+    try:
+        limit = min(int(request.args.get('limit', 10)), 50)
+        days = min(int(request.args.get('days', 7)), 30)
+        
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT n.id, n.title, n.department, n.writer,
+                           n.published_date as date, n.original_url as url,
+                           n.view_count as views, n.category,
+                           c.name as college_name, c.icon as college_icon, 
+                           c.color as college_color, n.college_id
+                    FROM notices n
+                    JOIN colleges c ON n.college_id = c.id
+                    WHERE n.status = 'active'
+                    AND n.published_date >= CURRENT_DATE - INTERVAL '%s days'
+                    ORDER BY n.published_date DESC, n.created_at DESC
+                    LIMIT %s
+                """, (days, limit))
+                
+                notices = cur.fetchall()
+                
+                formatted_notices = []
+                for notice in notices:
+                    formatted_notice = {
+                        'id': str(notice['id']),
+                        'title': notice['title'],
+                        'department': notice['department'],
+                        'writer': notice['writer'],
+                        'date': notice['date'].strftime('%Y-%m-%d') if notice['date'] else None,
+                        'url': notice['url'],
+                        'views': f"{notice['views']:,}",
+                        'category': notice['category'],
+                        'college': {
+                            'id': notice['college_id'],
+                            'name': notice['college_name'],
+                            'icon': notice['college_icon'],
+                            'color': notice['college_color']
+                        }
+                    }
+                    formatted_notices.append(formatted_notice)
+                
+                return jsonify({
+                    'success': True,
+                    'notices': formatted_notices,
+                    'filter': {
+                        'days': days,
+                        'limit': limit
+                    }
+                })
+                
+        except Exception as e:
+            logger.error(f"최근 공지사항 조회 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '최근 공지사항 조회 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Recent notices error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False, 
+            'message': '서버 오류가 발생했습니다'
+        }), 500
+
+@app.route('/api/notices/categories')
+def get_notice_categories():
+    """공지사항 카테고리 목록 및 통계"""
+    try:
+        conn = get_db_connection()
+        if not conn:
+            return jsonify({'success': False, 'message': 'DB 연결 실패'}), 500
+        
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("""
+                    SELECT category, COUNT(*) as count
+                    FROM notices
+                    WHERE status = 'active'
+                    GROUP BY category
+                    ORDER BY count DESC
+                """)
+                
+                categories = cur.fetchall()
+                
+                # 카테고리 한글명 매핑
+                category_names = {
+                    'general': '일반',
+                    'scholarship': '장학금',
+                    'internship': '인턴십',
+                    'competition': '공모전',
+                    'recruitment': '채용',
+                    'academic': '학사',
+                    'seminar': '세미나',
+                    'event': '행사'
+                }
+                
+                formatted_categories = []
+                for cat in categories:
+                    formatted_categories.append({
+                        'key': cat['category'],
+                        'name': category_names.get(cat['category'], cat['category']),
+                        'count': cat['count']
+                    })
+                
+                return jsonify({
+                    'success': True,
+                    'categories': formatted_categories
+                })
+                
+        except Exception as e:
+            logger.error(f"카테고리 조회 오류: {e}")
+            return jsonify({
+                'success': False, 
+                'message': '카테고리 조회 중 오류가 발생했습니다'
+            }), 500
+        finally:
+            conn.close()
+            
+    except Exception as e:
+        logger.error(f"Categories error: {e}")
+        logger.error(traceback.format_exc())
+        return jsonify({
+            'success': False, 
+            'message': '서버 오류가 발생했습니다'
+        }), 500
+
 # 오류 핸들러
 @app.errorhandler(404)
 def not_found(error):

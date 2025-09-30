@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>DICE — 대시보드</title>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root{
+      --primary:#2563eb;
+      --primary-700:#1d4ed8;
+      --bg:#f8fafc;
+      --text:#1e293b;
+      --muted:#64748b;
+      --border:#e2e8f0;
+      --radius:12px;
+      --shadow:0 4px 12px rgba(20,40,120,0.08);
+    }
+    *{box-sizing:border-box; margin:0; padding:0}
+    body{font-family:"Noto Sans KR",sans-serif; background:var(--bg); color:var(--text)}
+
+    /* Header */
+    .header{ background:#fff; border-bottom:1px solid var(--border); padding:16px 0; position:sticky; top:0; z-index:10; }
+    .header-content{ max-width:1200px; margin:0 auto; padding:0 20px; display:flex; align-items:center; justify-content:space-between; }
+    .brand{display:flex;align-items:center;gap:10px;font-weight:800;}
+    .brand svg{width:24px;height:24px}
+    .brand .name{font-size:20px}
+
+    .user-menu{display:flex;align-items:center;gap:16px}
+    .user-email{color:var(--muted);font-size:14px}
+    .logout-btn{ background:transparent; border:1px solid var(--border); color:var(--muted); padding:8px 16px; border-radius:8px; cursor:pointer; font-size:14px; transition:.2s ease; }
+    .logout-btn:hover{background:var(--bg);color:var(--text)}
+
+    /* Main */
+    .main{ max-width:1200px; margin:0 auto; padding:32px 20px; }
+
+    .welcome{ background:linear-gradient(135deg,var(--primary) 0%,var(--primary-700) 100%); color:white; border-radius:var(--radius); padding:32px; margin-bottom:32px; box-shadow:var(--shadow); text-align:center; }
+    .welcome h1{font-size:28px;font-weight:800;margin-bottom:8px}
+    .welcome p{opacity:0.9;font-size:16px;margin-bottom:20px}
+
+    .stats{ display:grid; grid-template-columns:repeat(4,1fr); gap:10px; margin-top:20px; }
+    .stat-item{ background:rgba(255,255,255,0.15); padding:15px; border-radius:8px; text-align:center; }
+    .stat-number{font-size:24px;font-weight:800;margin-bottom:4px}
+    .stat-label{font-size:12px;opacity:0.8}
+
+    .controls{ background:#fff; border-radius:var(--radius); padding:20px; margin-bottom:20px; box-shadow:var(--shadow); display:flex; gap:20px; flex-wrap:wrap; align-items:center; }
+    .search-box{ flex:1; min-width:300px; position:relative; }
+    .search-box input{ width:100%; padding:12px 40px 12px 16px; border:1px solid var(--border); border-radius:8px; font-size:14px; }
+    .search-box::after{ content:'🔍'; position:absolute; right:12px; top:50%; transform:translateY(-50%); pointer-events:none; }
+
+    .filter-group{ display:flex; gap:12px; align-items:center; }
+    .filter-select{ padding:10px 16px; border:1px solid var(--border); border-radius:8px; background:white; font-size:14px; cursor:pointer; }
+
+    .college-tabs{ display:flex; gap:8px; margin-bottom:20px; flex-wrap:wrap; }
+    .tab{ padding:10px 16px; border:none; background:#e2e8f0; border-radius:20px; cursor:pointer; font-size:14px; font-weight:600; color:var(--muted); transition:.2s ease; }
+    .tab.active{ background:var(--primary); color:white; }
+    .tab:hover{ background:var(--primary-700); color:white; }
+
+    .notices-section{ background:#fff; border-radius:var(--radius); padding:24px; box-shadow:var(--shadow); margin-bottom:30px; }
+    .notices-header{ display:flex; justify-content:space-between; align-items:center; margin-bottom:20px; }
+    .notices-header h2{ font-size:20px; font-weight:800; }
+
+    .notices-grid{ display:grid; grid-template-columns:1fr; gap:12px; }
+    .notice-item{ padding:16px; border:1px solid var(--border); border-radius:8px; cursor:pointer; transition:all .2s ease; }
+    .notice-item:hover{ border-color:var(--primary); box-shadow:0 2px 8px rgba(37,99,235,0.1); }
+    .notice-header{ display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px; }
+    .notice-title{ font-size:16px; font-weight:700; color:var(--text); flex:1; margin-right:12px; }
+    .notice-tag{ background:var(--primary); color:white; padding:4px 8px; border-radius:12px; font-size:11px; font-weight:600; white-space:nowrap; }
+    .notice-meta{ display:flex; justify-content:space-between; align-items:center; font-size:12px; color:var(--muted); margin-top:8px; }
+
+    .loading{ text-align:center; padding:40px; }
+    .spinner{ border:3px solid #f3f3f3; border-top:3px solid var(--primary); border-radius:50%; width:40px; height:40px; animation:spin 1s linear infinite; margin:0 auto 16px; }
+    @keyframes spin{ 0%{transform:rotate(0deg)} 100%{transform:rotate(360deg)} }
+
+    .empty-state{ text-align:center; padding:60px; color:var(--muted); }
+    .empty-state .icon{ font-size:48px; margin-bottom:16px; opacity:0.5 }
+
+    .bottom-nav{ position:fixed; bottom:0; left:0; right:0; background:#fff; border-top:1px solid var(--border); display:flex; justify-content:space-around; padding:8px 0; z-index:1000; }
+    .nav-item{ display:flex; flex-direction:column; align-items:center; background:none; border:none; padding:8px 12px; cursor:pointer; transition:.2s ease; color:var(--muted); }
+    .nav-item.active{ color:var(--primary); }
+    .nav-item:hover{ color:var(--primary); }
+    .nav-icon{ font-size:20px; margin-bottom:2px; }
+    .nav-label{ font-size:11px; font-weight:600; }
+    .main{ padding-bottom:80px; }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="header-content">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" fill="currentColor">
+          <rect x="2.5" y="4" width="14" height="14" rx="4" ry="4" />
+          <circle cx="8" cy="10" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="7.5" r="1.5" fill="#fff"/>
+          <circle cx="13" cy="12.5" r="1.5" fill="#fff"/>
+        </svg>
+        <span class="name">DICE</span>
+      </div>
+      <div class="user-menu">
+        <span class="user-email" id="userEmail">user@email.com</span>
+        <button class="logout-btn" onclick="logout()">로그아웃</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="main">
+    <div class="welcome">
+      <h1>안녕하세요, Y2D2님!</h1>
+      <p>오늘 새로운 공지사항 <span id="todayCount">0</span>개가 있습니다.</p>
+      <div class="stats">
+        <div class="stat-item"><div class="stat-number" id="totalNotices">0</div><div class="stat-label">지원 가능</div></div>
+        <div class="stat-item"><div class="stat-number" id="urgentNotices">0</div><div class="stat-label">마감임박</div></div>
+        <div class="stat-item"><div class="stat-number" id="scholarships">1</div><div class="stat-label">장학금</div></div>
+        <div class="stat-item"><div class="stat-number" id="internships">1</div><div class="stat-label">인턴십</div></div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <div class="search-box">
+        <input type="text" id="searchInput" placeholder="공지사항 검색..." onkeyup="filterNotices()">
+      </div>
+      <div class="filter-group">
+        <select class="filter-select" id="sortFilter" onchange="sortNotices()">
+          <option value="date">최신순</option>
+          <option value="title">제목순</option>
+          <option value="college">단과대학순</option>
+        </select>
+        <select class="filter-select" id="categoryFilter" onchange="filterNotices()">
+          <option value="">모든 카테고리</option>
+          <option value="장학금">장학금</option>
+          <option value="인턴십">인턴십</option>
+          <option value="공모전">공모전</option>
+          <option value="채용">채용</option>
+          <option value="학사">학사</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="college-tabs" id="collegeTabs">
+      <!-- 동적으로 생성 -->
+    </div>
+
+    <div class="notices-section">
+      <div class="notices-header">
+        <h2 id="noticesTitle">맞춤 공지사항</h2>
+        <button onclick="refreshNotices()" style="background:var(--primary);color:white;border:none;padding:8px 16px;border-radius:6px;cursor:pointer">새로고침</button>
+      </div>
+
+      <div id="loadingContainer" class="loading" style="display:none">
+        <div class="spinner"></div>
+        <p>공지사항을 불러오는 중...</p>
+      </div>
+
+      <div class="notices-grid" id="noticesGrid"></div>
+      <div id="emptyState" class="empty-state" style="display:none">
+        <div class="icon">📭</div>
+        <p>표시할 공지사항이 없습니다.</p>
+      </div>
+    </div>
+  </main>
+
+  <nav class="bottom-nav">
+    <button class="nav-item active" onclick="goToPage('home', this)">
+      <div class="nav-icon">🏠</div><div class="nav-label">홈</div>
+    </button>
+    <button class="nav-item" onclick="goToPage('calendar', this)">
+      <div class="nav-icon">📅</div><div class="nav-label">캘린더</div>
+    </button>
+    <button class="nav-item" onclick="goToPage('ai', this)">
+      <div class="nav-icon">🤖</div><div class="nav-label">AI 채팅</div>
+    </button>
+    <button class="nav-item" onclick="goToPage('settings', this)">
+      <div class="nav-icon">⚙️</div><div class="nav-label">설정</div>
+    </button>
+  </nav>
+
+  <script>
+    // ===== 전역 =====
+    let allNotices = [];
+    let filteredNotices = [];
+    let currentCollege = 'all';
+    const FLASK_API_URL = ''; // 같은 오리진에서 서빙하므로 빈 문자열
+
+    const colleges = {
+      'main': { name: '메인 공지사항', icon: '🏫', color: '#003876' },
+      'liberal': { name: '문과대학', icon: '📚', color: '#8B4513' },
+      'business': { name: '상경대학', icon: '📊', color: '#FFB700' },
+      'management': { name: '경영대학', icon: '💼', color: '#1E90FF' },
+      'engineering': { name: '공과대학', icon: '⚙️', color: '#DC143C' },
+      'life': { name: '생명시스템대학', icon: '🧬', color: '#228B22' },
+      'ai': { name: '인공지능융합대학', icon: '🤖', color: '#9370DB' },
+      'theology': { name: '신과대학', icon: '✝️', color: '#4B0082' },
+      'social': { name: '사회과학대학', icon: '🏛️', color: '#2E8B57' },
+      'music': { name: '음악대학', icon: '🎵', color: '#FF1493' },
+      'human': { name: '생활과학대학', icon: '🏠', color: '#FF6347' },
+      'education': { name: '교육과학대학', icon: '🎓', color: '#4169E1' },
+      'underwood': { name: '언더우드국제대학', icon: '🌍', color: '#FF8C00' },
+      'global': { name: '글로벌인재대학', icon: '🌏', color: '#008B8B' },
+      'medicine': { name: '의과대학', icon: '⚕️', color: '#B22222' },
+      'dentistry': { name: '치과대학', icon: '🦷', color: '#5F9EA0' },
+      'nursing': { name: '간호대학', icon: '💊', color: '#DB7093' },
+      'pharmacy': { name: '약학대학', icon: '💉', color: '#663399' }
+    };
+
+    // 초기화
+    window.addEventListener('load', () => {
+      checkAuthStatus();
+      initializeCollegeTabs();
+      loadAllNotices();
+    });
+
+    function checkAuthStatus() {
+      const currentUser = JSON.parse(localStorage.getItem('dice_current_user') || 'null');
+      if (!currentUser) { window.location.href = 'auth.html'; return; }
+      document.getElementById('userEmail').textContent = currentUser.email;
+    }
+
+    function initializeCollegeTabs() {
+      const tabsContainer = document.getElementById('collegeTabs');
+      let tabsHtml = `<button class="tab active" onclick="selectCollege('all', this)">전체</button>`;
+      for (const [key, college] of Object.entries(colleges)) {
+        tabsHtml += `<button class="tab" onclick="selectCollege('${key}', this)">${college.icon} ${college.name}</button>`;
+      }
+      tabsContainer.innerHTML = tabsHtml;
+    }
+
+    async function loadAllNotices() {
+      showLoading(true);
+      allNotices = [];
+      try {
+        // 서버 헬스 체크
+        const ok = await fetch(`${FLASK_API_URL}/api/health`).then(r => r.ok).catch(() => false);
+        if (!ok) throw new Error('Flask 서버에 연결할 수 없습니다');
+
+        // 모든 단과대학 호출
+        const collegeKeys = Object.keys(colleges);
+        const batchSize = 5;
+        for (let i = 0; i < collegeKeys.length; i += batchSize) {
+          const batch = collegeKeys.slice(i, i + batchSize);
+          const batchResults = await Promise.all(batch.map(async (key) => {
+            try {
+              const res = await fetch(`${FLASK_API_URL}/api/notices/${key}`, { headers: { 'Cache-Control': 'no-cache' }});
+              if (!res.ok) return [];
+              const data = await res.json();
+              if (!data.success || !data.notices) return [];
+              return data.notices.map(n => ({ ...n, college: data.college, collegeKey: key }));
+            } catch { return []; }
+          }));
+          allNotices.push(...batchResults.flat());
+        }
+
+        if (allNotices.length === 0) throw new Error('크롤링된 공지사항이 없습니다');
+
+        // 최신순 정렬
+        allNotices.sort((a,b) => new Date(b.date) - new Date(a.date));
+
+        updateStats();
+        filterAndDisplayNotices();
+
+      } catch (e) {
+        console.error('크롤링 데이터 로드 실패:', e);
+        showError('실시간 공지사항을 불러올 수 없습니다. Flask 서버(yonsei_app.py)를 실행해주세요.');
+      } finally {
+        showLoading(false);
+      }
+    }
+
+    function updateStats() {
+      const today = new Date().toISOString().split('T')[0];
+      const todayNotices = allNotices.filter(n => n.date === today);
+      document.getElementById('todayCount').textContent = todayNotices.length;
+      document.getElementById('totalNotices').textContent = allNotices.length;
+
+      const scholarships = allNotices.filter(n => (n.title||'').includes('장학') || (n.content||'').includes('장학')).length;
+      const internships = allNotices.filter(n => (n.title||'').includes('인턴') || (n.content||'').includes('인턴')).length;
+      document.getElementById('scholarships').textContent = scholarships;
+      document.getElementById('internships').textContent = internships;
+      document.getElementById('urgentNotices').textContent = Math.floor(allNotices.length * 0.1);
+    }
+
+    function selectCollege(collegeKey, btn) {
+      currentCollege = collegeKey;
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      filterAndDisplayNotices();
+    }
+
+    function filterAndDisplayNotices() {
+      let notices = [...allNotices];
+
+      if (currentCollege !== 'all') notices = notices.filter(n => n.collegeKey === currentCollege);
+
+      const searchTerm = (document.getElementById('searchInput').value || '').toLowerCase();
+      if (searchTerm) {
+        notices = notices.filter(n => (n.title||'').toLowerCase().includes(searchTerm) || (n.content||'').toLowerCase().includes(searchTerm));
+      }
+
+      const category = document.getElementById('categoryFilter').value;
+      if (category) {
+        notices = notices.filter(n => (n.title||'').includes(category) || (n.content||'').includes(category));
+      }
+
+      filteredNotices = notices;
+      sortNotices();
+    }
+
+    function sortNotices() {
+      const sortBy = document.getElementById('sortFilter').value;
+      switch (sortBy) {
+        case 'title': filteredNotices.sort((a,b) => (a.title||'').localeCompare(b.title||'')); break;
+        case 'college': filteredNotices.sort((a,b) => (a.college?.name||'').localeCompare(b.college?.name||'')); break;
+        case 'date':
+        default: filteredNotices.sort((a,b) => new Date(b.date) - new Date(a.date)); break;
+      }
+      displayNotices();
+    }
+
+    function displayNotices() {
+      const container = document.getElementById('noticesGrid');
+      const title = document.getElementById('noticesTitle');
+
+      if (!filteredNotices.length) { showEmptyState('조건에 맞는 공지사항이 없습니다.'); return; }
+      hideEmptyState();
+
+      title.textContent = currentCollege === 'all'
+        ? `전체 공지사항 (${filteredNotices.length}개)`
+        : `${colleges[currentCollege].name} (${filteredNotices.length}개)`;
+
+      const html = filteredNotices.map(notice => {
+        const category = detectCategory(notice);
+        return `
+          <div class="notice-item" onclick="viewNotice('${notice.collegeKey}', '${notice.id}')">
+            <div class="notice-header">
+              <div class="notice-title">${notice.title}</div>
+              <div class="notice-tag" style="background:${notice.college.color}">${category}</div>
+            </div>
+            <div class="notice-meta">
+              <div>${notice.college.icon} ${notice.college.name} • 📅 ${formatDate(notice.date)}</div>
+              <div>👁 ${notice.views || '0'}</div>
+            </div>
+          </div>`;
+      }).join('');
+      container.innerHTML = html;
+    }
+
+    function detectCategory(n) {
+      const t = (n.title||'').toLowerCase(), c = (n.content||'').toLowerCase();
+      if (t.includes('장학')||c.includes('장학')) return '장학금';
+      if (t.includes('인턴')||c.includes('인턴')) return '인턴십';
+      if (t.includes('공모')||c.includes('공모')) return '공모전';
+      if (t.includes('채용')||c.includes('채용')) return '채용';
+      if (t.includes('수강')||c.includes('수강')) return '학사';
+      if (t.includes('세미나')||c.includes('세미나')) return '세미나';
+      return '일반';
+    }
+
+    function formatDate(s) {
+      if (!s) return '';
+      const d = new Date(s);
+      return d.toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' });
+    }
+
+    function viewNotice(collegeKey, noticeId) {
+      window.open(`${FLASK_API_URL}/notice/${collegeKey}/${noticeId}`, '_blank');
+    }
+
+    function filterNotices(){ filterAndDisplayNotices(); }
+    function refreshNotices(){ loadAllNotices(); }
+
+    function showLoading(show){ document.getElementById('loadingContainer').style.display = show ? 'block' : 'none'; }
+    function showEmptyState(msg){ const e=document.getElementById('emptyState'); e.style.display='block'; e.querySelector('p').textContent=msg; document.getElementById('noticesGrid').style.display='none'; }
+    function hideEmptyState(){ document.getElementById('emptyState').style.display='none'; document.getElementById('noticesGrid').style.display='block'; }
+
+    function logout(){ localStorage.removeItem('dice_current_user'); window.location.href='index.html'; }
+
+    function goToPage(page, btn){
+      document.querySelectorAll('.nav-item').forEach(i=>i.classList.remove('active'));
+      if (btn) btn.classList.add('active');
+      switch(page){
+        case 'home': window.location.reload(); break;
+        case 'calendar': window.location.href='calendar.html'; break;
+        case 'ai': window.location.href='ai-chat.html'; break;
+        case 'settings': window.location.href='settings.html'; break;
+      }
+    }
+  </script>
+</body>
+</html>
