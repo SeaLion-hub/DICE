@@ -64,11 +64,11 @@ rate_limits = [
 ]
 
 limiter = Limiter(
-    app,
     key_func=get_remote_address,
     default_limits=rate_limits,
     storage_uri=os.getenv("REDIS_URL", "memory://")
 )
+limiter.init_app(app)
 
 # ===== 환경 변수 및 설정 =====
 @dataclass
