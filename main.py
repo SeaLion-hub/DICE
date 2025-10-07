@@ -1,12 +1,11 @@
-# main.py (프로젝트 루트)
+# main.py (프로젝트 루트 / readiness healthcheck 버전)
 import os
 import logging
 import psycopg2
 from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from fastapi import HTTPException
 from datetime import datetime
 
 # 1) .env 로드 (로컬 실행용 / Railway에선 환경변수로 자동 주입)
@@ -16,6 +15,7 @@ load_dotenv(encoding="utf-8")
 ENV = os.getenv("ENV", "dev")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")]
+HEALTH_REQUIRE_SEEDED = os.getenv("HEALTH_REQUIRE_SEEDED", "1")  # '1'이면 colleges 시드 완료까지 대기
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set in environment")
@@ -45,7 +45,30 @@ def query_all(sql: str, params=None):
 # 7) 라우트들
 @app.get("/health")
 def health():
-    return {"status": "ok", "env": ENV, "service": "dice-api"}
+    base = {"env": ENV, "service": "dice-api"}
+    # 1) DB 연결 확인
+    try:
+        query_all("SELECT 1 AS ok;")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"status": "db_unavailable", **base})
+
+    # 2) 마이그레이션/시드 준비 상태 확인
+    try:
+        tbl = query_all("SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_name = 'colleges';")
+        have_colleges = tbl and tbl[0]["c"] == 1
+        if not have_colleges:
+            raise HTTPException(status_code=503, detail={"status": "migrations_pending", **base})
+
+        if HEALTH_REQUIRE_SEEDED == "1":
+            seeded = query_all("SELECT COUNT(*) AS c FROM colleges;")[0]["c"] > 0
+            if not seeded:
+                raise HTTPException(status_code=503, detail={"status": "seeding_pending", **base})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail={"status": "health_check_error", **base})
+
+    return {"status": "ok", **base}
 
 @app.get("/notices")
 def list_notices(
@@ -58,31 +81,17 @@ def list_notices(
 ):
     where, params = [], []
     if college:
-        where.append("college_key = %s"); params.append(college)
+        where.append("college_key = %s")
+        params.append(college)
     if q:
         where.append("(title ILIKE %s OR summary_raw ILIKE %s OR summary_ai ILIKE %s)")
         params += [f"%{q}%", f"%{q}%", f"%{q}%"]
     if date_from:
-        where.append("published_at >= %s"); params.append(datetime.fromisoformat(date_from))
+        where.append("published_at >= %s")
+        params.append(datetime.fromisoformat(date_from))
     if date_to:
-        where.append("published_at < %s"); params.append(datetime.fromisoformat(date_to))
-
-    sql = """
-      SELECT id, college_key, title, url, summary_ai, summary_raw, published_at, created_at
-      FROM notices
-    """
-    if where: sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT %s OFFSET %s"
-    params += [limit, offset]
-    rows = query_all(sql, params)
-    return {"items": rows, "limit": limit, "offset": offset}
-
-    where, params = [], []
-    if college:
-        where.append("college_key = %s"); params.append(college)
-    if q:
-        where.append("(title ILIKE %s OR summary_raw ILIKE %s OR summary_ai ILIKE %s)")
-        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        where.append("published_at < %s")
+        params.append(datetime.fromisoformat(date_to))
 
     sql = """
       SELECT id, college_key, title, url, summary_ai, summary_raw, published_at, created_at
@@ -92,7 +101,7 @@ def list_notices(
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT %s OFFSET %s"
     params += [limit, offset]
-
+    
     rows = query_all(sql, params)
     return {"items": rows, "limit": limit, "offset": offset}
 
@@ -115,8 +124,6 @@ def list_colleges():
     """)
     return {"items": rows}
 
-
-
 @app.get("/notices/{notice_id}")
 def get_notice(notice_id: str):
     rows = query_all("""
@@ -127,4 +134,3 @@ def get_notice(notice_id: str):
     if not rows:
         raise HTTPException(status_code=404, detail="notice not found")
     return rows[0]
-
