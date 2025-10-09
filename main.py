@@ -1,15 +1,27 @@
-# main.py (프로젝트 루트 / readiness healthcheck + webhook 버전)
+# main.py (프로젝트 루트 / AI 자동추출 통합 최종 버전)
 import os
 import logging
 import hashlib
 import psycopg2
-from psycopg2.extras import RealDictCursor
-from fastapi import FastAPI, Query, HTTPException, Body
+from psycopg2.extras import RealDictCursor, Json
+from fastapi import FastAPI, Query, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from datetime import datetime
+import datetime as dt
 import requests
-from typing import Optional
+from typing import Optional, Any
+import time
+import threading
+import json
+from pydantic import BaseModel
+
+# AI processor import
+from ai_processor import (
+    extract_hashtags_from_title,
+    extract_notice_info,
+    verify_eligibility_ai,
+)
 
 # 1) .env 로드 (로컬 실행용 / Railway에선 환경변수로 자동 주입)
 load_dotenv(encoding="utf-8")
@@ -18,9 +30,11 @@ load_dotenv(encoding="utf-8")
 ENV = os.getenv("ENV", "dev")
 DATABASE_URL = os.getenv("DATABASE_URL")
 ALLOWED_ORIGINS = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "http://localhost:3000").split(",")]
-HEALTH_REQUIRE_SEEDED = os.getenv("HEALTH_REQUIRE_SEEDED", "1")  # '1'이면 colleges 시드 완료까지 대기
+HEALTH_REQUIRE_SEEDED = os.getenv("HEALTH_REQUIRE_SEEDED", "1")
 APIFY_WEBHOOK_TOKEN = os.getenv("APIFY_WEBHOOK_TOKEN", "change-me")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
+CACHE_TTL = int(os.getenv("CACHE_TTL", "60"))
+AI_IN_PIPELINE = os.getenv("AI_IN_PIPELINE", "true").lower() == "true"
 
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set in environment")
@@ -44,13 +58,50 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 7) 헬퍼: DB 연결 (요청마다 짧게 열고 닫는 패턴)
+# 7) 헬퍼: DB 연결
 def query_all(sql: str, params=None):
     with psycopg2.connect(DATABASE_URL) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, params or [])
         return cur.fetchall()
 
-# 8) Crawler 헬퍼 함수들
+# 8) 캐시 시스템
+_cache = {}
+_cache_lock = threading.Lock()
+
+def cache_get(key: str) -> Any:
+    """만료되지 않은 캐시 값 반환, 없거나 만료 시 None"""
+    with _cache_lock:
+        if key in _cache:
+            expire_time, value = _cache[key]
+            if time.time() < expire_time:
+                logger.debug(f"Cache hit for key: {key}")
+                return value
+            else:
+                del _cache[key]
+                logger.debug(f"Cache expired for key: {key}")
+        return None
+
+def cache_set(key: str, value: Any, ttl: int = None):
+    """캐시 저장 (기본 TTL은 CACHE_TTL 환경변수)"""
+    if ttl is None:
+        ttl = CACHE_TTL
+    expire_time = time.time() + ttl
+    with _cache_lock:
+        _cache[key] = (expire_time, value)
+        logger.debug(f"Cache set for key: {key}, TTL: {ttl}s")
+
+# 9) AI 헬퍼 함수 (내구성 강화 버전)
+def _to_utc_ts(date_yyyy_mm_dd: str | None):
+    """'YYYY-MM-DD' -> aware UTC midnight; None 유지 (방어적 파싱)"""
+    if not date_yyyy_mm_dd:
+        return None
+    try:
+        d = dt.date.fromisoformat(date_yyyy_mm_dd)
+        return dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc)
+    except Exception:
+        return None
+
+# 10) Crawler 헬퍼 함수들
 def normalize_item(item: dict, base_url: str = None) -> dict:
     """Apify 아이템을 정규화"""
     normalized = {
@@ -67,7 +118,7 @@ def normalize_item(item: dict, base_url: str = None) -> dict:
         if base_url:
             normalized["url"] = base_url.rstrip("/") + "/" + normalized["url"].lstrip("/")
     
-    # 날짜 파싱 (필요시 형식 조정)
+    # 날짜 파싱
     if item.get("published_at"):
         try:
             normalized["published_at"] = datetime.fromisoformat(item["published_at"].replace("Z", "+00:00"))
@@ -95,25 +146,32 @@ def content_hash(college_key: str, title: str, url: str, published_at: Optional[
     content = f"{college_key}|{title}|{url}|{date_str}"
     return hashlib.sha256(content.encode()).hexdigest()
 
-# UPSERT SQL
+# UPSERT SQL (AI 필드 포함)
 UPSERT_SQL = """
     INSERT INTO notices (
         college_key, title, url, summary_raw, body_html, body_text, 
-        published_at, source_site, content_hash
+        published_at, source_site, content_hash,
+        category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai
     ) VALUES (
         %(college_key)s, %(title)s, %(url)s, %(summary_raw)s, 
         %(body_html)s, %(body_text)s, %(published_at)s, 
-        %(source_site)s, %(content_hash)s
+        %(source_site)s, %(content_hash)s,
+        %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s
     )
     ON CONFLICT (content_hash) 
     DO UPDATE SET
         summary_raw = EXCLUDED.summary_raw,
         body_html = EXCLUDED.body_html,
         body_text = EXCLUDED.body_text,
+        category_ai = EXCLUDED.category_ai,
+        start_at_ai = EXCLUDED.start_at_ai,
+        end_at_ai = EXCLUDED.end_at_ai,
+        qualification_ai = EXCLUDED.qualification_ai,
+        hashtags_ai = EXCLUDED.hashtags_ai,
         updated_at = CURRENT_TIMESTAMP
 """
 
-# 9) 라우트들
+# 11) 라우트들
 @app.get("/health")
 def health():
     base = {"env": ENV, "service": "dice-api"}
@@ -147,34 +205,59 @@ def list_notices(
     q: str | None = Query(None),
     date_from: str | None = Query(None, description="YYYY-MM-DD"),
     date_to: str | None = Query(None, description="YYYY-MM-DD"),
+    sort: str = Query("recent", regex="^(recent|oldest)$"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
 ):
     where, params = [], []
-    if college:
+    
+    if college and college != "all":
         where.append("college_key = %s")
         params.append(college)
+    
     if q:
-        where.append("(title ILIKE %s OR summary_raw ILIKE %s OR summary_ai ILIKE %s)")
-        params += [f"%{q}%", f"%{q}%", f"%{q}%"]
+        keywords = q.strip().split()
+        for keyword in keywords:
+            if keyword:
+                where.append("(title ILIKE %s OR summary_raw ILIKE %s OR summary_ai ILIKE %s)")
+                params += [f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"]
+    
     if date_from:
         where.append("published_at >= %s")
         params.append(datetime.fromisoformat(date_from))
     if date_to:
         where.append("published_at < %s")
         params.append(datetime.fromisoformat(date_to))
-
-    sql = """
-      SELECT id, college_key, title, url, summary_ai, summary_raw, published_at, created_at
-      FROM notices
-    """
+    
+    where_clause = ""
     if where:
-        sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY published_at DESC NULLS LAST, created_at DESC LIMIT %s OFFSET %s"
+        where_clause = " WHERE " + " AND ".join(where)
+    
+    count_sql = f"SELECT COUNT(*) AS total FROM notices{where_clause}"
+    count_result = query_all(count_sql, params[:])
+    total_count = count_result[0]["total"] if count_result else 0
+    
+    order_clause = " ORDER BY published_at DESC NULLS LAST, created_at DESC"
+    if sort == "oldest":
+        order_clause = " ORDER BY published_at ASC NULLS FIRST, created_at ASC"
+    
+    sql = f"""
+      SELECT id, college_key, title, url, summary_ai, summary_raw, 
+             category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
+             published_at, created_at
+      FROM notices{where_clause}{order_clause} LIMIT %s OFFSET %s
+    """
     params += [limit, offset]
     
     rows = query_all(sql, params)
-    return {"items": rows, "limit": limit, "offset": offset}
+    
+    return {
+        "items": rows,
+        "total_count": total_count,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort
+    }
 
 @app.get("/stats")
 def stats():
@@ -199,6 +282,7 @@ def list_colleges():
 def get_notice(notice_id: str):
     rows = query_all("""
       SELECT id, college_key, title, url, summary_ai, summary_raw, body_html, body_text,
+             category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
              published_at, created_at, updated_at
       FROM notices WHERE id = %s
     """, [notice_id])
@@ -209,14 +293,15 @@ def get_notice(notice_id: str):
 @app.post("/apify/webhook")
 def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
     """Apify webhook 엔드포인트 - 크롤링 완료 시 호출됨"""
-    # 1) 보안 토큰 확인
-    if token != APIFY_WEBHOOK_TOKEN:
+    # 1) 보안 토큰 확인 (강화)
+    expected_token = os.getenv("APIFY_WEBHOOK_TOKEN")
+    if not expected_token or token != expected_token:
         logger.warning(f"Invalid webhook token attempt")
-        raise HTTPException(status_code=401, detail="invalid token")
+        raise HTTPException(status_code=401, detail="unauthorized")
     
     logger.info(f"Webhook received: {payload.get('eventType', 'unknown')}")
     
-    # 2) datasetId / taskId 추출 (Apify RUN.SUCCEEDED payload 대비)
+    # 2) datasetId / taskId 추출
     ds_id = (
         payload.get("defaultDatasetId")
         or payload.get("data", {}).get("defaultDatasetId")
@@ -261,12 +346,12 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                 break
     
     if not college_key:
-        college_key = "main"  # fallback
+        college_key = "main"
         logger.warning(f"Unknown task_id {task_id}, using 'main' as default")
     
     logger.info(f"Processing for college: {college_key}")
     
-    # 5) upsert
+    # 5) upsert (AI 추출 포함)
     upserted, skipped = 0, 0
     try:
         with psycopg2.connect(DATABASE_URL) as conn, conn.cursor() as cur:
@@ -275,6 +360,47 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                 if not validate_normalized_item(norm):
                     skipped += 1
                     continue
+                
+                # AI 자동추출 (실패해도 파이프라인은 계속)
+                use_ai = AI_IN_PIPELINE
+                if use_ai:
+                    try:
+                        title_for_ai = (norm.get("title") or "").strip()
+                        body_for_ai = (norm.get("body_text") or "").strip()
+
+                        # 1) 본문/제목 기반 구조화 추출
+                        ai = extract_notice_info(body_text=body_for_ai, title=title_for_ai) or {}
+
+                        # 2) 제목 해시태그 추출
+                        ht = extract_hashtags_from_title(title_for_ai) or {}
+
+                        # 3) 필드 매핑
+                        norm["category_ai"] = ai.get("category_ai")
+                        norm["start_at_ai"] = _to_utc_ts(ai.get("start_date_ai"))
+                        norm["end_at_ai"] = _to_utc_ts(ai.get("end_date_ai"))
+
+                        # qualification_ai: dict or {}
+                        qual_dict = ai.get("qualification_ai") or {}
+                        norm["qualification_ai"] = qual_dict
+
+                        # hashtags_ai: list or None
+                        norm["hashtags_ai"] = ht.get("hashtags") or None
+
+                    except Exception as e:
+                        # 실패 시 널 저장 (기존 파이프라인을 막지 않음)
+                        logger.warning(f"AI extraction failed for {norm.get('title', 'unknown')}: {e}")
+                        norm["category_ai"] = None
+                        norm["start_at_ai"] = None
+                        norm["end_at_ai"] = None
+                        norm["qualification_ai"] = {}
+                        norm["hashtags_ai"] = None
+                else:
+                    # AI 비활성화 시 전부 None/빈값
+                    norm["category_ai"] = None
+                    norm["start_at_ai"] = None
+                    norm["end_at_ai"] = None
+                    norm["qualification_ai"] = {}
+                    norm["hashtags_ai"] = None
                 
                 h = content_hash(college_key, norm["title"], norm["url"], norm["published_at"])
                 
@@ -288,7 +414,12 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                         "body_text": norm.get("body_text"),
                         "published_at": norm.get("published_at"),
                         "source_site": COLLEGES[college_key].get("url"),
-                        "content_hash": h
+                        "content_hash": h,
+                        "category_ai": norm.get("category_ai"),
+                        "start_at_ai": norm.get("start_at_ai"),
+                        "end_at_ai": norm.get("end_at_ai"),
+                        "qualification_ai": Json(norm.get("qualification_ai") or {}),  # 안전 바인딩
+                        "hashtags_ai": norm.get("hashtags_ai"),
                     })
                     upserted += 1
                 except psycopg2.Error as e:
@@ -309,3 +440,49 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
         "skipped": skipped,
         "total_items": len(items)
     }
+
+# 12) 실시간 자격검증 엔드포인트
+class UserProfile(BaseModel):
+    grade: int | None = None
+    major: str | None = None
+    gpa: float | None = None
+    lang: str | None = None
+
+@app.post("/notices/{notice_id}/verify-eligibility")
+def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
+    """사용자 프로필을 기반으로 공지 자격요건 검증"""
+    try:
+        with psycopg2.connect(DATABASE_URL) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+              SELECT qualification_ai
+              FROM notices
+              WHERE id=%(id)s
+            """, {"id": notice_id})
+            row = cur.fetchone()
+    except psycopg2.Error as e:
+        logger.error(f"Database error in verify_eligibility: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+    if not row:
+        raise HTTPException(status_code=404, detail="notice not found")
+
+    qa = row.get("qualification_ai")
+    if not qa:
+        return {"eligible": False, "reason": "해당 공지에 AI 자격요건 데이터가 없습니다."}
+
+    # ai_processor 호출 (dict 필요)
+    if isinstance(qa, str):
+        try:
+            qa = json.loads(qa)
+        except Exception:
+            qa = {}
+
+    try:
+        result = verify_eligibility_ai(qa, profile.model_dump())
+        return {
+            "eligible": bool(result.get("eligible")),
+            "reason": result.get("reason") or ""
+        }
+    except Exception as e:
+        logger.error(f"AI verification failed: {e}")
+        return {"eligible": False, "reason": "자격 검증 중 오류가 발생했습니다."}
