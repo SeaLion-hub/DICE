@@ -22,45 +22,12 @@ except Exception:
     pass
 
 import os
+import re
 import datetime as dt
 from typing import Any, Dict, Optional, List
 
 import google.generativeai as genai
 from pydantic import BaseModel, Field, ValidationError
-
-# ───────────────────────────────────────────────────────────────────────────────
-# Gemini response_schema (딕셔너리 형태 - v0.8.5 호환)
-# ───────────────────────────────────────────────────────────────────────────────
-EXTRACT_RS = {
-    "type": "object",
-    "properties": {
-        "category": {"type": "string"},
-        "start_date": {"type": "string", "nullable": True},
-        "end_date": {"type": "string", "nullable": True},
-        "qualification": {"type": "object", "nullable": True},
-    },
-    "required": ["category"]
-}
-
-VERIFY_RS = {
-    "type": "object",
-    "properties": {
-        "eligible": {"type": "boolean"},
-        "reason": {"type": "string"},
-    },
-    "required": ["eligible", "reason"]
-}
-
-HASHTAG_RS = {
-    "type": "object",
-    "properties": {
-        "hashtags": {
-            "type": "array",
-            "items": {"type": "string"}
-        }
-    },
-    "required": ["hashtags"]
-}
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Pydantic v1/v2 호환 Base 스키마 (extra field 무시)
@@ -109,7 +76,7 @@ class ExtractSchema(_BaseSchema):
     category: str = Field(description="장학|채용|행사|수업|행정|기타 중 하나")
     start_date: Optional[str] = Field(default=None, description="YYYY-MM-DD 또는 null")
     end_date: Optional[str] = Field(default=None, description="YYYY-MM-DD 또는 null")
-    qualification: Dict[str, Any] = Field(default_factory=dict, description="예: {'grade':'3+','gpa':'3.5/4.3','lang':'TOEIC 800+'}")
+    qualification: Any = None
 
 
 class VerifySchema(_BaseSchema):
@@ -135,6 +102,38 @@ _ALLOWED_HASHTAGS = [
     "#학사", "#장학", "#행사", "#취업", "#국제교류", "#공모전/대회", "#일반"
 ]
 _HASHTAG_ORDER = {tag: i for i, tag in enumerate(_ALLOWED_HASHTAGS)}
+
+def _clean_json_text(t: str) -> str:
+    """
+    LLM이 반환한 텍스트에서 ```json ... ``` 또는 ``` ... ``` 펜스 제거
+    """
+    if not t:
+        return t
+    # ```json ... ``` 패턴 찾기
+    m = re.search(r"```json\s*(.*?)\s*```", t, re.S | re.I)
+    if m:
+        return m.group(1).strip()
+    # ``` ... ``` 패턴 찾기
+    m = re.search(r"```\s*(.*?)\s*```", t, re.S)
+    if m:
+        return m.group(1).strip()
+    return t.strip()
+
+def _qual_to_dict(q: Any) -> Dict[str, Any]:
+    """
+    qualification 값을 dict로 정규화
+    - dict면 그대로 반환
+    - str이면 {"raw": str} 형태로 변환
+    - 기타는 빈 dict
+    """
+    if isinstance(q, dict):
+        return q
+    if isinstance(q, str):
+        s = q.strip()
+        if s:
+            return {"raw": s}
+        return {}
+    return {}
 
 def _iso_or_none(s: Optional[str]) -> Optional[str]:
     if not s:
@@ -216,13 +215,13 @@ def extract_notice_info(body_text: str, title: Optional[str] = None) -> Dict[str
     resp = model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=EXTRACT_RS,
+            response_mime_type="application/json"
         ),
     )
 
     try:
-        data = ExtractSchema.model_validate_json(resp.text)
+        raw = _clean_json_text(resp.text)
+        data = ExtractSchema.model_validate_json(raw)
     except ValidationError as ve:
         raise RuntimeError(f"LLM structured output validation failed: {ve}") from ve
 
@@ -230,7 +229,7 @@ def extract_notice_info(body_text: str, title: Optional[str] = None) -> Dict[str
     cat = _norm_category(data.category)
     s   = _iso_or_none(data.start_date)
     e   = _iso_or_none(data.end_date)
-    qual = data.qualification or {}
+    qual = _qual_to_dict(data.qualification)
 
     return {
         "category_ai": cat,
@@ -272,13 +271,13 @@ def verify_eligibility_ai(qualification_json: Dict[str, Any], user_profile: Dict
     resp = model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=VERIFY_RS,
+            response_mime_type="application/json"
         ),
     )
 
     try:
-        data = VerifySchema.model_validate_json(resp.text)
+        raw = _clean_json_text(resp.text)
+        data = VerifySchema.model_validate_json(raw)
     except ValidationError as ve:
         raise RuntimeError(f"LLM verify structured output validation failed: {ve}") from ve
 
@@ -330,13 +329,13 @@ def extract_hashtags_from_title(title: str) -> Dict[str, List[str]]:
     resp = model.generate_content(
         prompt,
         generation_config=genai.types.GenerationConfig(
-            response_mime_type="application/json",
-            response_schema=HASHTAG_RS,
+            response_mime_type="application/json"
         ),
     )
 
     try:
-        data = HashtagSchema.model_validate_json(resp.text)
+        raw = _clean_json_text(resp.text)
+        data = HashtagSchema.model_validate_json(raw)
     except ValidationError as ve:
         raise RuntimeError(f"LLM hashtag structured output validation failed: {ve}") from ve
 

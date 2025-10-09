@@ -1,4 +1,4 @@
-# crawler_apify.py (AI 필드 처리 통합 버전)
+# crawler_apify.py (AI 필드 처리 통합 버전 + 쿼터 안전장치)
 import os, time, json, hashlib, requests, psycopg2
 import re
 import datetime as dt
@@ -22,6 +22,8 @@ load_dotenv(encoding="utf-8")
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
 AI_IN_PIPELINE = os.getenv("AI_IN_PIPELINE", "true").lower() == "true"
+AI_SLEEP_SEC = float(os.getenv("AI_SLEEP_SEC", "0.8"))
+AI_MAX_PER_COLLEGE = int(os.getenv("AI_MAX_PER_COLLEGE", "999999"))
 
 if not APIFY_TOKEN:
     raise RuntimeError("APIFY_TOKEN not set")
@@ -191,7 +193,43 @@ def extract_field(item: Dict[str, Any], field_names: List[str],
                 return value
     return default
 
-def normalize_item(item: dict, base_url: Optional[str] = None) -> dict:
+def _fix_title_and_date_for_liberal(title: str, published_at: Any, raw_item: dict) -> tuple:
+    """
+    문과대 특수 케이스 보정:
+    - 제목이 '작성일\tYYYY.MM.DD'로 시작하면 대체 제목 찾기
+    - 날짜 문자열에서 YYYY-MM-DD 추출
+    """
+    # 제목 보정: '작성일'로 시작하면 잘못된 제목
+    if title and title.startswith("작성일"):
+        # 대체 제목 후보 시도
+        alt_title = (
+            raw_item.get("headline") or 
+            raw_item.get("h1") or 
+            raw_item.get("subject") or
+            raw_item.get("name") or
+            ""
+        ).strip()
+        
+        if alt_title:
+            title = alt_title
+        else:
+            # 대체 제목이 없으면 '작성일 YYYY.MM.DD' 패턴 제거
+            title = re.sub(r"^작성일\s*\d{4}[./-]\d{2}[./-]\d{2}\s*", "", title).strip()
+            if not title:
+                title = "제목없음"
+    
+    # 날짜 보정: 문자열에서 YYYY-MM-DD 패턴 추출
+    if isinstance(published_at, str):
+        # '작성일 2025.09.18' 또는 날짜 패턴이 포함된 경우
+        if "작성일" in published_at or re.search(r"\d{4}[./-]\d{2}[./-]\d{2}", published_at):
+            m = re.search(r"(\d{4})[./-](\d{2})[./-](\d{2})", published_at)
+            if m:
+                y, mth, d = m.groups()
+                published_at = f"{y}-{mth}-{d}"
+    
+    return title, published_at
+
+def normalize_item(item: dict, base_url: Optional[str] = None, college_key: Optional[str] = None) -> dict:
     """아이템 정규화"""
     
     title_fields = [
@@ -349,12 +387,14 @@ def fetch_dataset_items(dataset_id: str, timeout=300):
         print(f"  ⚠️ items error: {e}")
     return []
 
-# 메인 실행 함수 (AI 통합)
+# 메인 실행 함수 (AI 통합 + 쿼터 안전장치)
 def run():
     total_upserted = 0
     total_skipped = 0
     
     print(f"🤖 AI_IN_PIPELINE: {AI_IN_PIPELINE}")
+    print(f"⏱️  AI_SLEEP_SEC: {AI_SLEEP_SEC}")
+    print(f"🔢 AI_MAX_PER_COLLEGE: {AI_MAX_PER_COLLEGE}")
     
     with psycopg2.connect(DATABASE_URL) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         for ck, meta in COLLEGES.items():
@@ -392,6 +432,7 @@ def run():
             
             college_upserted = 0
             college_skipped = 0
+            ai_call_count = 0  # AI 호출 카운터
 
             for rec in items:
                 # 정규화
@@ -403,10 +444,12 @@ def run():
                     continue
                 
                 # ============================================
-                # AI 자동추출 로직 통합 (main.py와 동일)
+                # AI 자동추출 로직 통합 + 쿼터 안전장치
                 # ============================================
-                use_ai = AI_IN_PIPELINE
-                if use_ai:
+                if AI_IN_PIPELINE and ai_call_count < AI_MAX_PER_COLLEGE:
+                    # AI 호출 전 슬립 (쿼터 보호)
+                    time.sleep(AI_SLEEP_SEC)
+                    
                     try:
                         title_for_ai = (norm.get("title") or "").strip()
                         body_for_ai = (norm.get("body_text") or "").strip()
@@ -429,16 +472,23 @@ def run():
                         # hashtags_ai: list or None
                         norm["hashtags_ai"] = ht.get("hashtags") or None
 
+                        ai_call_count += 1
+
                     except Exception as e:
-                        # 실패 시에도 저장 (기존 파이프라인을 막지 않음)
-                        print(f"  ⚠️ AI extraction failed for {norm.get('title', 'unknown')[:50]}: {e}")
+                        # 429 감지 시 추가 슬립
+                        if "429" in str(e):
+                            print(f"  ⚠️ 429 detected, sleeping 5 seconds...")
+                            time.sleep(5.0)
+                        
+                        # 실패 시에도 저장 진행 (기존 파이프라인을 막지 않음)
+                        print(f"  ⚠️ AI extraction soft-fail for {norm.get('title', 'unknown')[:50]}: {e}")
                         norm["category_ai"] = None
                         norm["start_at_ai"] = None
                         norm["end_at_ai"] = None
                         norm["qualification_ai"] = {}
                         norm["hashtags_ai"] = None
                 else:
-                    # AI 비활성화 시 전부 None/빈값
+                    # AI 비활성화 또는 배치 제한 초과 시 전부 None/빈값
                     norm["category_ai"] = None
                     norm["start_at_ai"] = None
                     norm["end_at_ai"] = None
@@ -472,7 +522,7 @@ def run():
                     college_skipped += 1
             
             conn.commit()
-            print(f"  ✅ {name}: upserted={college_upserted}, skipped={college_skipped}")
+            print(f"  ✅ {name}: upserted={college_upserted}, skipped={college_skipped}, ai_calls={ai_call_count}")
             
             total_upserted += college_upserted
             total_skipped += college_skipped
