@@ -2,26 +2,19 @@
 Gemini Flash 기반 '구조화 추출'과 '실시간 자격 검증' 모듈.
 - extract_notice_info(title, body_text) -> dict
 - verify_eligibility_ai(qualification_json, user_profile) -> dict
-- extract_hashtags_from_title(title) -> dict  # NEW
+- extract_hashtags_from_title(title) -> dict
 
 의존:
   pip install google-generativeai pydantic
 환경변수:
   GEMINI_API_KEY=...
-  GEMINI_MODEL=gemini-2.0-flash-exp   # 콘솔에서 제공되는 Flash 계열로 교체 가능
-  AI_TIMEOUT_S=20                      # 옵션
-주의:
-  이 파일만 추가한다. main.py 등의 통합은 '다음 작업'에서 별도 안내 예정.
+  GEMINI_MODEL=gemini-2.0-flash-exp
+  AI_TIMEOUT_S=20
 """
 
-from __future__ import annotations  # ✅ 파일 맨 위(모듈 docstring 다음)로 이동
+from __future__ import annotations
 
-# (선택) 모듈 docstring이 있다면 그 위/아래 순서는 아래처럼 유지 가능
-"""
-Gemini Flash 기반 '구조화 추출'과 '실시간 자격 검증' 모듈.
-"""
-
-# .env 자동 로딩 (이제 future import보다 아래에 위치)
+# .env 자동 로딩
 try:
     from dotenv import load_dotenv
     load_dotenv()
@@ -36,27 +29,34 @@ import google.generativeai as genai
 from pydantic import BaseModel, Field, ValidationError
 
 # ───────────────────────────────────────────────────────────────────────────────
+# Pydantic v1/v2 호환 Base 스키마 (extra field 무시)
+# ───────────────────────────────────────────────────────────────────────────────
+try:
+    # Pydantic v2
+    from pydantic import ConfigDict
+    
+    class _BaseSchema(BaseModel):
+        model_config = ConfigDict(extra="ignore")
+except ImportError:
+    # Pydantic v1
+    class _BaseSchema(BaseModel):
+        class Config:
+            extra = "ignore"
+
+
+# ───────────────────────────────────────────────────────────────────────────────
 # 0) 환경설정 및 모델 초기화
 # ───────────────────────────────────────────────────────────────────────────────
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
-
-
-
-
-
 AI_TIMEOUT_S   = int(os.getenv("AI_TIMEOUT_S", "20"))
 
-if not GEMINI_API_KEY:
-    # import 시점에 바로 에러 내지 않고, 호출 시점에서 검증한다.
-    pass
-
-# configure once
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
 
-# Lazy 생성: 일부 환경(테스트/로컬)에서 API 키가 없는 경우 대비
+# Lazy 모델 생성
 _model: Optional[genai.GenerativeModel] = None
+
 def _get_model() -> genai.GenerativeModel:
     global _model
     if _model is None:
@@ -68,32 +68,24 @@ def _get_model() -> genai.GenerativeModel:
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 1) Pydantic 스키마 (Structured Output 용)
+# 1) Pydantic 스키마 (Structured Output 용) - extra field 무시
 # ───────────────────────────────────────────────────────────────────────────────
-class ExtractSchema(BaseModel):
-    """
-    공지 구조화 추출 결과 스키마
-    - 날짜는 YYYY-MM-DD (시간 없음)
-    - qualification: grade/gpa/lang 중심의 요약 JSON (없으면 빈 값 허용)
-    """
+class ExtractSchema(_BaseSchema):
+    """공지 구조화 추출 결과 스키마"""
     category: str = Field(description="장학|채용|행사|수업|행정|기타 중 하나")
     start_date: Optional[str] = Field(default=None, description="YYYY-MM-DD 또는 null")
-    end_date: Optional[str]   = Field(default=None, description="YYYY-MM-DD 또는 null")
+    end_date: Optional[str] = Field(default=None, description="YYYY-MM-DD 또는 null")
     qualification: Dict[str, Any] = Field(default_factory=dict, description="예: {'grade':'3+','gpa':'3.5/4.3','lang':'TOEIC 800+'}")
 
 
-class VerifySchema(BaseModel):
-    """
-    실시간 자격 검증 결과 스키마
-    """
+class VerifySchema(_BaseSchema):
+    """실시간 자격 검증 결과 스키마"""
     eligible: bool
     reason: str
 
 
-class HashtagSchema(BaseModel):
-    """
-    해시태그 추출 결과 스키마
-    """
+class HashtagSchema(_BaseSchema):
+    """해시태그 추출 결과 스키마"""
     hashtags: List[str] = Field(
         description="최종 선택된 해시태그 리스트. 예: ['#학사'] 또는 ['#취업','#국제교류'] 등"
     )
@@ -127,13 +119,6 @@ def _norm_category(cat: Optional[str]) -> str:
 def _norm_hashtags(tags: List[str]) -> List[str]:
     """
     화이트리스트 필터링, #일반 단독 규칙, 중복 제거, 정렬.
-    
-    규칙:
-    1. 화이트리스트에 없는 태그 제거
-    2. 중복 제거 (입력 순서 보존)
-    3. #일반 규칙: 다른 태그와 함께 있으면 #일반 제거, 단독일 때만 허용
-    4. 정렬: _ALLOWED_HASHTAGS 정의 순서대로
-    5. 빈 리스트면 ["#일반"] 반환
     """
     # 화이트리스트 필터링 + 공백 제거
     tags = [t.strip() for t in tags if t and t.strip() in _ALLOWED_HASHTAGS]
@@ -170,12 +155,11 @@ def _norm_hashtags(tags: List[str]) -> List[str]:
 def extract_notice_info(body_text: str, title: Optional[str] = None) -> Dict[str, Any]:
     """
     공지 본문(+제목)을 LLM에 전달하여 구조화된 정보를 추출한다.
-    반환 dict 키(통합 단계에서 DB 컬럼과 맵핑하기 쉬운 형태로 맞춤):
+    반환 dict 키:
       - category_ai: str ("장학|채용|행사|수업|행정|기타")
       - start_date_ai: str | None (YYYY-MM-DD)
       - end_date_ai: str | None (YYYY-MM-DD)
       - qualification_ai: dict
-    예외 발생 시 RuntimeError를 던진다(상위에서 캐치하고 기본값 처리 권장).
     """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set")
@@ -268,7 +252,7 @@ def verify_eligibility_ai(qualification_json: Dict[str, Any], user_profile: Dict
 
 
 # ───────────────────────────────────────────────────────────────────────────────
-# 5) 공개 함수: 제목 기반 해시태그 추출 (NEW)
+# 5) 공개 함수: 제목 기반 해시태그 추출
 # ───────────────────────────────────────────────────────────────────────────────
 def extract_hashtags_from_title(title: str) -> Dict[str, List[str]]:
     """
@@ -278,17 +262,6 @@ def extract_hashtags_from_title(title: str) -> Dict[str, List[str]]:
       {"hashtags": ["#학사"]}
       {"hashtags": ["#취업", "#국제교류"]}
       {"hashtags": ["#일반"]}
-    
-    예외 발생 시 RuntimeError를 던진다(상위에서 캐치하고 기본값 처리 권장).
-    
-    AC 만족 사항:
-    1. JSON 구조화 강제: {"hashtags": [...]} 형식만 반환
-    2. 화이트리스트: _ALLOWED_HASHTAGS 내에서만 선택
-    3. #일반 규칙: 단독일 때만 허용, 다른 태그와 함께면 제거
-    4. 중복 제거 & 정렬: _ALLOWED_HASHTAGS 순서대로
-    5. 오류 전파: RuntimeError로 상위 계층에 전달
-    6. 한글/영문 혼용: 대괄호 [...] 내용은 주체로만 취급
-    7. 단일 파일 수정: ai_processor.py만 변경
     """
     if not GEMINI_API_KEY:
         raise RuntimeError("GEMINI_API_KEY is not set")
