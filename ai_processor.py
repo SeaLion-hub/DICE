@@ -26,42 +26,41 @@ import datetime as dt
 from typing import Any, Dict, Optional, List
 
 import google.generativeai as genai
-from google.generativeai.types import Schema, Type
 from pydantic import BaseModel, Field, ValidationError
 
 # ───────────────────────────────────────────────────────────────────────────────
-# Gemini 네이티브 Schema 정의 (default 키 없이 명시적 정의)
+# Gemini response_schema (딕셔너리 형태 - v0.8.5 호환)
 # ───────────────────────────────────────────────────────────────────────────────
-EXTRACT_RS = Schema(
-    type=Type.OBJECT,
-    properties={
-        "category":    Schema(type=Type.STRING),
-        "start_date":  Schema(type=Type.STRING, nullable=True),
-        "end_date":    Schema(type=Type.STRING, nullable=True),
-        "qualification": Schema(type=Type.OBJECT, properties={}, nullable=True),
+EXTRACT_RS = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string"},
+        "start_date": {"type": "string", "nullable": True},
+        "end_date": {"type": "string", "nullable": True},
+        "qualification": {"type": "object", "nullable": True},
     },
-    required=["category"]
-)
+    "required": ["category"]
+}
 
-VERIFY_RS = Schema(
-    type=Type.OBJECT,
-    properties={
-        "eligible": Schema(type=Type.BOOLEAN),
-        "reason":   Schema(type=Type.STRING),
+VERIFY_RS = {
+    "type": "object",
+    "properties": {
+        "eligible": {"type": "boolean"},
+        "reason": {"type": "string"},
     },
-    required=["eligible", "reason"]
-)
+    "required": ["eligible", "reason"]
+}
 
-HASHTAG_RS = Schema(
-    type=Type.OBJECT,
-    properties={
-        "hashtags": Schema(
-            type=Type.ARRAY,
-            items=Schema(type=Type.STRING)
-        )
+HASHTAG_RS = {
+    "type": "object",
+    "properties": {
+        "hashtags": {
+            "type": "array",
+            "items": {"type": "string"}
+        }
     },
-    required=["hashtags"]
-)
+    "required": ["hashtags"]
+}
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Pydantic v1/v2 호환 Base 스키마 (extra field 무시)
@@ -274,7 +273,7 @@ def verify_eligibility_ai(qualification_json: Dict[str, Any], user_profile: Dict
         prompt,
         generation_config=genai.types.GenerationConfig(
             response_mime_type="application/json",
-            response_schema=VerifySchema
+            response_schema=VERIFY_RS,
         ),
     )
 
@@ -332,7 +331,7 @@ def extract_hashtags_from_title(title: str) -> Dict[str, List[str]]:
         prompt,
         generation_config=genai.types.GenerationConfig(
             response_mime_type="application/json",
-            response_schema=HashtagSchema
+            response_schema=HASHTAG_RS,
         ),
     )
 
