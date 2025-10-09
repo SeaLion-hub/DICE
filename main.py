@@ -1,4 +1,4 @@
-# main.py (프로젝트 루트 / AI 자동추출 통합 최종 버전)
+# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전)
 import os
 import logging
 import hashlib
@@ -15,6 +15,7 @@ import time
 import threading
 import json
 from pydantic import BaseModel
+import jwt
 
 # AI processor import
 from ai_processor import (
@@ -22,6 +23,10 @@ from ai_processor import (
     extract_notice_info,
     verify_eligibility_ai,
 )
+
+# 인증 라우터 import
+from auth_routes import router as auth_router
+from auth_security import decode_token
 
 # 1) .env 로드 (로컬 실행용 / Railway에선 환경변수로 자동 주입)
 load_dotenv(encoding="utf-8")
@@ -58,13 +63,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 7) 헬퍼: DB 연결
+# 7) 인증 라우터 등록
+app.include_router(auth_router, tags=["auth"])
+
+# 8) 헬퍼: DB 연결
 def query_all(sql: str, params=None):
     with psycopg2.connect(DATABASE_URL) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, params or [])
         return cur.fetchall()
 
-# 8) 캐시 시스템
+# 9) 캐시 시스템
 _cache = {}
 _cache_lock = threading.Lock()
 
@@ -90,7 +98,7 @@ def cache_set(key: str, value: Any, ttl: int = None):
         _cache[key] = (expire_time, value)
         logger.debug(f"Cache set for key: {key}, TTL: {ttl}s")
 
-# 9) AI 헬퍼 함수 (내구성 강화 버전)
+# 10) AI 헬퍼 함수 (내구성 강화 버전)
 def _to_utc_ts(date_yyyy_mm_dd: str | None):
     """'YYYY-MM-DD' -> aware UTC midnight; None 유지 (방어적 파싱)"""
     if not date_yyyy_mm_dd:
@@ -101,7 +109,7 @@ def _to_utc_ts(date_yyyy_mm_dd: str | None):
     except Exception:
         return None
 
-# 10) Crawler 헬퍼 함수들
+# 11) Crawler 헬퍼 함수들
 def normalize_item(item: dict, base_url: str = None) -> dict:
     """Apify 아이템을 정규화"""
     normalized = {
@@ -171,7 +179,7 @@ UPSERT_SQL = """
         updated_at = CURRENT_TIMESTAMP
 """
 
-# 11) 라우트들
+# 12) 라우트들
 @app.get("/health")
 def health():
     base = {"env": ENV, "service": "dice-api"}
@@ -201,6 +209,7 @@ def health():
 
 @app.get("/notices")
 def list_notices(
+    request: Request,
     college: str | None = Query(None),
     q: str | None = Query(None),
     date_from: str | None = Query(None, description="YYYY-MM-DD"),
@@ -208,9 +217,70 @@ def list_notices(
     sort: str = Query("recent", regex="^(recent|oldest)$"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
+    my: bool = Query(False, description="내 키워드와 일치하는 공지만 보기 (인증 필요)"),
 ):
+    """
+    공지사항 목록 조회
+    
+    - my=true: 로그인 사용자의 프로필 키워드와 일치하는 공지만 반환
+    - my=false: 모든 공지 반환 (기본값)
+    """
     where, params = [], []
     
+    # my=true 인 경우: 인증 + 사용자 keywords 로드
+    user_keywords = None
+    if my:
+        # Authorization 헤더에서 Bearer 토큰 읽기
+        auth = request.headers.get("Authorization", "")
+        parts = auth.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            token = parts[1]
+        else:
+            raise HTTPException(status_code=401, detail="Not authenticated")
+
+        # 토큰 검증 후 user_id 추출
+        try:
+            payload = decode_token(token)
+            user_id = payload.get("sub")
+            if not user_id:
+                raise HTTPException(status_code=401, detail="Invalid token")
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except jwt.InvalidTokenError:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        # DB에서 keywords 조회
+        try:
+            rows = query_all("""
+                SELECT keywords
+                FROM user_profiles
+                WHERE user_id = %s
+            """, [user_id])
+        except Exception:
+            raise HTTPException(status_code=500, detail="Database error")
+
+        if not rows:
+            # 프로필이 없으면 맞춤 공지는 없음
+            return {
+                "items": [],
+                "total_count": 0,
+                "limit": limit,
+                "offset": offset,
+                "sort": sort
+            }
+
+        user_keywords = rows[0].get("keywords") or []
+        if not user_keywords:
+            # 키워드가 비어 있으면 결과도 비움
+            return {
+                "items": [],
+                "total_count": 0,
+                "limit": limit,
+                "offset": offset,
+                "sort": sort
+            }
+    
+    # WHERE 절 동적 구성
     if college and college != "all":
         where.append("college_key = %s")
         params.append(college)
@@ -229,18 +299,26 @@ def list_notices(
         where.append("published_at < %s")
         params.append(datetime.fromisoformat(date_to))
     
+    # my=true 필터: 사용자 키워드와 공지 해시태그의 교집합
+    if my and user_keywords:
+        where.append("(hashtags_ai && %s::text[])")
+        params.append(user_keywords)
+    
     where_clause = ""
     if where:
         where_clause = " WHERE " + " AND ".join(where)
     
+    # COUNT 쿼리
     count_sql = f"SELECT COUNT(*) AS total FROM notices{where_clause}"
     count_result = query_all(count_sql, params[:])
     total_count = count_result[0]["total"] if count_result else 0
     
+    # 정렬
     order_clause = " ORDER BY published_at DESC NULLS LAST, created_at DESC"
     if sort == "oldest":
         order_clause = " ORDER BY published_at ASC NULLS FIRST, created_at ASC"
     
+    # SELECT 쿼리
     sql = f"""
       SELECT id, college_key, title, url, summary_ai, summary_raw, 
              category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
@@ -387,7 +465,7 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                         norm["hashtags_ai"] = ht.get("hashtags") or None
 
                     except Exception as e:
-                        # 실패 시 널 저장 (기존 파이프라인을 막지 않음)
+                        # 실패 시에도 저장 (기존 파이프라인을 막지 않음)
                         logger.warning(f"AI extraction failed for {norm.get('title', 'unknown')}: {e}")
                         norm["category_ai"] = None
                         norm["start_at_ai"] = None
@@ -418,7 +496,7 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                         "category_ai": norm.get("category_ai"),
                         "start_at_ai": norm.get("start_at_ai"),
                         "end_at_ai": norm.get("end_at_ai"),
-                        "qualification_ai": Json(norm.get("qualification_ai") or {}),  # 안전 바인딩
+                        "qualification_ai": Json(norm.get("qualification_ai") or {}),
                         "hashtags_ai": norm.get("hashtags_ai"),
                     })
                     upserted += 1
@@ -441,7 +519,7 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
         "total_items": len(items)
     }
 
-# 12) 실시간 자격검증 엔드포인트
+# 13) 실시간 자격검증 엔드포인트
 class UserProfile(BaseModel):
     grade: int | None = None
     major: str | None = None
