@@ -1,4 +1,4 @@
-# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전)
+# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전 + AI 요약 통합)
 import os
 import logging
 import hashlib
@@ -22,6 +22,7 @@ from ai_processor import (
     extract_hashtags_from_title,
     extract_notice_info,
     verify_eligibility_ai,
+    generate_brief_summary,  # NEW: 요약 생성 함수 추가
 )
 
 # 인증 라우터 import
@@ -154,14 +155,14 @@ def content_hash(college_key: str, title: str, url: str, published_at: Optional[
     content = f"{college_key}|{title}|{url}|{date_str}"
     return hashlib.sha256(content.encode()).hexdigest()
 
-# UPSERT SQL (AI 필드 포함)
+# UPSERT SQL (AI 필드 포함) - summary_ai 추가
 UPSERT_SQL = """
     INSERT INTO notices (
-        college_key, title, url, summary_raw, body_html, body_text, 
+        college_key, title, url, summary_raw, summary_ai, body_html, body_text, 
         published_at, source_site, content_hash,
         category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai
     ) VALUES (
-        %(college_key)s, %(title)s, %(url)s, %(summary_raw)s, 
+        %(college_key)s, %(title)s, %(url)s, %(summary_raw)s, %(summary_ai)s,
         %(body_html)s, %(body_text)s, %(published_at)s, 
         %(source_site)s, %(content_hash)s,
         %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s
@@ -169,6 +170,7 @@ UPSERT_SQL = """
     ON CONFLICT (content_hash) 
     DO UPDATE SET
         summary_raw = EXCLUDED.summary_raw,
+        summary_ai = EXCLUDED.summary_ai,
         body_html = EXCLUDED.body_html,
         body_text = EXCLUDED.body_text,
         category_ai = EXCLUDED.category_ai,
@@ -318,7 +320,7 @@ def list_notices(
     if sort == "oldest":
         order_clause = " ORDER BY published_at ASC NULLS FIRST, created_at ASC"
     
-    # SELECT 쿼리
+    # SELECT 쿼리 (summary_ai 포함)
     sql = f"""
       SELECT id, college_key, title, url, summary_ai, summary_raw, 
              category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
@@ -328,6 +330,11 @@ def list_notices(
     params += [limit, offset]
     
     rows = query_all(sql, params)
+
+    # 응답 전 summary_ai 없는 경우 기본값 설정
+    for row in rows:
+        if not row.get("summary_ai"):
+            row["summary_ai"] = "요약 준비중"
     
     return {
         "items": rows,
@@ -366,7 +373,13 @@ def get_notice(notice_id: str):
     """, [notice_id])
     if not rows:
         raise HTTPException(status_code=404, detail="notice not found")
-    return rows[0]
+    
+    notice = rows[0]
+    # summary_ai 기본값 처리
+    if not notice.get("summary_ai"):
+        notice["summary_ai"] = "요약 준비중"
+        
+    return notice
 
 @app.post("/apify/webhook")
 def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
@@ -464,6 +477,20 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                         # hashtags_ai: list or None
                         norm["hashtags_ai"] = ht.get("hashtags") or None
 
+                        # 4) NEW: 요약 생성
+                        # 입력 소스 우선순위: title + (summary_raw 우선, 없으면 body_text)
+                        text_for_summary = norm.get("summary_raw") or norm.get("body_text") or ""
+                        try:
+                            norm["summary_ai"] = generate_brief_summary(
+                                title=title_for_ai,
+                                text=text_for_summary
+                            )
+                            logger.debug(f"Summary generated for: {title_for_ai[:50]}")
+                        except Exception as se:
+                            logger.warning(f"Summary generation failed: {se}")
+                            # 폴백: 제목 기반 최소 요약
+                            norm["summary_ai"] = title_for_ai[:180] if title_for_ai else "요약 준비중"
+
                     except Exception as e:
                         # 실패 시에도 저장 (기존 파이프라인을 막지 않음)
                         logger.warning(f"AI extraction failed for {norm.get('title', 'unknown')}: {e}")
@@ -472,6 +499,8 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                         norm["end_at_ai"] = None
                         norm["qualification_ai"] = {}
                         norm["hashtags_ai"] = None
+                        # AI 요약 실패 시 폴백
+                        norm["summary_ai"] = norm.get("title", "요약 준비중")[:180]
                 else:
                     # AI 비활성화 시 전부 None/빈값
                     norm["category_ai"] = None
@@ -479,6 +508,7 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                     norm["end_at_ai"] = None
                     norm["qualification_ai"] = {}
                     norm["hashtags_ai"] = None
+                    norm["summary_ai"] = None
                 
                 h = content_hash(college_key, norm["title"], norm["url"], norm["published_at"])
                 
@@ -488,6 +518,7 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                         "title": norm["title"],
                         "url": norm["url"],
                         "summary_raw": norm.get("summary_raw"),
+                        "summary_ai": norm.get("summary_ai"), # NEW: summary_ai 추가
                         "body_html": norm.get("body_html"),
                         "body_text": norm.get("body_text"),
                         "published_at": norm.get("published_at"),

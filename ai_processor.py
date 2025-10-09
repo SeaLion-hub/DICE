@@ -3,6 +3,7 @@ Gemini Flash 기반 '구조화 추출'과 '실시간 자격 검증' 모듈.
 - extract_notice_info(title, body_text) -> dict
 - verify_eligibility_ai(qualification_json, user_profile) -> dict
 - extract_hashtags_from_title(title) -> dict
+- generate_brief_summary(title, text) -> str  # NEW
 
 의존:
   pip install google-generativeai pydantic
@@ -10,6 +11,9 @@ Gemini Flash 기반 '구조화 추출'과 '실시간 자격 검증' 모듈.
   GEMINI_API_KEY=...
   GEMINI_MODEL=gemini-2.0-flash-exp
   AI_TIMEOUT_S=20
+  AI_ENABLE_SUMMARY=true
+  SUMMARY_MAX_SENTENCES=3
+  SUMMARY_MAX_CHARS=180
 """
 
 from __future__ import annotations
@@ -23,11 +27,16 @@ except Exception:
 
 import os
 import re
+import time
 import datetime as dt
 from typing import Any, Dict, Optional, List
+import logging
 
 import google.generativeai as genai
 from pydantic import BaseModel, Field, ValidationError
+
+# 로깅 설정
+logger = logging.getLogger(__name__)
 
 # ───────────────────────────────────────────────────────────────────────────────
 # Pydantic v1/v2 호환 Base 스키마 (extra field 무시)
@@ -51,6 +60,9 @@ except ImportError:
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
 AI_TIMEOUT_S   = int(os.getenv("AI_TIMEOUT_S", "20"))
+AI_ENABLE_SUMMARY = os.getenv("AI_ENABLE_SUMMARY", "true").lower() == "true"
+SUMMARY_MAX_SENTENCES = int(os.getenv("SUMMARY_MAX_SENTENCES", "3"))
+SUMMARY_MAX_CHARS = int(os.getenv("SUMMARY_MAX_CHARS", "180"))
 
 if GEMINI_API_KEY:
     genai.configure(api_key=GEMINI_API_KEY)
@@ -92,6 +104,11 @@ class HashtagSchema(_BaseSchema):
     )
 
 
+class SummarySchema(_BaseSchema):
+    """요약 생성 결과 스키마"""
+    summary: str = Field(description="최대 3문장, 180자 이내 핵심 요약")
+
+
 # ───────────────────────────────────────────────────────────────────────────────
 # 2) 유틸
 # ───────────────────────────────────────────────────────────────────────────────
@@ -102,6 +119,26 @@ _ALLOWED_HASHTAGS = [
     "#학사", "#장학", "#행사", "#취업", "#국제교류", "#공모전/대회", "#일반"
 ]
 _HASHTAG_ORDER = {tag: i for i, tag in enumerate(_ALLOWED_HASHTAGS)}
+
+# 불용어 및 제거 패턴
+_BOILERPLATE_PATTERNS = [
+    r"자세한\s*내용은.*?참고.*?하시기\s*바랍니다",
+    r"문의처\s*:.*?(\n|$)",
+    r"첨부파일\s*:.*?(\n|$)",
+    r"자세히\s*보기",
+    r"더\s*보기",
+    r"클릭\s*하세요",
+    r"홈페이지.*?확인",
+    r"이메일\s*:\s*[\w\.-]+@[\w\.-]+",
+    r"전화\s*:\s*[\d\-\(\)]+",
+    r"http[s]?://[^\s]+",
+    r"www\.[^\s]+",
+]
+
+_KOREAN_STOPWORDS = {
+    "이", "그", "저", "것", "등", "및", "또한", "그리고", "하지만", "그러나",
+    "따라서", "그래서", "즉", "또", "만", "도", "을", "를", "이", "가", "은", "는"
+}
 
 def _clean_json_text(t: str) -> str:
     """
@@ -118,6 +155,77 @@ def _clean_json_text(t: str) -> str:
     if m:
         return m.group(1).strip()
     return t.strip()
+
+def _strip_html(text: str) -> str:
+    """HTML 태그 제거"""
+    if not text:
+        return ""
+    # 간단한 HTML 태그 제거
+    text = re.sub(r'<[^>]+>', ' ', text)
+    # HTML 엔티티 변환
+    text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    # 연속 공백 정리
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
+
+def _remove_boilerplate(text: str) -> str:
+    """불필요한 정형 문구 제거"""
+    for pattern in _BOILERPLATE_PATTERNS:
+        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
+    return text.strip()
+
+def _split_sentences(text: str) -> List[str]:
+    """한국어 문장 분리"""
+    # 간단한 문장 분리 (개선 가능)
+    sentences = re.split(r'[.!?]\s+', text)
+    return [s.strip() for s in sentences if s.strip() and len(s.strip()) > 10]
+
+def _extract_keywords(title: str) -> List[str]:
+    """제목에서 핵심 키워드 추출"""
+    words = re.findall(r'[가-힣]+|[A-Za-z]+|\d+', title)
+    keywords = [w for w in words if len(w) > 1 and w not in _KOREAN_STOPWORDS]
+    return keywords[:5]  # 상위 5개만
+
+def _normalize_punctuation(text: str) -> str:
+    """문장부호 정규화"""
+    # 연속된 마침표/느낌표/물음표 정리
+    text = re.sub(r'[.!?]+', '.', text)
+    # 문장 끝에 마침표 추가 (없는 경우)
+    if text and not text[-1] in '.!?':
+        text += '.'
+    return text
+
+def _truncate_to_limit(text: str, max_chars: int, max_sentences: int) -> str:
+    """문자수/문장수 제한 적용"""
+    sentences = _split_sentences(text)
+    
+    # 문장수 제한
+    sentences = sentences[:max_sentences]
+    
+    result = ""
+    for sent in sentences:
+        test_result = result + (" " if result else "") + sent
+        if not sent.endswith(('.', '!', '?')):
+            test_result += '.'
+        
+        if len(test_result) > max_chars:
+            # 현재 문장이 너무 길면 이전까지만 사용
+            if result:
+                return result
+            # 첫 문장도 너무 길면 단어 단위로 자르기
+            words = sent.split()
+            truncated = ""
+            for word in words:
+                test = truncated + (" " if truncated else "") + word
+                if len(test + "...") <= max_chars:
+                    truncated = test
+                else:
+                    break
+            return truncated + "..." if truncated else sent[:max_chars-3] + "..."
+        
+        result = test_result
+    
+    return result
 
 def _qual_to_dict(q: Any) -> Dict[str, Any]:
     """
@@ -343,3 +451,217 @@ def extract_hashtags_from_title(title: str) -> Dict[str, List[str]]:
     tags = _norm_hashtags(data.hashtags)
     
     return {"hashtags": tags}
+
+
+# ───────────────────────────────────────────────────────────────────────────────
+# 6) 새 함수: 요약 생성
+# ───────────────────────────────────────────────────────────────────────────────
+def generate_brief_summary(
+    title: str,
+    text: str,
+    locale: str = 'ko',
+    max_sentences: int = None,
+    max_chars: int = None
+) -> str:
+    """
+    공지의 핵심 3포인트를 간결하게 요약한다.
+    
+    Args:
+        title: 공지 제목
+        text: 요약할 텍스트 (summary_raw 또는 body_text)
+        locale: 언어 설정 (기본 'ko')
+        max_sentences: 최대 문장 수 (기본값은 환경변수)
+        max_chars: 최대 문자 수 (기본값은 환경변수)
+    
+    Returns:
+        요약 문자열 (비어있을 수 없음, 실패시에도 최소 1문장 생성)
+    """
+    if max_sentences is None:
+        max_sentences = SUMMARY_MAX_SENTENCES
+    if max_chars is None:
+        max_chars = SUMMARY_MAX_CHARS
+    
+    # 입력 전처리
+    title = (title or "").strip()
+    text = (text or "").strip()
+    
+    # HTML 제거 및 정리
+    text = _strip_html(text)
+    text = _remove_boilerplate(text)
+    
+    # 너무 짧은 입력 처리
+    if not title and not text:
+        logger.info("Empty input for summary generation")
+        return "요약 정보가 없습니다."
+    
+    if not text or len(text) < 20:
+        # 텍스트가 너무 짧으면 제목 기반 요약
+        logger.info(f"Text too short, using title-based summary")
+        if title:
+            summary = title
+            if not summary.endswith(('.', '!', '?')):
+                summary += '.'
+            return _truncate_to_limit(summary, max_chars, 1)
+        return "내용이 부족하여 요약할 수 없습니다."
+    
+    # LLM 경로 (환경변수로 제어)
+    if AI_ENABLE_SUMMARY and GEMINI_API_KEY:
+        try:
+            summary = _generate_summary_llm(title, text, locale, max_sentences, max_chars)
+            if summary:
+                logger.debug(f"LLM summary generated: {len(summary)} chars")
+                return summary
+        except Exception as e:
+            logger.warning(f"LLM summary generation failed: {e}")
+    
+    # 룰 기반 폴백
+    logger.info("Using rule-based fallback for summary")
+    return _generate_summary_fallback(title, text, max_sentences, max_chars)
+
+
+def _generate_summary_llm(
+    title: str,
+    text: str,
+    locale: str,
+    max_sentences: int,
+    max_chars: int,
+    max_retries: int = 3
+) -> Optional[str]:
+    """LLM을 사용한 요약 생성"""
+    model = _get_model()
+    
+    # 입력 텍스트 제한 (토큰 절약)
+    text_for_llm = text[:3000] if len(text) > 3000 else text
+    
+    prompt = f"""
+대학 공지사항을 {max_sentences}문장, {max_chars}자 이내로 요약하세요.
+
+요구사항:
+1. 가장 중요한 정보 {max_sentences}가지만 포함
+2. 날짜, 기한, 장소, 대상, 금액 등 구체적 정보 우선
+3. 불필요한 문구 금지: "자세한 내용은", "문의처", "홈페이지 참고" 등
+4. 각 문장은 핵심만 간결하게
+5. 한국어로 자연스럽게 작성
+
+제목: {title}
+본문: {text_for_llm}
+
+JSON 형식으로 요약을 반환하세요:
+{{"summary": "요약 내용"}}
+    """.strip()
+    
+    for attempt in range(max_retries):
+        try:
+            resp = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    response_mime_type="application/json",
+                    temperature=0.3,  # 일관성 있는 요약
+                    max_output_tokens=200,
+                ),
+                request_options={"timeout": AI_TIMEOUT_S}
+            )
+            
+            raw = _clean_json_text(resp.text)
+            data = SummarySchema.model_validate_json(raw)
+            summary = data.summary
+            
+            # 후처리 및 검증
+            summary = _normalize_punctuation(summary)
+            summary = _truncate_to_limit(summary, max_chars, max_sentences)
+            
+            if summary and len(summary) > 10:  # 최소 길이 검증
+                return summary
+                
+        except Exception as e:
+            if "429" in str(e) or "quota" in str(e).lower():
+                logger.warning(f"LLM quota exceeded, falling back")
+                return None
+            if attempt == max_retries - 1:
+                logger.warning(f"LLM summary failed after {max_retries} attempts: {e}")
+            else:
+                time.sleep(1)  # 재시도 전 대기
+    
+    return None
+
+
+def _generate_summary_fallback(
+    title: str,
+    text: str,
+    max_sentences: int,
+    max_chars: int
+) -> str:
+    """규칙 기반 폴백 요약 생성"""
+    
+    # 1. 제목에서 키워드 추출
+    keywords = _extract_keywords(title) if title else []
+    
+    # 2. 본문에서 정보 밀도 높은 문장 선택
+    sentences = _split_sentences(text)
+    if not sentences:
+        # 문장 분리 실패시 첫 부분만 사용
+        summary = text[:max_chars-3] + "..." if len(text) > max_chars else text
+        return _normalize_punctuation(summary)
+    
+    # 3. 키워드 관련성 + 숫자/날짜 포함 여부로 문장 점수 계산
+    scored_sentences = []
+    for sent in sentences[:10]:  # 처음 10문장만 고려
+        score = 0
+        sent_lower = sent.lower()
+        
+        # 키워드 매칭
+        for kw in keywords:
+            if kw.lower() in sent_lower:
+                score += 2
+        
+        # 중요 정보 패턴
+        if re.search(r'\d{4}[-년./]\d{1,2}[-월./]\d{1,2}', sent):  # 날짜
+            score += 3
+        if re.search(r'\d+[:시]\d+분?', sent):  # 시간
+            score += 2
+        if re.search(r'\d+[명원]', sent):  # 인원
+            score += 2
+        if re.search(r'\d+[만천백십]?\s?원', sent):  # 금액
+            score += 3
+        if any(word in sent for word in ['신청', '접수', '마감', '기한', '대상', '자격']):
+            score += 2
+        
+        # 문장 길이 페널티 (너무 긴 문장 회피)
+        if len(sent) > 100:
+            score -= 1
+        
+        scored_sentences.append((score, sent))
+    
+    # 4. 점수 높은 순으로 정렬하되, 원문 순서 유지
+    scored_sentences.sort(key=lambda x: (-x[0], sentences.index(x[1])))
+    
+    # 5. 상위 문장 선택 및 조합
+    selected = []
+    total_length = 0
+    
+    for score, sent in scored_sentences:
+        if len(selected) >= max_sentences:
+            break
+        
+        sent = _normalize_punctuation(sent)
+        test_length = total_length + len(sent) + (1 if selected else 0)
+        
+        if test_length <= max_chars:
+            selected.append(sent)
+            total_length = test_length
+    
+    # 6. 결과 조합
+    if selected:
+        summary = ' '.join(selected)
+    else:
+        # 아무것도 선택되지 않은 경우 제목 + 첫 문장
+        if title:
+            summary = title
+            if sentences and len(summary) < max_chars - 20:
+                first_sent = _normalize_punctuation(sentences[0])
+                if len(summary) + len(first_sent) + 2 <= max_chars:
+                    summary += ". " + first_sent
+        else:
+            summary = _normalize_punctuation(sentences[0]) if sentences else "요약할 수 없습니다."
+    
+    return _truncate_to_limit(summary, max_chars, max_sentences)

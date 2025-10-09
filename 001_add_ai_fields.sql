@@ -1,16 +1,35 @@
--- 001_add_ai_fields.sql
--- 목적: 공지사항 테이블에 AI 추출 결과 필드 추가
+-- Migration: Add summary_ai field if not exists
+-- Run this after 000_init.sql
 
-ALTER TABLE notices
-  ADD COLUMN IF NOT EXISTS category_ai       TEXT,
-  ADD COLUMN IF NOT EXISTS start_at_ai       TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS end_at_ai         TIMESTAMPTZ,
-  ADD COLUMN IF NOT EXISTS qualification_ai  JSONB,
-  ADD COLUMN IF NOT EXISTS hashtags_ai       TEXT[];
+-- Check and add summary_ai column if it doesn't exist
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 
+        FROM information_schema.columns 
+        WHERE table_name = 'notices' 
+        AND column_name = 'summary_ai'
+    ) THEN
+        ALTER TABLE notices 
+        ADD COLUMN summary_ai TEXT;
+        
+        COMMENT ON COLUMN notices.summary_ai IS 'AI-generated brief summary (max 180 chars, 3 sentences)';
+    END IF;
+END $$;
 
--- 성능 향상을 위한 인덱스들
-CREATE INDEX IF NOT EXISTS idx_notices_category_ai ON notices (category_ai);
-CREATE INDEX IF NOT EXISTS idx_notices_start_at_ai ON notices (start_at_ai);
-CREATE INDEX IF NOT EXISTS idx_notices_end_at_ai   ON notices (end_at_ai);
-CREATE INDEX IF NOT EXISTS idx_notices_hashtags_ai_gin ON notices USING GIN (hashtags_ai);
-CREATE INDEX IF NOT EXISTS idx_notices_qualification_ai_gin ON notices USING GIN (qualification_ai);
+-- Optional: Add index for performance if filtering/searching by summary
+-- CREATE INDEX IF NOT EXISTS idx_notices_summary_ai_not_null 
+-- ON notices(id) 
+-- WHERE summary_ai IS NOT NULL;
+
+-- Statistics view including summary coverage
+CREATE OR REPLACE VIEW notice_stats AS
+SELECT 
+    COUNT(*) as total_notices,
+    COUNT(summary_ai) as notices_with_summary,
+    COUNT(category_ai) as notices_with_category,
+    COUNT(hashtags_ai) as notices_with_hashtags,
+    ROUND(COUNT(summary_ai)::numeric / COUNT(*)::numeric * 100, 2) as summary_coverage_pct,
+    ROUND(AVG(LENGTH(summary_ai)), 0) as avg_summary_length,
+    MAX(LENGTH(summary_ai)) as max_summary_length
+FROM notices;
