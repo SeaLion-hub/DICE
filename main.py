@@ -1,29 +1,30 @@
-# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전 + AI 요약 통합 + 고급 검색)
+# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전 + AI 요약 통합 + 고급 검색 + Redis 큐)
 import os
 import logging
 import hashlib
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
-from fastapi import FastAPI, Query, HTTPException, Body, Request
+from fastapi import FastAPI, Query, HTTPException, Body, Request, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from datetime import datetime
 import datetime as dt
 import requests
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 import time
 import threading
 import json
 import re
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ConfigDict
 import jwt
+import redis
 
 # AI processor import
 from ai_processor import (
     extract_hashtags_from_title,
     extract_notice_info,
     verify_eligibility_ai,
-    generate_brief_summary,  # NEW: 요약 생성 함수 추가
+    generate_brief_summary,
 )
 
 # 인증 라우터 import
@@ -43,8 +44,23 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 CACHE_TTL = int(os.getenv("CACHE_TTL", "60"))
 AI_IN_PIPELINE = os.getenv("AI_IN_PIPELINE", "true").lower() == "true"
 
+# Redis 관련 환경변수
+REDIS_URL = os.getenv("REDIS_URL")
+QUEUE_NAME = os.getenv("QUEUE_NAME", "apify:dataset:jobs")
+
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set in environment")
+
+# Redis 클라이언트 초기화 (옵셔널)
+redis_client = None
+if REDIS_URL:
+    try:
+        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+        redis_client.ping()  # 연결 테스트
+        logging.info("Redis connected successfully")
+    except Exception as e:
+        logging.warning(f"Redis connection failed, will retry on demand: {e}")
+        redis_client = None
 
 # 3) colleges.py import
 from colleges import COLLEGES
@@ -182,7 +198,26 @@ UPSERT_SQL = """
         updated_at = CURRENT_TIMESTAMP
 """
 
-# 12) 라우트들
+# 12) Apify Webhook Models for Redis Queue
+class ApifyResource(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    
+    id: Optional[str] = None
+    defaultDatasetId: Optional[str] = None
+    status: Optional[str] = None
+    startedAt: Optional[str] = None
+    finishedAt: Optional[str] = None
+
+class ApifyWebhookPayload(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    
+    userId: Optional[str] = None
+    createdAt: Optional[str] = None
+    eventType: str = Field(...)
+    eventData: Optional[Dict] = None
+    resource: Optional[Dict] = None  # Accept as dict first
+
+# 13) 라우트들
 @app.get("/health")
 def health():
     base = {"env": ENV, "service": "dice-api"}
@@ -229,13 +264,6 @@ def list_notices(
 ):
     """
     공지사항 목록 조회 - 고급 검색 기능 포함
-    
-    - my=true: 로그인 사용자의 프로필 키워드와 일치하는 공지만 반환
-    - search_mode: 검색 엔진 선택 (like: 기본 ILIKE, trgm: trigram 인덱스, fts: 전문 검색, websearch: 고급 자연어)
-    - op: 다중 키워드 결합 방식 (and: 모든 키워드 포함, or: 하나 이상 포함)
-    - rank: 검색 결과 정렬 방식 (기본값: fts/websearch 모드에서는 fts, 그 외는 off)
-    - count: 전체 카운트 포함 여부 (무한 스크롤 등에서 false로 성능 향상)
-    - no_cache: 캐시 무시 옵션 (디버그/테스트용)
     """
     
     # rank 기본값 설정: FTS/websearch 모드일 때는 FTS 랭킹이 기본
@@ -560,175 +588,85 @@ def get_notice(notice_id: str):
     return notice
 
 @app.post("/apify/webhook")
-def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
-    """Apify webhook 엔드포인트 - 크롤링 완료 시 호출됨"""
-    # 1) 보안 토큰 확인 (강화)
-    expected_token = os.getenv("APIFY_WEBHOOK_TOKEN")
-    if not expected_token or token != expected_token:
-        logger.warning(f"Invalid webhook token attempt")
-        raise HTTPException(status_code=401, detail="unauthorized")
+def apify_webhook_redis(
+    request: Request,
+    payload: ApifyWebhookPayload = Body(...)
+):
+    """
+    Apify webhook endpoint - Redis Queue version
+    Receives webhook, validates token, and enqueues dataset processing job
+    """
+    # 1) 헤더 인증 확인
+    token = request.headers.get("x-apify-token")
+    if not APIFY_WEBHOOK_TOKEN or token != APIFY_WEBHOOK_TOKEN:
+        logger.warning(f"[apify] Invalid webhook token attempt")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
     
-    logger.info(f"Webhook received: {payload.get('eventType', 'unknown')}")
+    # 2) resource를 ApifyResource로 파싱
+    resource = None
+    if payload.resource:
+        try:
+            resource = ApifyResource(**payload.resource)
+        except Exception as e:
+            logger.warning(f"[apify] Failed to parse resource: {e}")
+            resource = ApifyResource()  # empty resource
     
-    # 2) datasetId / taskId 추출
-    ds_id = (
-        payload.get("defaultDatasetId")
-        or payload.get("data", {}).get("defaultDatasetId")
-        or payload.get("resource", {}).get("defaultDatasetId")
+    # 로깅
+    logger.info(
+        "[apify] received event=%s run=%s dataset=%s",
+        payload.eventType,
+        resource.id if resource else None,
+        resource.defaultDatasetId if resource else None
     )
-    task_id = (
-        payload.get("data", {}).get("actorTaskId")
-        or payload.get("resource", {}).get("actorTaskId")
-    )
     
-    if not ds_id:
-        logger.error("Dataset ID missing in webhook payload")
-        raise HTTPException(status_code=400, detail="datasetId missing")
+    # 3) eventType 확인
+    if payload.eventType != "ACTOR.RUN.SUCCEEDED":
+        logger.info("[apify] ignored event=%s", payload.eventType)
+        return {"ok": True, "queued": False, "reason": "ignored eventType"}
     
-    logger.info(f"Processing dataset: {ds_id}, task: {task_id}")
+    # 4) defaultDatasetId 확인
+    dataset_id = resource.defaultDatasetId if resource else None
+    if not dataset_id:
+        logger.error("[apify] defaultDatasetId missing in webhook payload")
+        raise HTTPException(status_code=400, detail="defaultDatasetId missing")
     
-    # 3) 데이터셋 아이템 가져오기
-    url = f"https://api.apify.com/v2/datasets/{ds_id}/items"
-    params = {"token": APIFY_TOKEN, "format": "json", "clean": "true"}
-    
-    try:
-        r = requests.get(url, params=params, timeout=60)
-        if r.status_code != 200:
-            logger.error(f"Apify API error: {r.status_code}")
-            raise HTTPException(status_code=502, detail=f"apify fetch error: {r.text[:200]}")
-        items = r.json()
-    except requests.RequestException as e:
-        logger.error(f"Failed to fetch dataset: {e}")
-        raise HTTPException(status_code=502, detail="Failed to fetch dataset")
-    
-    if not isinstance(items, list):
-        items = items.get("items", [])
-    
-    logger.info(f"Fetched {len(items)} items from dataset")
-    
-    # 4) 어떤 단과대 task인지 매핑
-    college_key = None
-    if task_id:
-        for ck, meta in COLLEGES.items():
-            if meta.get("task_id") == task_id:
-                college_key = ck
-                break
-    
-    if not college_key:
-        college_key = "main"
-        logger.warning(f"Unknown task_id {task_id}, using 'main' as default")
-    
-    logger.info(f"Processing for college: {college_key}")
-    
-    # 5) upsert (AI 추출 포함)
-    upserted, skipped = 0, 0
-    try:
-        with psycopg2.connect(DATABASE_URL) as conn, conn.cursor() as cur:
-            for rec in items:
-                norm = normalize_item(rec, base_url=COLLEGES[college_key].get("url"))
-                if not validate_normalized_item(norm):
-                    skipped += 1
-                    continue
-                
-                # AI 자동추출 (실패해도 파이프라인은 계속)
-                use_ai = AI_IN_PIPELINE
-                if use_ai:
-                    try:
-                        title_for_ai = (norm.get("title") or "").strip()
-                        body_for_ai = (norm.get("body_text") or "").strip()
-
-                        # 1) 본문/제목 기반 구조화 추출
-                        ai = extract_notice_info(body_text=body_for_ai, title=title_for_ai) or {}
-
-                        # 2) 제목 해시태그 추출
-                        ht = extract_hashtags_from_title(title_for_ai) or {}
-
-                        # 3) 필드 매핑
-                        norm["category_ai"] = ai.get("category_ai")
-                        norm["start_at_ai"] = _to_utc_ts(ai.get("start_date_ai"))
-                        norm["end_at_ai"] = _to_utc_ts(ai.get("end_date_ai"))
-
-                        # qualification_ai: dict or {}
-                        qual_dict = ai.get("qualification_ai") or {}
-                        norm["qualification_ai"] = qual_dict
-
-                        # hashtags_ai: list or None
-                        norm["hashtags_ai"] = ht.get("hashtags") or None
-
-                        # 4) NEW: 요약 생성
-                        # 입력 소스 우선순위: title + (summary_raw 우선, 없으면 body_text)
-                        text_for_summary = norm.get("summary_raw") or norm.get("body_text") or ""
-                        try:
-                            norm["summary_ai"] = generate_brief_summary(
-                                title=title_for_ai,
-                                text=text_for_summary
-                            )
-                            logger.debug(f"Summary generated for: {title_for_ai[:50]}")
-                        except Exception as se:
-                            logger.warning(f"Summary generation failed: {se}")
-                            # 폴백: 제목 기반 최소 요약
-                            norm["summary_ai"] = title_for_ai[:180] if title_for_ai else "요약 준비중"
-
-                    except Exception as e:
-                        # 실패 시에도 저장 (기존 파이프라인을 막지 않음)
-                        logger.warning(f"AI extraction failed for {norm.get('title', 'unknown')}: {e}")
-                        norm["category_ai"] = None
-                        norm["start_at_ai"] = None
-                        norm["end_at_ai"] = None
-                        norm["qualification_ai"] = {}
-                        norm["hashtags_ai"] = None
-                        # AI 요약 실패 시 폴백
-                        norm["summary_ai"] = norm.get("title", "요약 준비중")[:180]
-                else:
-                    # AI 비활성화 시 전부 None/빈값
-                    norm["category_ai"] = None
-                    norm["start_at_ai"] = None
-                    norm["end_at_ai"] = None
-                    norm["qualification_ai"] = {}
-                    norm["hashtags_ai"] = None
-                    norm["summary_ai"] = None
-                
-                h = content_hash(college_key, norm["title"], norm["url"], norm["published_at"])
-                
-                try:
-                    cur.execute(UPSERT_SQL, {
-                        "college_key": college_key,
-                        "title": norm["title"],
-                        "url": norm["url"],
-                        "summary_raw": norm.get("summary_raw"),
-                        "summary_ai": norm.get("summary_ai"), # NEW: summary_ai 추가
-                        "body_html": norm.get("body_html"),
-                        "body_text": norm.get("body_text"),
-                        "published_at": norm.get("published_at"),
-                        "source_site": COLLEGES[college_key].get("url"),
-                        "content_hash": h,
-                        "category_ai": norm.get("category_ai"),
-                        "start_at_ai": norm.get("start_at_ai"),
-                        "end_at_ai": norm.get("end_at_ai"),
-                        "qualification_ai": Json(norm.get("qualification_ai") or {}),
-                        "hashtags_ai": norm.get("hashtags_ai"),
-                    })
-                    upserted += 1
-                except psycopg2.Error as e:
-                    logger.error(f"Failed to upsert item: {e}")
-                    skipped += 1
-            
-            conn.commit()
-            logger.info(f"Webhook processing complete: {upserted} upserted, {skipped} skipped")
-    
-    except psycopg2.Error as e:
-        logger.error(f"Database error: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
-    
-    return {
-        "status": "ok",
-        "college": college_key,
-        "upserted": upserted,
-        "skipped": skipped,
-        "total_items": len(items)
+    # 5) Redis에 job enqueue
+    run_id = resource.id if resource else None
+    job = {
+        "dataset_id": dataset_id,
+        "source": "apify",
+        "run_id": run_id,
+        "created_at": datetime.utcnow().isoformat()
     }
+    
+    # Redis 연결 재시도
+    global redis_client
+    if not redis_client:
+        if not REDIS_URL:
+            logger.error("[apify] REDIS_URL not configured")
+            raise HTTPException(status_code=500, detail="Redis not configured")
+        
+        try:
+            redis_client = redis.from_url(REDIS_URL, decode_responses=True)
+            redis_client.ping()
+            logger.info("[apify] Redis reconnected")
+        except Exception as e:
+            logger.error(f"[apify] Redis connection failed: {e}")
+            raise HTTPException(status_code=500, detail="enqueue failed")
+    
+    # Enqueue
+    try:
+        redis_client.rpush(QUEUE_NAME, json.dumps(job))
+        logger.info(
+            "[apify] enqueued dataset=%s run=%s queue=%s",
+            dataset_id, run_id, QUEUE_NAME
+        )
+        return {"ok": True, "dataset_id": dataset_id, "queued": True}
+    except Exception as e:
+        logger.exception("[apify] Redis enqueue failed")
+        raise HTTPException(status_code=500, detail="enqueue failed")
 
-# 13) 실시간 자격검증 엔드포인트
+# 14) 실시간 자격검증 엔드포인트
 class UserProfile(BaseModel):
     grade: int | None = None
     major: str | None = None
