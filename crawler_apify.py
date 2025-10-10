@@ -330,48 +330,49 @@ def content_hash(college_key: str, title: str, url: str,
     base = f"{college_key}|{title_normalized}|{url}|{date_str}"
     return hashlib.sha256(base.encode('utf-8')).hexdigest()
 
-# Apify API 헬퍼 함수들
-def start_task_run(task_id: str, timeout=30):
-    """POST /v2/actor-tasks/{taskId}/runs"""
+# ==============================================================================
+# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
+# 수정된 부분: Apify API 헬퍼 함수
+# ==============================================================================
+def get_latest_run_for_task(task_id: str, timeout=30):
+    """GET /v2/actor-tasks/{taskId}/runs - 가장 최근 실행 1개만 가져오기"""
     url = f"https://api.apify.com/v2/actor-tasks/{task_id}/runs"
-    params = {"token": APIFY_TOKEN}
+    # 'desc=true'를 추가하여 최신순으로 정렬하고, 'limit=1'로 1개만 가져옵니다.
+    params = {"token": APIFY_TOKEN, "limit": 1, "desc": "true"}
+    
     try:
-        resp = SESSION.post(url, params=params, timeout=timeout)
+        resp = SESSION.get(url, params=params, timeout=timeout)
     except requests.RequestException as e:
-        print(f"  ❌ start run error: {e}")
+        print(f"  ❌ get runs error: {e}")
         return None
-    if resp.status_code not in (201, 200):
-        print(f"  ❌ start run HTTP {resp.status_code}: {resp.text[:300]}")
+    
+    if resp.status_code != 200:
+        print(f"  ❌ get runs HTTP {resp.status_code}: {resp.text[:300]}")
         return None
+    
     try:
         data = resp.json()
+        runs = data.get("data", {}).get("items", [])
     except ValueError:
-        print("  ⚠️ start run: empty body")
+        print("  ⚠️ get runs: invalid response")
         return None
-    run = data.get("data") or data
-    return run.get("id")
+    
+    # 가장 최근 실행 1개가 있는지, 그리고 성공했는지 확인합니다.
+    if not runs:
+        print(f"  ⚠️ No recent run found for task {task_id}")
+        return None
 
-def poll_run_until_done(run_id: str, max_wait_sec=600, poll_interval=3):
-    """GET /v2/actor-runs/{runId} 상태 폴링"""
-    url = f"https://api.apify.com/v2/actor-runs/{run_id}"
-    params = {"token": APIFY_TOKEN}
-    waited = 0
-    while waited <= max_wait_sec:
-        try:
-            resp = SESSION.get(url, params=params, timeout=30)
-            if resp.status_code != 200:
-                print(f"  ⚠️ poll HTTP {resp.status_code}: {resp.text[:200]}")
-            else:
-                data = resp.json().get("data") or {}
-                status = data.get("status")
-                if status in ("SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"):
-                    return data
-        except requests.RequestException as e:
-            print(f"  ⚠️ poll error: {e}")
-        time.sleep(poll_interval)
-        waited += poll_interval
-    print("  ⚠️ poll timeout")
-    return None
+    latest_run = runs[0]
+    if latest_run.get("status") == "SUCCEEDED":
+        # 성공한 경우에만 실행 정보를 반환합니다.
+        return latest_run
+    else:
+        # 실패했거나 아직 진행 중인 경우, 메시지를 출력하고 None을 반환합니다.
+        status = latest_run.get("status", "UNKNOWN")
+        print(f"  ⚠️ Latest run for task {task_id} was not successful (status: {status})")
+        return None
+# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+# ==============================================================================
 
 def fetch_dataset_items(dataset_id: str, timeout=300):
     """데이터셋 아이템 가져오기"""
@@ -387,7 +388,7 @@ def fetch_dataset_items(dataset_id: str, timeout=300):
         print(f"  ⚠️ items error: {e}")
     return []
 
-# 메인 실행 함수 (AI 통합 + 쿼터 안전장치)
+# 메인 실행 함수 (태스크 실행 대신 기존 데이터 가져오기)
 def run():
     total_upserted = 0
     total_skipped = 0
@@ -402,29 +403,23 @@ def run():
             task_id = meta["task_id"]
             site = meta.get("url")
             
-            print(f"🔍 Start task: {name} ({ck})")
+            print(f"🔍 Fetching latest run for: {name} ({ck})")
             
-            # 태스크 실행
-            run_id = start_task_run(task_id)
-            if not run_id:
-                print(f"  ❌ cannot start run for {ck}")
-                continue
-
-            # 완료 대기
-            run_data = poll_run_until_done(run_id)
+            # 가장 최근 성공한 실행 가져오기 (수정된 함수 사용)
+            run_data = get_latest_run_for_task(task_id)
             if not run_data:
-                print(f"  ❌ run polling failed for {ck}")
+                # 함수 내부에서 이미 메시지를 출력했으므로, 여기서는 그냥 넘어갑니다.
                 continue
-                
-            status = run_data.get("status")
-            ds_id = run_data.get("defaultDatasetId")
             
-            if status != "SUCCEEDED":
-                print(f"  ❌ run status={status} for {ck}")
-                continue
+            run_id = run_data.get("id")
+            ds_id = run_data.get("defaultDatasetId")
+            finished_at = run_data.get("finishedAt", "unknown")
+            
             if not ds_id:
                 print(f"  ❌ no datasetId for {ck}")
                 continue
+            
+            print(f"  📅 Using run {run_id} finished at {finished_at}")
 
             # 데이터 가져오기
             items = fetch_dataset_items(ds_id)
