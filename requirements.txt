@@ -9,3 +9,4 @@ pydantic>=2.5,<3.0
 bcrypt
 PyJWT
 email-validator
+redis>=5.0.0
