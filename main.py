@@ -1,4 +1,4 @@
-# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전 + AI 요약 통합)
+# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전 + AI 요약 통합 + 고급 검색)
 import os
 import logging
 import hashlib
@@ -14,6 +14,7 @@ from typing import Optional, Any
 import time
 import threading
 import json
+import re
 from pydantic import BaseModel
 import jwt
 
@@ -214,20 +215,56 @@ def list_notices(
     request: Request,
     college: str | None = Query(None),
     q: str | None = Query(None),
+    search_mode: str = Query("trgm", regex="^(like|trgm|fts|websearch)$", description="검색 모드: like|trgm|fts|websearch"),
+    op: str = Query("and", regex="^(and|or)$", description="키워드 결합 방식: and|or"),
+    rank: str | None = Query(None, regex="^(off|trgm|fts)$", description="랭킹 모드: off|trgm|fts (기본값: fts모드일 때 fts, 아니면 off)"),
     date_from: str | None = Query(None, description="YYYY-MM-DD"),
     date_to: str | None = Query(None, description="YYYY-MM-DD"),
     sort: str = Query("recent", regex="^(recent|oldest)$"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     my: bool = Query(False, description="내 키워드와 일치하는 공지만 보기 (인증 필요)"),
+    count: bool = Query(True, description="전체 카운트 포함 여부 (false로 설정 시 성능 향상)"),
+    no_cache: bool = Query(False, description="캐시 무시 (디버그용)"),
 ):
     """
-    공지사항 목록 조회
+    공지사항 목록 조회 - 고급 검색 기능 포함
     
     - my=true: 로그인 사용자의 프로필 키워드와 일치하는 공지만 반환
-    - my=false: 모든 공지 반환 (기본값)
+    - search_mode: 검색 엔진 선택 (like: 기본 ILIKE, trgm: trigram 인덱스, fts: 전문 검색, websearch: 고급 자연어)
+    - op: 다중 키워드 결합 방식 (and: 모든 키워드 포함, or: 하나 이상 포함)
+    - rank: 검색 결과 정렬 방식 (기본값: fts/websearch 모드에서는 fts, 그 외는 off)
+    - count: 전체 카운트 포함 여부 (무한 스크롤 등에서 false로 성능 향상)
+    - no_cache: 캐시 무시 옵션 (디버그/테스트용)
     """
-    where, params = [], []
+    
+    # rank 기본값 설정: FTS/websearch 모드일 때는 FTS 랭킹이 기본
+    if rank is None:
+        rank = "fts" if search_mode in ("fts", "websearch") else "off"
+    
+    # 캐시 키 생성 (쿼리 파라미터 기반)
+    if not no_cache and not my:  # my=true는 사용자별이므로 캐시 제외
+        cache_key_parts = [
+            f"notices:v1",
+            f"c={college or 'all'}",
+            f"q={q or ''}",
+            f"sm={search_mode}",
+            f"op={op}",
+            f"r={rank}",
+            f"df={date_from or ''}",
+            f"dt={date_to or ''}",
+            f"s={sort}",
+            f"l={limit}",
+            f"o={offset}",
+            f"cnt={count}"
+        ]
+        cache_key = ":".join(cache_key_parts)
+        
+        # 캐시 확인
+        cached_response = cache_get(cache_key)
+        if cached_response is not None:
+            logger.info(f"Cache hit for notices query: {cache_key[:50]}...")
+            return cached_response
     
     # my=true 인 경우: 인증 + 사용자 keywords 로드
     user_keywords = None
@@ -264,85 +301,226 @@ def list_notices(
         if not rows:
             # 프로필이 없으면 맞춤 공지는 없음
             return {
-                "items": [],
-                "total_count": 0,
-                "limit": limit,
-                "offset": offset,
-                "sort": sort
+                "meta": {
+                    "search_mode": search_mode,
+                    "op": op,
+                    "rank": rank,
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": 0
+                },
+                "items": []
             }
 
         user_keywords = rows[0].get("keywords") or []
         if not user_keywords:
             # 키워드가 비어 있으면 결과도 비움
             return {
-                "items": [],
-                "total_count": 0,
-                "limit": limit,
-                "offset": offset,
-                "sort": sort
+                "meta": {
+                    "search_mode": search_mode,
+                    "op": op,
+                    "rank": rank,
+                    "limit": limit,
+                    "offset": offset,
+                    "returned": 0
+                },
+                "items": []
             }
     
-    # WHERE 절 동적 구성
-    if college and college != "all":
-        where.append("college_key = %s")
-        params.append(college)
-    
+    # 검색어 토큰화 (길이 2 미만 제외)
+    tokens = []
+    q_raw = ""
     if q:
-        keywords = q.strip().split()
-        for keyword in keywords:
-            if keyword:
-                where.append("(title ILIKE %s OR summary_raw ILIKE %s OR summary_ai ILIKE %s)")
-                params += [f"%{keyword}%", f"%{keyword}%", f"%{keyword}%"]
+        q_raw = q.strip()
+        if q_raw:
+            # 공백으로 분리 후 2글자 이상만 필터
+            tokens = [t for t in re.split(r'\s+', q_raw) if len(t) >= 2]
     
+    # WHERE 절과 파라미터 구성
+    where_clauses = []
+    order_clauses = []
+    params = {}
+    select_extra = []
+    
+    # 기본 필터들
+    if college and college != "all":
+        where_clauses.append("college_key = %(college)s")
+        params["college"] = college
+    
+    # 날짜 파싱 with 방어적 처리
     if date_from:
-        where.append("published_at >= %s")
-        params.append(datetime.fromisoformat(date_from))
+        try:
+            params["date_from"] = datetime.fromisoformat(date_from)
+            where_clauses.append("published_at >= %(date_from)s")
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid date_from format: {date_from}. Use YYYY-MM-DD")
+    
     if date_to:
-        where.append("published_at < %s")
-        params.append(datetime.fromisoformat(date_to))
+        try:
+            params["date_to"] = datetime.fromisoformat(date_to)
+            where_clauses.append("published_at < %(date_to)s")
+        except (ValueError, TypeError) as e:
+            raise HTTPException(status_code=400, detail=f"Invalid date_to format: {date_to}. Use YYYY-MM-DD")
     
     # my=true 필터: 사용자 키워드와 공지 해시태그의 교집합
     if my and user_keywords:
-        where.append("(hashtags_ai && %s::text[])")
-        params.append(user_keywords)
+        where_clauses.append("(hashtags_ai && %(user_keywords)s::text[])")
+        params["user_keywords"] = user_keywords
     
-    where_clause = ""
-    if where:
-        where_clause = " WHERE " + " AND ".join(where)
+    # 검색 모드별 처리
+    if tokens:
+        if search_mode in ("like", "trgm"):
+            # ILIKE 기반 검색 (trgm은 인덱스가 있어 더 빠름)
+            token_conditions = []
+            for i, token in enumerate(tokens):
+                param_name = f"token_{i}"
+                params[param_name] = f"%{token}%"
+                token_conditions.append(
+                    f"(title ILIKE %({param_name})s OR summary_ai ILIKE %({param_name})s)"
+                )
+            
+            # AND/OR 결합
+            if op == "and":
+                where_clauses.append("(" + " AND ".join(token_conditions) + ")")
+            else:  # or
+                where_clauses.append("(" + " OR ".join(token_conditions) + ")")
+            
+            # trgm 랭킹 처리
+            if rank == "trgm":
+                params["q_raw"] = q_raw
+                select_extra.append("GREATEST(similarity(title, %(q_raw)s), similarity(summary_ai, %(q_raw)s)) AS trgm_rank")
+                order_clauses.append("GREATEST(similarity(title, %(q_raw)s), similarity(summary_ai, %(q_raw)s)) DESC")
+                
+        elif search_mode == "fts":
+            # 전문 검색 - 고급 tsquery 구성
+            if len(tokens) == 1:
+                # 단일 토큰은 plainto_tsquery 사용 (더 유연한 매칭)
+                params["tsquery_single"] = tokens[0]
+                where_clauses.append("ts_ko @@ plainto_tsquery('simple', %(tsquery_single)s)")
+                
+                # fts 랭킹 처리
+                if rank == "fts":
+                    select_extra.append("ts_rank(ts_ko, plainto_tsquery('simple', %(tsquery_single)s)) AS fts_rank")
+                    order_clauses.append("ts_rank(ts_ko, plainto_tsquery('simple', %(tsquery_single)s)) DESC")
+            else:
+                # 다중 토큰 - to_tsquery with AND/OR
+                if op == "and":
+                    tsquery = " & ".join(tokens)
+                else:  # or
+                    tsquery = " | ".join(tokens)
+                
+                # 특수문자 필터링 (한글, 영문, 숫자, &, | 만 허용)
+                tsquery = re.sub(r'[^0-9A-Za-z가-힣\|\&\s]', '', tsquery)
+                
+                if tsquery:  # 필터링 후에도 남아있으면
+                    params["tsquery"] = tsquery
+                    where_clauses.append("ts_ko @@ to_tsquery('simple', %(tsquery)s)")
+                    
+                    # fts 랭킹 처리
+                    if rank == "fts":
+                        select_extra.append("ts_rank(ts_ko, to_tsquery('simple', %(tsquery)s)) AS fts_rank")
+                        order_clauses.append("ts_rank(ts_ko, to_tsquery('simple', %(tsquery)s)) DESC")
+                        
+        elif search_mode == "websearch":
+            # websearch_to_tsquery - PostgreSQL 12+ 자연어 검색
+            # 따옴표, OR, - 등을 자동 파싱 ("장학 신청" OR 등록 -연체)
+            if tokens:
+                # 원본 쿼리를 그대로 사용 (websearch가 알아서 파싱)
+                params["websearch_query"] = q_raw
+                
+                # PostgreSQL 버전 체크 및 폴백
+                try:
+                    where_clauses.append("ts_ko @@ websearch_to_tsquery('simple', %(websearch_query)s)")
+                    
+                    # websearch 랭킹 처리
+                    if rank == "fts":
+                        select_extra.append("ts_rank(ts_ko, websearch_to_tsquery('simple', %(websearch_query)s)) AS fts_rank")
+                        order_clauses.append("ts_rank(ts_ko, websearch_to_tsquery('simple', %(websearch_query)s)) DESC")
+                except Exception as e:
+                    # PostgreSQL 11 이하 폴백: plainto_tsquery 사용
+                    logger.warning(f"websearch_to_tsquery not available, falling back to plainto_tsquery: {e}")
+                    params["fallback_query"] = q_raw
+                    where_clauses.append("ts_ko @@ plainto_tsquery('simple', %(fallback_query)s)")
+                    
+                    if rank == "fts":
+                        select_extra.append("ts_rank(ts_ko, plainto_tsquery('simple', %(fallback_query)s)) AS fts_rank")
+                        order_clauses.append("ts_rank(ts_ko, plainto_tsquery('simple', %(fallback_query)s)) DESC")
     
-    # COUNT 쿼리
-    count_sql = f"SELECT COUNT(*) AS total FROM notices{where_clause}"
-    count_result = query_all(count_sql, params[:])
-    total_count = count_result[0]["total"] if count_result else 0
-    
-    # 정렬
-    order_clause = " ORDER BY published_at DESC NULLS LAST, created_at DESC"
+    # 기본 정렬 추가
     if sort == "oldest":
-        order_clause = " ORDER BY published_at ASC NULLS FIRST, created_at ASC"
+        order_clauses.append("published_at ASC NULLS FIRST")
+        order_clauses.append("created_at ASC")
+    else:  # recent
+        order_clauses.append("published_at DESC NULLS LAST")
+        order_clauses.append("created_at DESC")
     
-    # SELECT 쿼리 (summary_ai 포함)
+    # SQL 구성
+    where_sql = ""
+    if where_clauses:
+        where_sql = " WHERE " + " AND ".join(where_clauses)
+    
+    order_sql = ""
+    if order_clauses:
+        order_sql = " ORDER BY " + ", ".join(order_clauses)
+    
+    select_extra_sql = ""
+    if select_extra:
+        select_extra_sql = ", " + ", ".join(select_extra)
+    
+    # COUNT 쿼리 (옵션)
+    total_count = None
+    if count:
+        count_sql = f"SELECT COUNT(*) AS total FROM notices{where_sql}"
+        count_result = query_all(count_sql, params)
+        total_count = count_result[0]["total"] if count_result else 0
+    
+    # SELECT 쿼리
     sql = f"""
-      SELECT id, college_key, title, url, summary_ai, summary_raw, 
-             category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
-             published_at, created_at
-      FROM notices{where_clause}{order_clause} LIMIT %s OFFSET %s
+        SELECT 
+            id, college_key, title, url, summary_ai, summary_raw,
+            category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
+            published_at, created_at
+            {select_extra_sql}
+        FROM notices
+        {where_sql}
+        {order_sql}
+        LIMIT %(limit)s OFFSET %(offset)s
     """
-    params += [limit, offset]
+    
+    params["limit"] = min(limit, 100)  # 상한 강제
+    params["offset"] = offset
     
     rows = query_all(sql, params)
-
+    
     # 응답 전 summary_ai 없는 경우 기본값 설정
     for row in rows:
         if not row.get("summary_ai"):
             row["summary_ai"] = "요약 준비중"
     
-    return {
-        "items": rows,
-        "total_count": total_count,
-        "limit": limit,
-        "offset": offset,
-        "sort": sort
+    # 응답 구성
+    response = {
+        "meta": {
+            "search_mode": search_mode,
+            "op": op,
+            "rank": rank,
+            "limit": params["limit"],
+            "offset": offset,
+            "returned": len(rows)
+        },
+        "items": rows
     }
+    
+    # 전체 카운트는 요청 시에만 포함
+    if count and total_count is not None:
+        response["meta"]["total_count"] = total_count
+    
+    # 캐시 저장 (my=false이고 no_cache=false일 때만)
+    if not no_cache and not my and 'cache_key' in locals():
+        cache_ttl = 60 if q else 30  # 검색 쿼리는 60초, 전체 목록은 30초
+        cache_set(cache_key, response, ttl=cache_ttl)
+        logger.info(f"Cached notices response for {cache_ttl}s: {cache_key[:50]}...")
+    
+    return response
 
 @app.get("/stats")
 def stats():
