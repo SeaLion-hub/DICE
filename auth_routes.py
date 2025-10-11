@@ -1,7 +1,8 @@
-# auth_routes.py
-import logging
+
+import os
 from typing import Any, Dict
 
+import psycopg2
 from psycopg2.extras import RealDictCursor
 from psycopg2 import errors as pg_errors
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,13 +17,6 @@ from auth_schemas import (
 )
 from auth_security import hash_password, verify_password, create_access_token
 from auth_deps import get_current_user
-from db_pool import get_conn
-
-
-# ============================================================================
-# 로거 설정
-# ============================================================================
-logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -34,6 +28,17 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ============================================================================
 # 공통 헬퍼 함수
 # ============================================================================
+
+def _require_db_url() -> str:
+    """DATABASE_URL 환경변수 확인 (없으면 500 에러)"""
+    url = os.getenv("DATABASE_URL")
+    if not url:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database not configured"
+        )
+    return url
+
 
 def _norm_email(email: str) -> str:
     """이메일 정규화 (공백 제거 + 소문자)"""
@@ -53,13 +58,14 @@ async def register(req: RegisterRequest):
     - 비밀번호 bcrypt 해시
     - JWT 토큰 발급
     """
+    db_url = _require_db_url()
     email = _norm_email(req.email)
     pw_hash = hash_password(req.password)
     
     try:
-        with get_conn() as conn:
+        with psycopg2.connect(db_url) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # 1. 중복 체크 (레이스 컨디션 가능성 있음)
+                # 1. 중복 체크
                 cur.execute(
                     "SELECT 1 FROM users WHERE lower(email) = lower(%s)",
                     (email,)
@@ -82,25 +88,14 @@ async def register(req: RegisterRequest):
                 user = cur.fetchone()
                 user_id = str(user["id"])
                 
-                # 쓰기 작업이므로 커밋
-                conn.commit()
-                
                 # 3. JWT 토큰 발급
                 token = create_access_token(user_id)
                 
                 return AuthTokenResponse(access_token=token, token_type="bearer")
     
-    except pg_errors.UniqueViolation:
-        # DB 레벨에서 중복이 걸린 경우도 409로 통일 (레이스 컨디션 대비)
-        logger.info(f"Race condition detected for email registration: {email}")
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Email already registered"
-        )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Database error in register: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error"
@@ -119,10 +114,11 @@ async def login(req: LoginRequest):
     - 이메일/비밀번호 검증
     - JWT 토큰 발급
     """
+    db_url = _require_db_url()
     email = _norm_email(req.email)
     
     try:
-        with get_conn() as conn:
+        with psycopg2.connect(db_url) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. 사용자 조회
                 cur.execute(
@@ -151,7 +147,6 @@ async def login(req: LoginRequest):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Database error in login: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error"
@@ -188,10 +183,11 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
     - Authorization 헤더 필수
     - 프로필이 없으면 404
     """
+    db_url = _require_db_url()
     user_id = str(current_user["id"])
     
     try:
-        with get_conn() as conn:
+        with psycopg2.connect(db_url) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
@@ -224,7 +220,6 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Database error in get_profile: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error"
@@ -246,13 +241,14 @@ async def update_profile(
     - Authorization 헤더 필수
     - 프로필이 없으면 생성, 있으면 수정
     """
+    db_url = _require_db_url()
     user_id = str(current_user["id"])
     
     # 키워드 정규화 (None → 빈 배열)
     keywords = req.keywords or []
     
     try:
-        with get_conn() as conn:
+        with psycopg2.connect(db_url) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. 기존 프로필 존재 여부 확인
                 cur.execute(
@@ -293,9 +289,6 @@ async def update_profile(
                 
                 profile = cur.fetchone()
                 
-                # 쓰기 작업이므로 커밋
-                conn.commit()
-                
                 return UserProfileResponse(
                     user_id=str(profile["user_id"]),
                     grade=profile["grade"],
@@ -309,7 +302,6 @@ async def update_profile(
     
     except pg_errors.CheckViolation as e:
         # CHECK 제약 위반 (키워드 화이트리스트, 범위 등)
-        logger.warning(f"Check constraint violation in update_profile: {e}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Validation error: {str(e).split('DETAIL:')[-1].strip() if 'DETAIL:' in str(e) else str(e)}"
@@ -317,7 +309,6 @@ async def update_profile(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Database error in update_profile: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error"

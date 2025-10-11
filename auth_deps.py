@@ -1,19 +1,12 @@
-# auth_deps.py
 
-import logging
+from typing import Any, Dict
 
+import psycopg2
 from psycopg2.extras import RealDictCursor
 from fastapi import HTTPException, Request, status
 import jwt
-
+import os
 from auth_security import decode_token
-from db_pool import get_conn
-
-
-# ============================================================================
-# 로거 설정
-# ============================================================================
-logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -92,10 +85,21 @@ def get_current_user(request: Request) -> dict:
         )
     
     # ========================================================================
-    # 5. DB에서 사용자 조회 - 커넥션 풀 사용
+    # 5. 데이터베이스 설정 확인
+    # ========================================================================
+    database_url = os.getenv("DATABASE_URL")
+    
+    if not database_url:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Database not configured"
+        )
+    
+    # ========================================================================
+    # 6. DB에서 사용자 조회
     # ========================================================================
     try:
-        with get_conn() as conn:
+        with psycopg2.connect(database_url) as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
@@ -121,7 +125,6 @@ def get_current_user(request: Request) -> dict:
         raise
     except Exception as e:
         # DB 연결/쿼리 오류
-        logger.error(f"Database error in get_current_user: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Database error"

@@ -84,11 +84,28 @@ def clean_text(text: Optional[str], max_length: Optional[int] = None) -> str:
     return text
 
 def extract_text_from_html(html: Optional[str]) -> str:
-    """HTML에서 텍스트 추출"""
+    """HTMLから텍스트 추출"""
     if not html:
         return ""
     
     try:
+        # "게시글 내용"과 "목록" 사이 텍스트 추출 시도
+        import re
+        content_pattern = r'게시글 내용(.*?)목록'
+        content_match = re.search(content_pattern, html, re.DOTALL)
+        
+        if content_match:
+            extracted_text = content_match.group(1).strip()
+            
+            # HTML 태그 제거
+            soup = BeautifulSoup(extracted_text, 'html.parser')
+            for tag in soup(['script', 'style', 'meta', 'link']):
+                tag.decompose()
+            
+            text = soup.get_text(separator=' ', strip=True)
+            return clean_text(text)
+        
+        # 패턴을 찾지 못하면 기존 방식대로 전체 HTML에서 텍스트 추출
         soup = BeautifulSoup(html, 'html.parser')
         
         for tag in soup(['script', 'style', 'meta', 'link']):
@@ -525,4 +542,4 @@ def run():
     print(f"\n✨ Total: upserted={total_upserted}, skipped={total_skipped}")
 
 if __name__ == "__main__":
-    run()
+    run() 

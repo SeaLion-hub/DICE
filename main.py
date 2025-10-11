@@ -1,32 +1,28 @@
-# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전 + AI 요약 통합 + 고급 검색 + Redis 큐 + DB 커넥션 풀)
+# main.py (프로젝트 루트 / AI 자동추출 통합 + 인증 라우터 통합 최종 버전 + AI 요약 통합)
 import os
 import logging
 import hashlib
+import psycopg2
 from psycopg2.extras import RealDictCursor, Json
-from fastapi import FastAPI, Query, HTTPException, Body, Request, Header, status
+from fastapi import FastAPI, Query, HTTPException, Body, Request
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from datetime import datetime
 import datetime as dt
 import requests
-from typing import Optional, Any, Dict
+from typing import Optional, Any
 import time
 import threading
 import json
-import re
-from pydantic import BaseModel, Field, ConfigDict
+from pydantic import BaseModel
 import jwt
-import redis
-
-# DB 커넥션 풀 import
-from db_pool import init_pool, close_pool, get_conn
 
 # AI processor import
 from ai_processor import (
     extract_hashtags_from_title,
     extract_notice_info,
     verify_eligibility_ai,
-    generate_brief_summary,
+    generate_brief_summary,  # NEW: 요약 생성 함수 추가
 )
 
 # 인증 라우터 import
@@ -46,28 +42,8 @@ APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 CACHE_TTL = int(os.getenv("CACHE_TTL", "60"))
 AI_IN_PIPELINE = os.getenv("AI_IN_PIPELINE", "true").lower() == "true"
 
-# Redis 관련 환경변수
-REDIS_URL = os.getenv("REDIS_URL")
-QUEUE_NAME = os.getenv("QUEUE_NAME", "apify:dataset:jobs")
-
-# 커넥션 풀 설정 (튜닝 가이드: Railway 무료 플랜은 메모리 제한이 있으므로 10 정도가 적절)
-# 프로덕션에서는 동시 요청량에 따라 20-50까지 증가 고려
-POOL_MIN_CONN = 1
-POOL_MAX_CONN = 10
-
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set in environment")
-
-# Redis 클라이언트 초기화 (옵셔널)
-redis_client = None
-if REDIS_URL:
-    try:
-        redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-        redis_client.ping()  # 연결 테스트
-        logging.info("Redis connected successfully")
-    except Exception as e:
-        logging.warning(f"Redis connection failed, will retry on demand: {e}")
-        redis_client = None
 
 # 3) colleges.py import
 from colleges import COLLEGES
@@ -91,34 +67,13 @@ app.add_middleware(
 # 7) 인증 라우터 등록
 app.include_router(auth_router, tags=["auth"])
 
-# 8) 라이프사이클 훅 - 커넥션 풀 초기화/종료
-@app.on_event("startup")
-def startup_event():
-    """FastAPI 앱 시작 시 DB 커넥션 풀 초기화"""
-    try:
-        init_pool(minconn=POOL_MIN_CONN, maxconn=POOL_MAX_CONN)
-        logger.info(f"Database connection pool initialized (min={POOL_MIN_CONN}, max={POOL_MAX_CONN})")
-    except Exception as e:
-        logger.error(f"Failed to initialize connection pool: {e}")
-        raise
-
-@app.on_event("shutdown")
-def shutdown_event():
-    """FastAPI 앱 종료 시 DB 커넥션 풀 정리"""
-    try:
-        close_pool()
-        logger.info("Database connection pool closed")
-    except Exception as e:
-        logger.error(f"Error closing connection pool: {e}")
-
-# 9) 헬퍼: DB 연결 - 커넥션 풀 기반으로 변경
+# 8) 헬퍼: DB 연결
 def query_all(sql: str, params=None):
-    """Execute SELECT query and return all rows"""
-    with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+    with psycopg2.connect(DATABASE_URL) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         cur.execute(sql, params or [])
         return cur.fetchall()
 
-# 10) 캐시 시스템
+# 9) 캐시 시스템
 _cache = {}
 _cache_lock = threading.Lock()
 
@@ -144,7 +99,7 @@ def cache_set(key: str, value: Any, ttl: int = None):
         _cache[key] = (expire_time, value)
         logger.debug(f"Cache set for key: {key}, TTL: {ttl}s")
 
-# 11) AI 헬퍼 함수 (내구성 강화 버전)
+# 10) AI 헬퍼 함수 (내구성 강화 버전)
 def _to_utc_ts(date_yyyy_mm_dd: str | None):
     """'YYYY-MM-DD' -> aware UTC midnight; None 유지 (방어적 파싱)"""
     if not date_yyyy_mm_dd:
@@ -155,7 +110,7 @@ def _to_utc_ts(date_yyyy_mm_dd: str | None):
     except Exception:
         return None
 
-# 12) Crawler 헬퍼 함수들
+# 11) Crawler 헬퍼 함수들
 def normalize_item(item: dict, base_url: str = None) -> dict:
     """Apify 아이템을 정규화"""
     normalized = {
@@ -226,30 +181,11 @@ UPSERT_SQL = """
         updated_at = CURRENT_TIMESTAMP
 """
 
-# 13) Apify Webhook Models for Redis Queue
-class ApifyResource(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    
-    id: Optional[str] = None
-    defaultDatasetId: Optional[str] = None
-    status: Optional[str] = None
-    startedAt: Optional[str] = None
-    finishedAt: Optional[str] = None
-
-class ApifyWebhookPayload(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    
-    userId: Optional[str] = None
-    createdAt: Optional[str] = None
-    eventType: str = Field(...)
-    eventData: Optional[Dict] = None
-    resource: Optional[Dict] = None  # Accept as dict first
-
-# 14) 라우트들
+# 12) 라우트들
 @app.get("/health")
 def health():
     base = {"env": ENV, "service": "dice-api"}
-    # 1) DB 연결 확인 - 커넥션 풀 사용
+    # 1) DB 연결 확인
     try:
         query_all("SELECT 1 AS ok;")
     except Exception as e:
@@ -273,61 +209,37 @@ def health():
 
     return {"status": "ok", **base}
 
+# main.py의 수정된 list_notices 함수
+# 제목과 요약만 검색하는 최적화된 버전
+
+
+# main.py에서 list_notices 함수를 아래 내용으로 교체하세요
+
 @app.get("/notices")
 def list_notices(
     request: Request,
     college: str | None = Query(None),
     q: str | None = Query(None),
-    search_mode: str = Query("trgm", regex="^(like|trgm|fts|websearch)$", description="검색 모드: like|trgm|fts|websearch"),
-    op: str = Query("and", regex="^(and|or)$", description="키워드 결합 방식: and|or"),
-    rank: str | None = Query(None, regex="^(off|trgm|fts)$", description="랭킹 모드: off|trgm|fts (기본값: fts모드일 때 fts, 아니면 off)"),
     date_from: str | None = Query(None, description="YYYY-MM-DD"),
     date_to: str | None = Query(None, description="YYYY-MM-DD"),
     sort: str = Query("recent", regex="^(recent|oldest)$"),
     limit: int = Query(20, ge=1, le=100),
     offset: int = Query(0, ge=0),
     my: bool = Query(False, description="내 키워드와 일치하는 공지만 보기 (인증 필요)"),
-    count: bool = Query(True, description="전체 카운트 포함 여부 (false로 설정 시 성능 향상)"),
-    no_cache: bool = Query(False, description="캐시 무시 (디버그용)"),
-    include_broken: bool = Query(False, description="깨진 링크도 포함할지 여부"),
+    group_by: str = Query(None, regex="^(college|hashtag)$", description="그룹화 기준: college 또는 hashtag"),
 ):
     """
-    공지사항 목록 조회 - 고급 검색 기능 포함
+    공지사항 목록 조회 - 제목과 해시태그 기반 검색
+    
+    - 검색 대상: 제목 (필수) + 해시태그 (있으면 함께 검색)
+    - 일반 검색: 해시태그 유무와 관계없이 모든 공지 검색
+    - 해시태그별 그룹화: 해시태그가 있는 공지만 표시
     """
-    
-    # rank 기본값 설정: FTS/websearch 모드일 때는 FTS 랭킹이 기본
-    if rank is None:
-        rank = "fts" if search_mode in ("fts", "websearch") else "off"
-    
-    # 캐시 키 생성 (쿼리 파라미터 기반)
-    if not no_cache and not my:  # my=true는 사용자별이므로 캐시 제외
-        cache_key_parts = [
-            f"notices:v1",
-            f"c={college or 'all'}",
-            f"q={q or ''}",
-            f"sm={search_mode}",
-            f"op={op}",
-            f"r={rank}",
-            f"df={date_from or ''}",
-            f"dt={date_to or ''}",
-            f"s={sort}",
-            f"l={limit}",
-            f"o={offset}",
-            f"cnt={count}",
-            f"ib={include_broken}"
-        ]
-        cache_key = ":".join(cache_key_parts)
-        
-        # 캐시 확인
-        cached_response = cache_get(cache_key)
-        if cached_response is not None:
-            logger.info(f"Cache hit for notices query: {cache_key[:50]}...")
-            return cached_response
+    where, params = [], []
     
     # my=true 인 경우: 인증 + 사용자 keywords 로드
     user_keywords = None
     if my:
-        # Authorization 헤더에서 Bearer 토큰 읽기
         auth = request.headers.get("Authorization", "")
         parts = auth.split()
         if len(parts) == 2 and parts[0].lower() == "bearer":
@@ -335,7 +247,6 @@ def list_notices(
         else:
             raise HTTPException(status_code=401, detail="Not authenticated")
 
-        # 토큰 검증 후 user_id 추출
         try:
             payload = decode_token(token)
             user_id = payload.get("sub")
@@ -346,7 +257,6 @@ def list_notices(
         except jwt.InvalidTokenError:
             raise HTTPException(status_code=401, detail="Invalid token")
 
-        # DB에서 keywords 조회
         try:
             rows = query_all("""
                 SELECT keywords
@@ -357,232 +267,241 @@ def list_notices(
             raise HTTPException(status_code=500, detail="Database error")
 
         if not rows:
-            # 프로필이 없으면 맞춤 공지는 없음
             return {
-                "meta": {
-                    "search_mode": search_mode,
-                    "op": op,
-                    "rank": rank,
-                    "limit": limit,
-                    "offset": offset,
-                    "returned": 0
-                },
-                "items": []
+                "items": [],
+                "total_count": 0,
+                "limit": limit,
+                "offset": offset,
+                "sort": sort
             }
 
         user_keywords = rows[0].get("keywords") or []
         if not user_keywords:
-            # 키워드가 비어 있으면 결과도 비움
             return {
-                "meta": {
-                    "search_mode": search_mode,
-                    "op": op,
-                    "rank": rank,
-                    "limit": limit,
-                    "offset": offset,
-                    "returned": 0
-                },
-                "items": []
+                "items": [],
+                "total_count": 0,
+                "limit": limit,
+                "offset": offset,
+                "sort": sort
             }
     
-    # 검색어 토큰화 (길이 2 미만 제외)
-    tokens = []
-    q_raw = ""
-    if q:
-        q_raw = q.strip()
-        if q_raw:
-            # 공백으로 분리 후 2글자 이상만 필터
-            tokens = [t for t in re.split(r'\s+', q_raw) if len(t) >= 2]
-    
-    # WHERE 절과 파라미터 구성
-    where_clauses = []
-    order_clauses = []
-    params = {}
-    select_extra = []
-    
-    # 기본 필터들
+    # WHERE 절 구성
     if college and college != "all":
-        where_clauses.append("college_key = %(college)s")
-        params["college"] = college
+        where.append("college_key = %s")
+        params.append(college)
     
-    # 깨진 링크 필터링 (기본: url_ok=false 제외)
-    if not include_broken:
-        where_clauses.append("(url_ok IS DISTINCT FROM FALSE)")
+    # 검색어: 제목 + 해시태그 (있으면)
+    if q:
+        where.append("search_vector @@ websearch_to_tsquery('simple', %s)")
+        params.append(q.strip())
     
-    # 날짜 파싱 with 방어적 처리
     if date_from:
-        try:
-            params["date_from"] = datetime.fromisoformat(date_from)
-            where_clauses.append("published_at >= %(date_from)s")
-        except (ValueError, TypeError) as e:
-            raise HTTPException(status_code=400, detail=f"Invalid date_from format: {date_from}. Use YYYY-MM-DD")
-    
+        where.append("published_at >= %s")
+        params.append(datetime.fromisoformat(date_from))
     if date_to:
-        try:
-            params["date_to"] = datetime.fromisoformat(date_to)
-            where_clauses.append("published_at < %(date_to)s")
-        except (ValueError, TypeError) as e:
-            raise HTTPException(status_code=400, detail=f"Invalid date_to format: {date_to}. Use YYYY-MM-DD")
+        where.append("published_at < %s")
+        params.append(datetime.fromisoformat(date_to))
     
-    # my=true 필터: 사용자 키워드와 공지 해시태그의 교집합
     if my and user_keywords:
-        where_clauses.append("(hashtags_ai && %(user_keywords)s::text[])")
-        params["user_keywords"] = user_keywords
+        where.append("(hashtags_ai && %s::text[])")
+        params.append(user_keywords)
     
-    # 검색 모드별 처리
-    if tokens:
-        if search_mode in ("like", "trgm"):
-            # ILIKE 기반 검색 (trgm은 인덱스가 있어 더 빠름)
-            token_conditions = []
-            for i, token in enumerate(tokens):
-                param_name = f"token_{i}"
-                params[param_name] = f"%{token}%"
-                token_conditions.append(
-                    f"(title ILIKE %({param_name})s OR summary_ai ILIKE %({param_name})s)"
-                )
-            
-            # AND/OR 결합
-            if op == "and":
-                where_clauses.append("(" + " AND ".join(token_conditions) + ")")
-            else:  # or
-                where_clauses.append("(" + " OR ".join(token_conditions) + ")")
-            
-            # trgm 랭킹 처리
-            if rank == "trgm":
-                params["q_raw"] = q_raw
-                select_extra.append("GREATEST(similarity(title, %(q_raw)s), similarity(summary_ai, %(q_raw)s)) AS trgm_rank")
-                order_clauses.append("GREATEST(similarity(title, %(q_raw)s), similarity(summary_ai, %(q_raw)s)) DESC")
-                
-        elif search_mode == "fts":
-            # 전문 검색 - 고급 tsquery 구성
-            if len(tokens) == 1:
-                # 단일 토큰은 plainto_tsquery 사용 (더 유연한 매칭)
-                params["tsquery_single"] = tokens[0]
-                where_clauses.append("ts_ko @@ plainto_tsquery('simple', %(tsquery_single)s)")
-                
-                # fts 랭킹 처리
-                if rank == "fts":
-                    select_extra.append("ts_rank(ts_ko, plainto_tsquery('simple', %(tsquery_single)s)) AS fts_rank")
-                    order_clauses.append("ts_rank(ts_ko, plainto_tsquery('simple', %(tsquery_single)s)) DESC")
-            else:
-                # 다중 토큰 - to_tsquery with AND/OR
-                if op == "and":
-                    tsquery = " & ".join(tokens)
-                else:  # or
-                    tsquery = " | ".join(tokens)
-                
-                # 특수문자 필터링 (한글, 영문, 숫자, &, | 만 허용)
-                tsquery = re.sub(r'[^0-9A-Za-z가-힣\|\&\s]', '', tsquery)
-                
-                if tsquery:  # 필터링 후에도 남아있으면
-                    params["tsquery"] = tsquery
-                    where_clauses.append("ts_ko @@ to_tsquery('simple', %(tsquery)s)")
-                    
-                    # fts 랭킹 처리
-                    if rank == "fts":
-                        select_extra.append("ts_rank(ts_ko, to_tsquery('simple', %(tsquery)s)) AS fts_rank")
-                        order_clauses.append("ts_rank(ts_ko, to_tsquery('simple', %(tsquery)s)) DESC")
-                        
-        elif search_mode == "websearch":
-            # websearch_to_tsquery - PostgreSQL 12+ 자연어 검색
-            # 따옴표, OR, - 등을 자동 파싱 ("장학 신청" OR 등록 -연체)
-            if tokens:
-                # 원본 쿼리를 그대로 사용 (websearch가 알아서 파싱)
-                params["websearch_query"] = q_raw
-                
-                # PostgreSQL 버전 체크 및 폴백
-                try:
-                    where_clauses.append("ts_ko @@ websearch_to_tsquery('simple', %(websearch_query)s)")
-                    
-                    # websearch 랭킹 처리
-                    if rank == "fts":
-                        select_extra.append("ts_rank(ts_ko, websearch_to_tsquery('simple', %(websearch_query)s)) AS fts_rank")
-                        order_clauses.append("ts_rank(ts_ko, websearch_to_tsquery('simple', %(websearch_query)s)) DESC")
-                except Exception as e:
-                    # PostgreSQL 11 이하 폴백: plainto_tsquery 사용
-                    logger.warning(f"websearch_to_tsquery not available, falling back to plainto_tsquery: {e}")
-                    params["fallback_query"] = q_raw
-                    where_clauses.append("ts_ko @@ plainto_tsquery('simple', %(fallback_query)s)")
-                    
-                    if rank == "fts":
-                        select_extra.append("ts_rank(ts_ko, plainto_tsquery('simple', %(fallback_query)s)) AS fts_rank")
-                        order_clauses.append("ts_rank(ts_ko, plainto_tsquery('simple', %(fallback_query)s)) DESC")
+    where_clause = " WHERE " + " AND ".join(where) if where else ""
     
-    # 기본 정렬 추가
-    if sort == "oldest":
-        order_clauses.append("published_at ASC NULLS FIRST")
-        order_clauses.append("created_at ASC")
-    else:  # recent
-        order_clauses.append("published_at DESC NULLS LAST")
-        order_clauses.append("created_at DESC")
+    # COUNT 쿼리
+    count_sql = f"SELECT COUNT(*) AS total FROM notices{where_clause}"
+    count_result = query_all(count_sql, params[:])
+    total_count = count_result[0]["total"] if count_result else 0
     
-    # SQL 구성
-    where_sql = ""
-    if where_clauses:
-        where_sql = " WHERE " + " AND ".join(where_clauses)
+    # 그룹화 처리 (해시태그 있는 것만)
+    if group_by:
+        return _get_grouped_notices(
+            where_clause, params, q, group_by, limit, offset, sort, total_count
+        )
     
-    order_sql = ""
-    if order_clauses:
-        order_sql = " ORDER BY " + ", ".join(order_clauses)
+    # 일반 목록 (그룹화 없음) - 해시태그 유무 상관없이 모두 표시
+    if q:
+        order_clause = """
+            ORDER BY 
+                ts_rank(search_vector, websearch_to_tsquery('simple', %s)) DESC,
+                published_at DESC NULLS LAST
+        """
+        order_params = [q.strip()]
+    else:
+        order_clause = " ORDER BY published_at DESC NULLS LAST, created_at DESC"
+        if sort == "oldest":
+            order_clause = " ORDER BY published_at ASC NULLS FIRST, created_at ASC"
+        order_params = []
     
-    select_extra_sql = ""
-    if select_extra:
-        select_extra_sql = ", " + ", ".join(select_extra)
+    if q:
+        sql = f"""
+            SELECT 
+                id, college_key, title, url,
+                COALESCE(summary_ai, summary_raw, '요약 준비중') as summary_ai,
+                summary_raw, category_ai, start_at_ai, end_at_ai, 
+                qualification_ai, hashtags_ai, published_at, created_at,
+                ts_rank(search_vector, websearch_to_tsquery('simple', %s)) as relevance_score
+            FROM notices
+            {where_clause}
+            {order_clause}
+            LIMIT %s OFFSET %s
+        """
+        final_params = [q.strip()] + params + order_params + [limit, offset]
+    else:
+        sql = f"""
+            SELECT 
+                id, college_key, title, url,
+                COALESCE(summary_ai, summary_raw, '요약 준비중') as summary_ai,
+                summary_raw, category_ai, start_at_ai, end_at_ai, 
+                qualification_ai, hashtags_ai, published_at, created_at
+            FROM notices
+            {where_clause}
+            {order_clause}
+            LIMIT %s OFFSET %s
+        """
+        final_params = params + [limit, offset]
     
-    # COUNT 쿼리 (옵션)
-    total_count = None
-    if count:
-        count_sql = f"SELECT COUNT(*) AS total FROM notices{where_sql}"
-        count_result = query_all(count_sql, params)
-        total_count = count_result[0]["total"] if count_result else 0
+    rows = query_all(sql, final_params)
     
-    # SELECT 쿼리
-    sql = f"""
-        SELECT 
-            id, college_key, title, url, summary_ai, summary_raw,
-            category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
-            published_at, created_at
-            {select_extra_sql}
-        FROM notices
-        {where_sql}
-        {order_sql}
-        LIMIT %(limit)s OFFSET %(offset)s
-    """
-    
-    params["limit"] = min(limit, 100)  # 상한 강제
-    params["offset"] = offset
-    
-    rows = query_all(sql, params)
-    
-    # 응답 전 summary_ai 없는 경우 기본값 설정
-    for row in rows:
-        if not row.get("summary_ai"):
-            row["summary_ai"] = "요약 준비중"
-    
-    # 응답 구성
     response = {
-        "meta": {
-            "search_mode": search_mode,
-            "op": op,
-            "rank": rank,
-            "limit": params["limit"],
-            "offset": offset,
-            "returned": len(rows)
-        },
-        "items": rows
+        "items": rows,
+        "total_count": total_count,
+        "limit": limit,
+        "offset": offset,
+        "sort": sort
     }
     
-    # 전체 카운트는 요청 시에만 포함
-    if count and total_count is not None:
-        response["meta"]["total_count"] = total_count
-    
-    # 캐시 저장 (my=false이고 no_cache=false일 때만)
-    if not no_cache and not my and 'cache_key' in locals():
-        cache_ttl = 60 if q else 30  # 검색 쿼리는 60초, 전체 목록은 30초
-        cache_set(cache_key, response, ttl=cache_ttl)
-        logger.info(f"Cached notices response for {cache_ttl}s: {cache_key[:50]}...")
+    if q:
+        response["search_query"] = q
+        response["search_info"] = {
+            "query": q,
+            "results_found": total_count,
+            "search_scope": "제목 및 해시태그"
+        }
     
     return response
+
+
+def _get_grouped_notices(
+    where_clause: str, 
+    params: list, 
+    search_query: str | None,
+    group_by: str,
+    limit: int,
+    offset: int,
+    sort: str,
+    total_count: int
+):
+    """단과대별 또는 해시태그별 그룹화된 결과 반환"""
+    
+    if group_by == "college":
+        # 단과대별 그룹화 (모든 공지 포함)
+        group_sql = f"""
+            SELECT 
+                college_key,
+                COUNT(*) as notice_count,
+                array_agg(DISTINCT unnest ORDER BY unnest) FILTER (WHERE unnest IS NOT NULL) as all_hashtags
+            FROM notices 
+            LEFT JOIN LATERAL unnest(hashtags_ai) ON true
+            {where_clause}
+            GROUP BY college_key
+            ORDER BY notice_count DESC
+        """
+        
+        groups = query_all(group_sql, params[:])
+        
+        # 각 단과대별 공지 가져오기 (모든 공지 포함)
+        result_groups = []
+        for group in groups:
+            college_key = group["college_key"]
+            
+            # 해당 단과대 공지 조회
+            notices_sql = f"""
+                SELECT 
+                    id, college_key, title, url,
+                    COALESCE(summary_ai, summary_raw, '요약 준비중') as summary_ai,
+                    hashtags_ai, published_at, created_at, category_ai
+                FROM notices
+                {where_clause} {'AND' if where_clause else 'WHERE'} college_key = %s
+                ORDER BY published_at DESC NULLS LAST
+                LIMIT 10
+            """
+            
+            notices = query_all(notices_sql, params + [college_key])
+            
+            result_groups.append({
+                "college_key": college_key,
+                "notice_count": group["notice_count"],
+                "hashtags": group["all_hashtags"] if group["all_hashtags"] else [],
+                "notices": notices
+            })
+        
+        return {
+            "grouped_by": "college",
+            "total_count": total_count,
+            "groups": result_groups,
+            "search_query": search_query
+        }
+    
+    elif group_by == "hashtag":
+        # 해시태그별 그룹화 (해시태그 있는 공지만)
+        hashtag_filter = " AND hashtags_ai IS NOT NULL AND array_length(hashtags_ai, 1) > 0"
+        filtered_where = where_clause + hashtag_filter if where_clause else " WHERE hashtags_ai IS NOT NULL AND array_length(hashtags_ai, 1) > 0"
+        
+        group_sql = f"""
+            SELECT 
+                unnest as hashtag,
+                COUNT(*) as notice_count,
+                array_agg(DISTINCT college_key) as colleges
+            FROM notices, unnest(hashtags_ai)
+            {filtered_where}
+            GROUP BY hashtag
+            ORDER BY notice_count DESC
+            LIMIT 50
+        """
+        
+        groups = query_all(group_sql, params[:])
+        
+        # 각 해시태그별 공지 가져오기
+        result_groups = []
+        for group in groups:
+            hashtag = group["hashtag"]
+            
+            # 해당 해시태그 공지 조회
+            notices_sql = f"""
+                SELECT 
+                    id, college_key, title, url,
+                    COALESCE(summary_ai, summary_raw, '요약 준비중') as summary_ai,
+                    hashtags_ai, published_at, created_at, category_ai
+                FROM notices
+                {filtered_where} AND %s = ANY(hashtags_ai)
+                ORDER BY published_at DESC NULLS LAST
+                LIMIT 10
+            """
+            
+            notices = query_all(notices_sql, params + [hashtag])
+            
+            result_groups.append({
+                "hashtag": hashtag,
+                "notice_count": group["notice_count"],
+                "colleges": group["colleges"],
+                "notices": notices
+            })
+        
+        # 해시태그가 있는 공지 개수 재계산
+        hashtag_count_sql = f"SELECT COUNT(*) AS total FROM notices{filtered_where}"
+        hashtag_count_result = query_all(hashtag_count_sql, params[:])
+        hashtag_total = hashtag_count_result[0]["total"] if hashtag_count_result else 0
+        
+        return {
+            "grouped_by": "hashtag",
+            "total_count": hashtag_total,
+            "original_total": total_count,
+            "filtered_info": "해시태그가 있는 공지만 표시",
+            "groups": result_groups,
+            "search_query": search_query
+        }
+
 
 @app.get("/stats")
 def stats():
@@ -622,85 +541,175 @@ def get_notice(notice_id: str):
     return notice
 
 @app.post("/apify/webhook")
-def apify_webhook_redis(
-    request: Request,
-    payload: ApifyWebhookPayload = Body(...)
-):
-    """
-    Apify webhook endpoint - Redis Queue version
-    Receives webhook, validates token, and enqueues dataset processing job
-    """
-    # 1) 헤더 인증 확인
-    token = request.headers.get("x-apify-token")
-    if not APIFY_WEBHOOK_TOKEN or token != APIFY_WEBHOOK_TOKEN:
-        logger.warning(f"[apify] Invalid webhook token attempt")
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
+def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
+    """Apify webhook 엔드포인트 - 크롤링 완료 시 호출됨"""
+    # 1) 보안 토큰 확인 (강화)
+    expected_token = os.getenv("APIFY_WEBHOOK_TOKEN")
+    if not expected_token or token != expected_token:
+        logger.warning(f"Invalid webhook token attempt")
+        raise HTTPException(status_code=401, detail="unauthorized")
     
-    # 2) resource를 ApifyResource로 파싱
-    resource = None
-    if payload.resource:
-        try:
-            resource = ApifyResource(**payload.resource)
-        except Exception as e:
-            logger.warning(f"[apify] Failed to parse resource: {e}")
-            resource = ApifyResource()  # empty resource
+    logger.info(f"Webhook received: {payload.get('eventType', 'unknown')}")
     
-    # 로깅
-    logger.info(
-        "[apify] received event=%s run=%s dataset=%s",
-        payload.eventType,
-        resource.id if resource else None,
-        resource.defaultDatasetId if resource else None
+    # 2) datasetId / taskId 추출
+    ds_id = (
+        payload.get("defaultDatasetId")
+        or payload.get("data", {}).get("defaultDatasetId")
+        or payload.get("resource", {}).get("defaultDatasetId")
+    )
+    task_id = (
+        payload.get("data", {}).get("actorTaskId")
+        or payload.get("resource", {}).get("actorTaskId")
     )
     
-    # 3) eventType 확인
-    if payload.eventType != "ACTOR.RUN.SUCCEEDED":
-        logger.info("[apify] ignored event=%s", payload.eventType)
-        return {"ok": True, "queued": False, "reason": "ignored eventType"}
+    if not ds_id:
+        logger.error("Dataset ID missing in webhook payload")
+        raise HTTPException(status_code=400, detail="datasetId missing")
     
-    # 4) defaultDatasetId 확인
-    dataset_id = resource.defaultDatasetId if resource else None
-    if not dataset_id:
-        logger.error("[apify] defaultDatasetId missing in webhook payload")
-        raise HTTPException(status_code=400, detail="defaultDatasetId missing")
+    logger.info(f"Processing dataset: {ds_id}, task: {task_id}")
     
-    # 5) Redis에 job enqueue
-    run_id = resource.id if resource else None
-    job = {
-        "dataset_id": dataset_id,
-        "source": "apify",
-        "run_id": run_id,
-        "created_at": datetime.utcnow().isoformat()
-    }
+    # 3) 데이터셋 아이템 가져오기
+    url = f"https://api.apify.com/v2/datasets/{ds_id}/items"
+    params = {"token": APIFY_TOKEN, "format": "json", "clean": "true"}
     
-    # Redis 연결 재시도
-    global redis_client
-    if not redis_client:
-        if not REDIS_URL:
-            logger.error("[apify] REDIS_URL not configured")
-            raise HTTPException(status_code=500, detail="Redis not configured")
-        
-        try:
-            redis_client = redis.from_url(REDIS_URL, decode_responses=True)
-            redis_client.ping()
-            logger.info("[apify] Redis reconnected")
-        except Exception as e:
-            logger.error(f"[apify] Redis connection failed: {e}")
-            raise HTTPException(status_code=500, detail="enqueue failed")
-    
-    # Enqueue
     try:
-        redis_client.rpush(QUEUE_NAME, json.dumps(job))
-        logger.info(
-            "[apify] enqueued dataset=%s run=%s queue=%s",
-            dataset_id, run_id, QUEUE_NAME
-        )
-        return {"ok": True, "dataset_id": dataset_id, "queued": True}
-    except Exception as e:
-        logger.exception("[apify] Redis enqueue failed")
-        raise HTTPException(status_code=500, detail="enqueue failed")
+        r = requests.get(url, params=params, timeout=60)
+        if r.status_code != 200:
+            logger.error(f"Apify API error: {r.status_code}")
+            raise HTTPException(status_code=502, detail=f"apify fetch error: {r.text[:200]}")
+        items = r.json()
+    except requests.RequestException as e:
+        logger.error(f"Failed to fetch dataset: {e}")
+        raise HTTPException(status_code=502, detail="Failed to fetch dataset")
+    
+    if not isinstance(items, list):
+        items = items.get("items", [])
+    
+    logger.info(f"Fetched {len(items)} items from dataset")
+    
+    # 4) 어떤 단과대 task인지 매핑
+    college_key = None
+    if task_id:
+        for ck, meta in COLLEGES.items():
+            if meta.get("task_id") == task_id:
+                college_key = ck
+                break
+    
+    if not college_key:
+        college_key = "main"
+        logger.warning(f"Unknown task_id {task_id}, using 'main' as default")
+    
+    logger.info(f"Processing for college: {college_key}")
+    
+    # 5) upsert (AI 추출 포함)
+    upserted, skipped = 0, 0
+    try:
+        with psycopg2.connect(DATABASE_URL) as conn, conn.cursor() as cur:
+            for rec in items:
+                norm = normalize_item(rec, base_url=COLLEGES[college_key].get("url"))
+                if not validate_normalized_item(norm):
+                    skipped += 1
+                    continue
+                
+                # AI 자동추출 (실패해도 파이프라인은 계속)
+                use_ai = AI_IN_PIPELINE
+                if use_ai:
+                    try:
+                        title_for_ai = (norm.get("title") or "").strip()
+                        body_for_ai = (norm.get("body_text") or "").strip()
 
-# 15) 실시간 자격검증 엔드포인트
+                        # 1) 본문/제목 기반 구조화 추출
+                        ai = extract_notice_info(body_text=body_for_ai, title=title_for_ai) or {}
+
+                        # 2) 제목 해시태그 추출
+                        ht = extract_hashtags_from_title(title_for_ai) or {}
+
+                        # 3) 필드 매핑
+                        norm["category_ai"] = ai.get("category_ai")
+                        norm["start_at_ai"] = _to_utc_ts(ai.get("start_date_ai"))
+                        norm["end_at_ai"] = _to_utc_ts(ai.get("end_date_ai"))
+
+                        # qualification_ai: dict or {}
+                        qual_dict = ai.get("qualification_ai") or {}
+                        norm["qualification_ai"] = qual_dict
+
+                        # hashtags_ai: list or None
+                        norm["hashtags_ai"] = ht.get("hashtags") or None
+
+                        # 4) NEW: 요약 생성
+                        # 입력 소스 우선순위: title + (summary_raw 우선, 없으면 body_text)
+                        text_for_summary = norm.get("summary_raw") or norm.get("body_text") or ""
+                        try:
+                            norm["summary_ai"] = generate_brief_summary(
+                                title=title_for_ai,
+                                text=text_for_summary
+                            )
+                            logger.debug(f"Summary generated for: {title_for_ai[:50]}")
+                        except Exception as se:
+                            logger.warning(f"Summary generation failed: {se}")
+                            # 폴백: 제목 기반 최소 요약
+                            norm["summary_ai"] = title_for_ai[:180] if title_for_ai else "요약 준비중"
+
+                    except Exception as e:
+                        # 실패 시에도 저장 (기존 파이프라인을 막지 않음)
+                        logger.warning(f"AI extraction failed for {norm.get('title', 'unknown')}: {e}")
+                        norm["category_ai"] = None
+                        norm["start_at_ai"] = None
+                        norm["end_at_ai"] = None
+                        norm["qualification_ai"] = {}
+                        norm["hashtags_ai"] = None
+                        # AI 요약 실패 시 폴백
+                        norm["summary_ai"] = norm.get("title", "요약 준비중")[:180]
+                else:
+                    # AI 비활성화 시 전부 None/빈값
+                    norm["category_ai"] = None
+                    norm["start_at_ai"] = None
+                    norm["end_at_ai"] = None
+                    norm["qualification_ai"] = {}
+                    norm["hashtags_ai"] = None
+                    norm["summary_ai"] = None
+                
+                h = content_hash(college_key, norm["title"], norm["url"], norm["published_at"])
+                
+                try:
+                    cur.execute(UPSERT_SQL, {
+                        "college_key": college_key,
+                        "title": norm["title"],
+                        "url": norm["url"],
+                        "summary_raw": norm.get("summary_raw"),
+                        "summary_ai": norm.get("summary_ai"), # NEW: summary_ai 추가
+                        "body_html": norm.get("body_html"),
+                        "body_text": norm.get("body_text"),
+                        "published_at": norm.get("published_at"),
+                        "source_site": COLLEGES[college_key].get("url"),
+                        "content_hash": h,
+                        "category_ai": norm.get("category_ai"),
+                        "start_at_ai": norm.get("start_at_ai"),
+                        "end_at_ai": norm.get("end_at_ai"),
+                        "qualification_ai": Json(norm.get("qualification_ai") or {}),
+                        "hashtags_ai": norm.get("hashtags_ai"),
+                    })
+                    upserted += 1
+                except psycopg2.Error as e:
+                    logger.error(f"Failed to upsert item: {e}")
+                    skipped += 1
+            
+            conn.commit()
+            logger.info(f"Webhook processing complete: {upserted} upserted, {skipped} skipped")
+    
+    except psycopg2.Error as e:
+        logger.error(f"Database error: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+    
+    return {
+        "status": "ok",
+        "college": college_key,
+        "upserted": upserted,
+        "skipped": skipped,
+        "total_items": len(items)
+    }
+
+# 13) 실시간 자격검증 엔드포인트
 class UserProfile(BaseModel):
     grade: int | None = None
     major: str | None = None
@@ -711,19 +720,21 @@ class UserProfile(BaseModel):
 def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
     """사용자 프로필을 기반으로 공지 자격요건 검증"""
     try:
-        rows = query_all("""
-          SELECT qualification_ai
-          FROM notices
-          WHERE id=%(id)s
-        """, {"id": notice_id})
-    except Exception as e:
+        with psycopg2.connect(DATABASE_URL) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+              SELECT qualification_ai
+              FROM notices
+              WHERE id=%(id)s
+            """, {"id": notice_id})
+            row = cur.fetchone()
+    except psycopg2.Error as e:
         logger.error(f"Database error in verify_eligibility: {e}")
         raise HTTPException(status_code=500, detail="Database error")
 
-    if not rows:
+    if not row:
         raise HTTPException(status_code=404, detail="notice not found")
 
-    qa = rows[0].get("qualification_ai")
+    qa = row.get("qualification_ai")
     if not qa:
         return {"eligible": False, "reason": "해당 공지에 AI 자격요건 데이터가 없습니다."}
 
