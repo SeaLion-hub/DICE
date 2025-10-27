@@ -1,667 +1,340 @@
-"""
-Gemini Flash 기반 '구조화 추출'과 '실시간 자격 검증' 모듈.
-- extract_notice_info(title, body_text) -> dict
-- verify_eligibility_ai(qualification_json, user_profile) -> dict
-- extract_hashtags_from_title(title) -> dict
-- generate_brief_summary(title, text) -> str  # NEW
-
-의존:
-  pip install google-generativeai pydantic
-환경변수:
-  GEMINI_API_KEY=...
-  GEMINI_MODEL=gemini-2.0-flash-exp
-  AI_TIMEOUT_S=20
-  AI_ENABLE_SUMMARY=true
-  SUMMARY_MAX_SENTENCES=3
-  SUMMARY_MAX_CHARS=180
-"""
-
-from __future__ import annotations
-
-# .env 자동 로딩
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except Exception:
-    pass
-
+import google.generativeai as genai
 import os
 import re
-import time
-import datetime as dt
-from typing import Any, Dict, Optional, List
-import logging
+import json
+from dotenv import load_dotenv
 
-import google.generativeai as genai
-from pydantic import BaseModel, Field, ValidationError
+load_dotenv()
 
-# 로깅 설정
-logger = logging.getLogger(__name__)
+# --- 기존 코드 (API 설정) ---
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# ───────────────────────────────────────────────────────────────────────────────
-# Pydantic v1/v2 호환 Base 스키마 (extra field 무시)
-# ───────────────────────────────────────────────────────────────────────────────
-try:
-    # Pydantic v2
-    from pydantic import ConfigDict
-    
-    class _BaseSchema(BaseModel):
-        model_config = ConfigDict(extra="ignore")
-except ImportError:
-    # Pydantic v1
-    class _BaseSchema(BaseModel):
-        class Config:
-            extra = "ignore"
+if not GOOGLE_API_KEY:
+    raise ValueError("GOOGLE_API_KEY not found in .env file")
 
+genai.configure(api_key=GOOGLE_API_KEY)
 
-# ───────────────────────────────────────────────────────────────────────────────
-# 0) 환경설정 및 모델 초기화
-# ───────────────────────────────────────────────────────────────────────────────
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
-AI_TIMEOUT_S   = int(os.getenv("AI_TIMEOUT_S", "20"))
-AI_ENABLE_SUMMARY = os.getenv("AI_ENABLE_SUMMARY", "true").lower() == "true"
-SUMMARY_MAX_SENTENCES = int(os.getenv("SUMMARY_MAX_SENTENCES", "3"))
-SUMMARY_MAX_CHARS = int(os.getenv("SUMMARY_MAX_CHARS", "180"))
+generation_config = genai.GenerationConfig(
+    temperature=0.1,
+    top_p=1.0,
+    top_k=1,
+    max_output_tokens=2048,
+    response_mime_type="text/plain",
+)
 
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-
-# Lazy 모델 생성
-_model: Optional[genai.GenerativeModel] = None
-
-def _get_model() -> genai.GenerativeModel:
-    global _model
-    if _model is None:
-        if not GEMINI_API_KEY:
-            raise RuntimeError("GEMINI_API_KEY is not set")
-        genai.configure(api_key=GEMINI_API_KEY)
-        _model = genai.GenerativeModel(GEMINI_MODEL)
-    return _model
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# 1) Pydantic 스키마 (Structured Output 용) - extra field 무시
-# ───────────────────────────────────────────────────────────────────────────────
-class ExtractSchema(_BaseSchema):
-    """공지 구조화 추출 결과 스키마"""
-    category: str = Field(description="장학|채용|행사|수업|행정|기타 중 하나")
-    start_date: Optional[str] = Field(default=None, description="YYYY-MM-DD 또는 null")
-    end_date: Optional[str] = Field(default=None, description="YYYY-MM-DD 또는 null")
-    qualification: Any = None
-
-
-class VerifySchema(_BaseSchema):
-    """실시간 자격 검증 결과 스키마"""
-    eligible: bool
-    reason: str
-
-
-class HashtagSchema(_BaseSchema):
-    """해시태그 추출 결과 스키마"""
-    hashtags: List[str] = Field(
-        description="최종 선택된 해시태그 리스트. 예: ['#학사'] 또는 ['#취업','#국제교류'] 등"
-    )
-
-
-class SummarySchema(_BaseSchema):
-    """요약 생성 결과 스키마"""
-    summary: str = Field(description="최대 3문장, 180자 이내 핵심 요약")
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# 2) 유틸
-# ───────────────────────────────────────────────────────────────────────────────
-_ALLOWED_CATS = {"장학", "채용", "행사", "수업", "행정", "기타"}
-
-# 해시태그 화이트리스트 및 정렬 순서
-_ALLOWED_HASHTAGS = [
-    "#학사", "#장학", "#행사", "#취업", "#국제교류", "#공모전/대회", "#일반"
-]
-_HASHTAG_ORDER = {tag: i for i, tag in enumerate(_ALLOWED_HASHTAGS)}
-
-# 불용어 및 제거 패턴
-_BOILERPLATE_PATTERNS = [
-    r"자세한\s*내용은.*?참고.*?하시기\s*바랍니다",
-    r"문의처\s*:.*?(\n|$)",
-    r"첨부파일\s*:.*?(\n|$)",
-    r"자세히\s*보기",
-    r"더\s*보기",
-    r"클릭\s*하세요",
-    r"홈페이지.*?확인",
-    r"이메일\s*:\s*[\w\.-]+@[\w\.-]+",
-    r"전화\s*:\s*[\d\-\(\)]+",
-    r"http[s]?://[^\s]+",
-    r"www\.[^\s]+",
+safety_settings = [
+    {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+    {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
 ]
 
-_KOREAN_STOPWORDS = {
-    "이", "그", "저", "것", "등", "및", "또한", "그리고", "하지만", "그러나",
-    "따라서", "그래서", "즉", "또", "만", "도", "을", "를", "이", "가", "은", "는"
+model = genai.GenerativeModel(
+    model_name="gemini-1.5-pro-latest",
+    generation_config=generation_config,
+    safety_settings=safety_settings,
+)
+# --- 기존 코드 종료 ---
+
+
+# --- 1단계: 분류 프롬프트 (기존과 동일) ---
+SYSTEM_PROMPT_CLASSIFY = """
+당신은 연세대학교 공지사항을 분류하는 AI입니다. 
+주어진 [공지 텍스트]를 읽고, 다음 7가지 카테고리 중 가장 적합한 해시태그 1개만 반환해 주세요:
+[#학사, #장학, #취업, #행사, #공모전/대회, #국제교류, #일반]
+
+규칙:
+1. 오직 7개의 태그 중 하나만 선택해야 합니다.
+2. 추가 설명 없이 해시태그만 반환해야 합니다. (예: #학사)
+3. 2개 이상 해당되면, 가장 중요하다고 생각되는 1개만 반환합니다.
+"""
+
+# --- 2단계: 추출 프롬프트 (신규 추가 및 수정) ---
+# 기존 SYSTEM_PROMPT_EXTRACT_JSON 삭제
+
+# [신규] #장학 프롬프트
+PROMPT_SCHOLARSHIP = """
+당신은 '장학금' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
+주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+
+[공지 텍스트]
+{notice_text}
+[/공지 텍스트]
+
+추출 규칙:
+1.  `target_audience_raw`: 원본 텍스트의 '지원 자격'을 그대로 요약합니다 (Fallback 용도).
+2.  `qualifications`:
+    * `gpa_min`: "4.3 만점에 3.0" 또는 "3.0/4.3" 등의 내용을 발견하면, 최소 학점 숫자만 추출합니다 (예: "3.0").
+    * `grade_level`: "1학년", "2~4학년", "학부 재학생", "대학원생" 등 학년/학적 정보를 추출합니다.
+    * `income_status`: "가계 곤란", "소득분위 8분위 이하" 등 소득 관련 정보를 추출합니다.
+    * `department`: "경영대학", "AI·ICT 분야" 등 특정 단과대학/학과 정보를 추출합니다.
+    * `other`: 위의 4가지 외 다른 핵심 자격 (예: '2026-1학기 파견 예정자')
+3.  `key_date_type`: 날짜의 유형을 '신청 마감일' 또는 '신청 기간'으로 명시합니다.
+4.  `key_date`: 장학금 '신청 마감 일시' 또는 '신청 기간'을 텍스트 원본에서 그대로 추출합니다.
+5.  정보가 없는 필드는 "N/A"로 처리합니다.
+
+JSON 출력:
+{{
+  "target_audience_raw": "[지원 자격 원본 텍스트 요약]",
+  "qualifications": {{
+    "gpa_min": "[추출된 최소 학점 (예: '3.0')]",
+    "grade_level": "[대상 학년 (예: '1학년', '학부 재학생')]",
+    "income_status": "[소득 요건 (예: '가계 곤란 학생', '8분위 이하')]",
+    "department": "[대상 학과 (예: '상경대학')]",
+    "other": "[기타 자격 (예: '2026-1학기 파견 예정자')]"
+  }},
+  "key_date_type": "[날짜 유형]",
+  "key_date": "[핵심 날짜 (예: '10/19(일)')]"
+}}
+"""
+
+# [신규] #취업 프롬프트
+PROMPT_RECRUITMENT = """
+당신은 '채용 및 취업' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
+주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+
+[공지 텍스트]
+{notice_text}
+[/공지 텍스트]
+
+추출 규칙:
+1.  `target_audience_raw`: 원본 텍스트의 '지원 자격'을 그대로 요약합니다.
+2.  `qualifications`:
+    * `degree`: "교육학 박사", "졸업(예정)자", "석사 과정생", "학부 3학년 이상" 등 학력/학위 정보를 추출합니다.
+    * `military_service`: "군필자", "전문연구요원", "군필 또는 면제" 등 병역 관련 정보를 추출합니다.
+    * `gender`: "여학생 대상 멘토링" 등 성별 관련 요건이 있다면 추출합니다.
+    * `language_requirements_text`: 본문에서 요구하는 모든 공인 어학 성적 요건 (TOEIC, OPIc 등)을 **하나의 텍스트 필드**로 묶어서 추출합니다 (예: "TOEIC 850점 이상", "영어 능통자 우대").
+    * `other`: 위의 4가지 외 다른 핵심 자격 (예: '이공계 전공자')
+3.  `key_date_type`: 날짜의 유형을 '접수 마감일', '채용 기간', '설명회 일시' 중 가장 핵심적인 것으로 명시합니다.
+4.  `key_date`: 채용 '접수 마감 일시' 또는 '특강/설명회 일시'를 텍스트 원본에서 그대로 추출합니다.
+5.  정보가 없는 필드는 "N/A"로 처리합니다.
+
+JSON 출력:
+{{
+  "target_audience_raw": "[지원 자격 원본 텍스트 요약 (예: 이공계 여성 학부생)]",
+  "qualifications": {{
+    "degree": "[필요 학력 (예: '교육학 박사', '학부 재학생')]",
+    "military_service": "[병역 요건 (예: '군필 또는 면제')]",
+    "gender": "[대상 성별 (예: '여학생')]",
+    "language_requirements_text": "[하나로 묶인 어학 요건 텍스트 (예: 'TOEIC 800점 이상')]"
+  }},
+  "key_date_type": "[날짜 유형]",
+  "key_date": "[핵심 날짜 (예: '10/10(금) 17시')]"
+}}
+"""
+
+# [신규] #국제교류 프롬프트
+PROMPT_INTERNATIONAL = """
+당신은 '국제교류 프로그램' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
+주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+
+[공지 텍스트]
+{notice_text}
+[/공지 텍스트]
+
+추출 규칙:
+1.  `target_audience_raw`: 원본 텍스트의 '지원 자격'을 그대로 요약합니다 (Fallback 용도).
+2.  `qualifications`:
+    * `gpa_min`: "4.3 만점에 3.0" 등의 내용을 발견하면, 최소 학점 숫자만 추출합니다 (예: "3.0").
+    * `grade_level`: "학부 2~7학기 이수자" 등 학년/학적 정보를 추출합니다.
+    * `language_requirements_text`: 본문에서 요구하는 **모든** 공인 어학 성적 요건 (TOEFL, TEPS, JLPT, HSK 등)을 **하나의 텍스트 필드**로 묶어서 추출합니다 (예: "TOEFL iBT 100점 이상 또는 IELTS 7.0 이상", "JLPT N2 이상").
+    * `other`: 위의 3가지 외 다른 핵심 자격 (예: 'CAMPUS Asia 사업 참여 학과')
+3.  `key_date_type`: 날짜의 유형을 '모집 마감일' 또는 '신청 기간'으로 명시합니다.
+4.  `key_date`: '모집 마감 일시'를 텍스트 원본에서 그대로 추출합니다.
+5.  정보가 없는 필드는 "N/A"로 처리합니다.
+
+JSON 출력:
+{{
+  "target_audience_raw": "[지원 자격 원본 텍스트 요약 (예: CAMPUS Asia 사업 참여 학과)]",
+  "qualifications": {{
+    "gpa_min": "[추출된 최소 학점 (예: '3.0')]",
+    "grade_level": "[대상 학년 (예: '학부 2~7학기 이수자')]",
+    "language_requirements_text": "[하나로 묶인 어학 요건 텍스트 (예: 'TOEIC 850점 또는 TOEFL iBT 90점 이상')]"
+  }},
+  "key_date_type": "모집 마감일",
+  "key_date": "[모집 마감 일시 (예: '~10/10(금) 17시')]"
+}}
+"""
+
+# [신규] #학사, #행사, #공모전/대회, #일반 을 위한 단순 프롬프트
+PROMPT_SIMPLE_DEFAULT = """
+당신은 '{category_name}' 공지사항에서 '대상'과 '핵심 날짜'를 추출하는 AI입니다.
+주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 정보를 추출하세요.
+
+[공지 텍스트]
+{notice_text}
+[/공지 텍스트]
+
+추출 규칙:
+1.  `target_audience`: 공모전 '참가 자격' ('본교 학부생'), 행사 '참여 대상' ('학부생 누구나'), 학사 '적용 대상' ('졸업예정자'), 일반 '관련 대상' ('전체 구성원')을 추출합니다.
+2.  `key_date_type`: 날짜의 유형을 명시합니다 (예: '접수 마감일', '행사 일시', '신청 기간', '이수 기간').
+3.  `key_date`: 공지사항에서 가장 중요한 날짜(마감일, 행사일 등)를 원본 텍스트 그대로 추출합니다.
+4.  정보가 없는 필드는 "N/A"로 처리합니다.
+
+JSON 출력:
+{{
+  "target_audience": "[참가/참여/적용/관련 대상 (예: '본교 학부생', '졸업예정자')]",
+  "key_date_type": "[날짜 유형 (예: '접수 마감일')]",
+  "key_date": "[핵심 날짜 (예: '11월 12일(수)까지')]"
+}}
+"""
+
+# [신규] 프롬프트 선택을 위한 매핑
+EXTRACTION_PROMPT_MAP = {
+    "#장학": PROMPT_SCHOLARSHIP,
+    "#취업": PROMPT_RECRUITMENT,
+    "#국제교류": PROMPT_INTERNATIONAL,
+    # 나머지는 단순/기본 프롬프트 사용
+    "#학사": PROMPT_SIMPLE_DEFAULT,
+    "#행사": PROMPT_SIMPLE_DEFAULT,
+    "#공모전/대회": PROMPT_SIMPLE_DEFAULT,
+    "#일반": PROMPT_SIMPLE_DEFAULT,
 }
 
-def _clean_json_text(t: str) -> str:
+
+def call_gemini_api(system_prompt, user_prompt):
     """
-    LLM이 반환한 텍스트에서 ```json ... ``` 또는 ``` ... ``` 펜스 제거
+    Helper function to call the Gemini API.
     """
-    if not t:
-        return t
-    # ```json ... ``` 패턴 찾기
-    m = re.search(r"```json\s*(.*?)\s*```", t, re.S | re.I)
-    if m:
-        return m.group(1).strip()
-    # ``` ... ``` 패턴 찾기
-    m = re.search(r"```\s*(.*?)\s*```", t, re.S)
-    if m:
-        return m.group(1).strip()
-    return t.strip()
-
-def _strip_html(text: str) -> str:
-    """HTML 태그 제거"""
-    if not text:
-        return ""
-    # 간단한 HTML 태그 제거
-    text = re.sub(r'<[^>]+>', ' ', text)
-    # HTML 엔티티 변환
-    text = text.replace('&nbsp;', ' ').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
-    # 연속 공백 정리
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip()
-
-def _remove_boilerplate(text: str) -> str:
-    """불필요한 정형 문구 제거"""
-    for pattern in _BOILERPLATE_PATTERNS:
-        text = re.sub(pattern, '', text, flags=re.IGNORECASE | re.MULTILINE)
-    return text.strip()
-
-def _split_sentences(text: str) -> List[str]:
-    """한국어 문장 분리"""
-    # 간단한 문장 분리 (개선 가능)
-    sentences = re.split(r'[.!?]\s+', text)
-    return [s.strip() for s in sentences if s.strip() and len(s.strip()) > 10]
-
-def _extract_keywords(title: str) -> List[str]:
-    """제목에서 핵심 키워드 추출"""
-    words = re.findall(r'[가-힣]+|[A-Za-z]+|\d+', title)
-    keywords = [w for w in words if len(w) > 1 and w not in _KOREAN_STOPWORDS]
-    return keywords[:5]  # 상위 5개만
-
-def _normalize_punctuation(text: str) -> str:
-    """문장부호 정규화"""
-    # 연속된 마침표/느낌표/물음표 정리
-    text = re.sub(r'[.!?]+', '.', text)
-    # 문장 끝에 마침표 추가 (없는 경우)
-    if text and not text[-1] in '.!?':
-        text += '.'
-    return text
-
-def _truncate_to_limit(text: str, max_chars: int, max_sentences: int) -> str:
-    """문자수/문장수 제한 적용"""
-    sentences = _split_sentences(text)
-    
-    # 문장수 제한
-    sentences = sentences[:max_sentences]
-    
-    result = ""
-    for sent in sentences:
-        test_result = result + (" " if result else "") + sent
-        if not sent.endswith(('.', '!', '?')):
-            test_result += '.'
-        
-        if len(test_result) > max_chars:
-            # 현재 문장이 너무 길면 이전까지만 사용
-            if result:
-                return result
-            # 첫 문장도 너무 길면 단어 단위로 자르기
-            words = sent.split()
-            truncated = ""
-            for word in words:
-                test = truncated + (" " if truncated else "") + word
-                if len(test + "...") <= max_chars:
-                    truncated = test
-                else:
-                    break
-            return truncated + "..." if truncated else sent[:max_chars-3] + "..."
-        
-        result = test_result
-    
-    return result
-
-def _qual_to_dict(q: Any) -> Dict[str, Any]:
-    """
-    qualification 값을 dict로 정규화
-    - dict면 그대로 반환
-    - str이면 {"raw": str} 형태로 변환
-    - 기타는 빈 dict
-    """
-    if isinstance(q, dict):
-        return q
-    if isinstance(q, str):
-        s = q.strip()
-        if s:
-            return {"raw": s}
-        return {}
-    return {}
-
-def _iso_or_none(s: Optional[str]) -> Optional[str]:
-    if not s:
-        return None
     try:
-        dt.date.fromisoformat(s)
-        return s
-    except Exception:
+        chat_session = model.start_chat(history=[])
+        response = chat_session.send_message(
+            f"SYSTEM_PROMPT: {system_prompt}\n\nUSER_PROMPT: {user_prompt}"
+        )
+        return response.text
+    except Exception as e:
+        print(f"Error calling Gemini API: {e}")
         return None
 
-def _norm_category(cat: Optional[str]) -> str:
-    if not cat:
-        return "기타"
-    return cat if cat in _ALLOWED_CATS else "기타"
-
-def _norm_hashtags(tags: List[str]) -> List[str]:
+def clean_json_string(text):
     """
-    화이트리스트 필터링, #일반 단독 규칙, 중복 제거, 정렬.
+    Cleans the model's output to extract a valid JSON string.
     """
-    # 화이트리스트 필터링 + 공백 제거
-    tags = [t.strip() for t in tags if t and t.strip() in _ALLOWED_HASHTAGS]
+    # Find the first '{' and the last '}'
+    start_index = text.find('{')
+    end_index = text.rfind('}')
     
-    # 중복 제거 (입력 순서 보존)
-    seen, uniq = set(), []
-    for t in tags:
-        if t not in seen:
-            seen.add(t)
-            uniq.append(t)
-    tags = uniq
-    
-    # #일반 규칙: 다른 태그가 있으면 #일반 제거
-    if "#일반" in tags:
-        others = [t for t in tags if t != "#일반"]
-        if len(others) > 0:
-            tags = others
-        else:
-            tags = ["#일반"]
-    
-    # 사전 정의 순서로 정렬
-    tags.sort(key=lambda x: _HASHTAG_ORDER.get(x, 999))
-    
-    # 빈 리스트면 #일반 반환
-    if not tags:
-        return ["#일반"]
-    
-    return tags
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# 3) 공개 함수: 공지 구조화 추출
-# ───────────────────────────────────────────────────────────────────────────────
-def extract_notice_info(body_text: str, title: Optional[str] = None) -> Dict[str, Any]:
-    """
-    공지 본문(+제목)을 LLM에 전달하여 구조화된 정보를 추출한다.
-    반환 dict 키:
-      - category_ai: str ("장학|채용|행사|수업|행정|기타")
-      - start_date_ai: str | None (YYYY-MM-DD)
-      - end_date_ai: str | None (YYYY-MM-DD)
-      - qualification_ai: dict
-    """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    model = _get_model()
-
-    prompt = f"""
-당신은 대학 공지 텍스트에서 핵심 정보를 구조화하는 시스템입니다.
-출력은 반드시 JSON이며, 아래 스키마를 엄격히 따르세요.
-- category: "장학|채용|행사|수업|행정|기타" 중 하나
-- start_date / end_date: YYYY-MM-DD (모르면 null)
-- qualification: 지원요건 핵심을 JSON으로 요약(가능하면 grade/gpa/lang 키 사용, 없으면 비워둠)
-
-[제목]
-{title or ""}
-
-[본문]
-{(body_text or "")[:6000]}
-    """.strip()
-
-    resp = model.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(
-            response_mime_type="application/json"
-        ),
-    )
-
-    try:
-        raw = _clean_json_text(resp.text)
-        data = ExtractSchema.model_validate_json(raw)
-    except ValidationError as ve:
-        raise RuntimeError(f"LLM structured output validation failed: {ve}") from ve
-
-    # 최소 후처리(안정화)
-    cat = _norm_category(data.category)
-    s   = _iso_or_none(data.start_date)
-    e   = _iso_or_none(data.end_date)
-    qual = _qual_to_dict(data.qualification)
-
-    return {
-        "category_ai": cat,
-        "start_date_ai": s,
-        "end_date_ai": e,
-        "qualification_ai": qual,
-    }
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# 4) 공개 함수: 실시간 자격 검증
-# ───────────────────────────────────────────────────────────────────────────────
-def verify_eligibility_ai(qualification_json: Dict[str, Any], user_profile: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    qualification_json(공지의 AI 요건 요약)과 user_profile(사용자 입력)을 비교해
-    적합 여부를 판단한다.
-    반환:
-      { "eligible": bool, "reason": "..." }
-    """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    model = _get_model()
-
-    prompt = f"""
-[지원요건(JSON)]
-{qualification_json}
-
-[사용자 프로필(JSON)]
-{user_profile}
-
-위 두 정보를 비교하여 지원 가능 여부를 판단하세요.
-반드시 다음 JSON 스키마로만 답하십시오:
-{{
-  "eligible": true/false,
-  "reason": "간단하고 구체적인 근거"
-}}
-    """.strip()
-
-    resp = model.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(
-            response_mime_type="application/json"
-        ),
-    )
-
-    try:
-        raw = _clean_json_text(resp.text)
-        data = VerifySchema.model_validate_json(raw)
-    except ValidationError as ve:
-        raise RuntimeError(f"LLM verify structured output validation failed: {ve}") from ve
-
-    return {"eligible": data.eligible, "reason": data.reason}
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# 5) 공개 함수: 제목 기반 해시태그 추출
-# ───────────────────────────────────────────────────────────────────────────────
-def extract_hashtags_from_title(title: str) -> Dict[str, List[str]]:
-    """
-    공지 제목을 소거법으로 분석하여 해시태그를 추출한다.
-    
-    반환 예:
-      {"hashtags": ["#학사"]}
-      {"hashtags": ["#취업", "#국제교류"]}
-      {"hashtags": ["#일반"]}
-    """
-    if not GEMINI_API_KEY:
-        raise RuntimeError("GEMINI_API_KEY is not set")
-    model = _get_model()
-
-    prompt = f"""
-너는 연세대학교 공지사항 제목을 '소거법'으로 분석해 해시태그를 선택하는 AI 분석가다.
-반드시 아래 [카테고리 목록] 중에서만 선택하고, 결과는 JSON(키: "hashtags")으로만 반환하라.
-
-[카테고리 목록]
-- 학사: 수강신청, 졸업, 성적, 등록금, 각종 시험, 재입학, 휴학, 복학
-- 장학: 교내/외 장학금, 학자금 대출, 근로장학생
-- 행사: 특강, 워크숍, 설명회, 캠페인
-- 취업: 채용, 인턴십, 창업 지원
-- 국제교류: 교환학생, 해외 파견, 국제 계절학기
-- 공모전/대회: 교내/외 공모전, 경진대회
-- 일반: 다른 특정 카테고리에 속하지 않는 모든 공지
-
-[작업 절차]
-1) [분석]: 제목의 핵심 주제를 파악한다. (대괄호 [...] 는 주체 표시이므로 내용 자체로 분류하지 않는다)
-2) [소거]: 위 카테고리 중 명백히 관련 없는 것을 제거한다.
-3) [선택]: 남은 카테고리에서 가장 적합한 모든 태그를 선택한다.
-4) [최종 판단]:
-   - '#일반'을 제외한 다른 모든 카테고리가 소거되면 '#일반'만 선택한다.
-   - '#일반'은 다른 태그와 함께 사용하지 않는다.
-5) [출력]: 선택된 태그를 "#카테고리명" 형식으로 JSON에 담아라. 목록에 없는 태그를 만들지 말라.
-
-[요청 제목]
-{title}
-    """.strip()
-
-    resp = model.generate_content(
-        prompt,
-        generation_config=genai.types.GenerationConfig(
-            response_mime_type="application/json"
-        ),
-    )
-
-    try:
-        raw = _clean_json_text(resp.text)
-        data = HashtagSchema.model_validate_json(raw)
-    except ValidationError as ve:
-        raise RuntimeError(f"LLM hashtag structured output validation failed: {ve}") from ve
-
-    # 후처리: 화이트리스트/일반 규칙/중복 제거/정렬
-    tags = _norm_hashtags(data.hashtags)
-    
-    return {"hashtags": tags}
-
-
-# ───────────────────────────────────────────────────────────────────────────────
-# 6) 새 함수: 요약 생성
-# ───────────────────────────────────────────────────────────────────────────────
-def generate_brief_summary(
-    title: str,
-    text: str,
-    locale: str = 'ko',
-    max_sentences: int = None,
-    max_chars: int = None
-) -> str:
-    """
-    공지의 핵심 3포인트를 간결하게 요약한다.
-    
-    Args:
-        title: 공지 제목
-        text: 요약할 텍스트 (summary_raw 또는 body_text)
-        locale: 언어 설정 (기본 'ko')
-        max_sentences: 최대 문장 수 (기본값은 환경변수)
-        max_chars: 최대 문자 수 (기본값은 환경변수)
-    
-    Returns:
-        요약 문자열 (비어있을 수 없음, 실패시에도 최소 1문장 생성)
-    """
-    if max_sentences is None:
-        max_sentences = SUMMARY_MAX_SENTENCES
-    if max_chars is None:
-        max_chars = SUMMARY_MAX_CHARS
-    
-    # 입력 전처리
-    title = (title or "").strip()
-    text = (text or "").strip()
-    
-    # HTML 제거 및 정리
-    text = _strip_html(text)
-    text = _remove_boilerplate(text)
-    
-    # 너무 짧은 입력 처리
-    if not title and not text:
-        logger.info("Empty input for summary generation")
-        return "요약 정보가 없습니다."
-    
-    if not text or len(text) < 20:
-        # 텍스트가 너무 짧으면 제목 기반 요약
-        logger.info(f"Text too short, using title-based summary")
-        if title:
-            summary = title
-            if not summary.endswith(('.', '!', '?')):
-                summary += '.'
-            return _truncate_to_limit(summary, max_chars, 1)
-        return "내용이 부족하여 요약할 수 없습니다."
-    
-    # LLM 경로 (환경변수로 제어)
-    if AI_ENABLE_SUMMARY and GEMINI_API_KEY:
-        try:
-            summary = _generate_summary_llm(title, text, locale, max_sentences, max_chars)
-            if summary:
-                logger.debug(f"LLM summary generated: {len(summary)} chars")
-                return summary
-        except Exception as e:
-            logger.warning(f"LLM summary generation failed: {e}")
-    
-    # 룰 기반 폴백
-    logger.info("Using rule-based fallback for summary")
-    return _generate_summary_fallback(title, text, max_sentences, max_chars)
-
-
-def _generate_summary_llm(
-    title: str,
-    text: str,
-    locale: str,
-    max_sentences: int,
-    max_chars: int,
-    max_retries: int = 3
-) -> Optional[str]:
-    """LLM을 사용한 요약 생성"""
-    model = _get_model()
-    
-    # 입력 텍스트 제한 (토큰 절약)
-    text_for_llm = text[:3000] if len(text) > 3000 else text
-    
-    prompt = f"""
-대학 공지사항을 {max_sentences}문장, {max_chars}자 이내로 요약하세요.
-
-요구사항:
-1. 가장 중요한 정보 {max_sentences}가지만 포함
-2. 날짜, 기한, 장소, 대상, 금액 등 구체적 정보 우선
-3. 불필요한 문구 금지: "자세한 내용은", "문의처", "홈페이지 참고" 등
-4. 각 문장은 핵심만 간결하게
-5. 한국어로 자연스럽게 작성
-
-제목: {title}
-본문: {text_for_llm}
-
-JSON 형식으로 요약을 반환하세요:
-{{"summary": "요약 내용"}}
-    """.strip()
-    
-    for attempt in range(max_retries):
-        try:
-            resp = model.generate_content(
-                prompt,
-                generation_config=genai.types.GenerationConfig(
-                    response_mime_type="application/json",
-                    temperature=0.3,  # 일관성 있는 요약
-                    max_output_tokens=200,
-                ),
-                request_options={"timeout": AI_TIMEOUT_S}
-            )
-            
-            raw = _clean_json_text(resp.text)
-            data = SummarySchema.model_validate_json(raw)
-            summary = data.summary
-            
-            # 후처리 및 검증
-            summary = _normalize_punctuation(summary)
-            summary = _truncate_to_limit(summary, max_chars, max_sentences)
-            
-            if summary and len(summary) > 10:  # 최소 길이 검증
-                return summary
-                
-        except Exception as e:
-            if "429" in str(e) or "quota" in str(e).lower():
-                logger.warning(f"LLM quota exceeded, falling back")
-                return None
-            if attempt == max_retries - 1:
-                logger.warning(f"LLM summary failed after {max_retries} attempts: {e}")
-            else:
-                time.sleep(1)  # 재시도 전 대기
-    
+    if start_index != -1 and end_index != -1 and end_index > start_index:
+        json_part = text[start_index : end_index + 1]
+        # Remove common markdown artifacts like "```json\n" and "\n```"
+        json_part = re.sub(r'^```json\s*', '', json_part, flags=re.IGNORECASE | re.MULTILINE)
+        json_part = re.sub(r'\s*```$', '', json_part, flags=re.IGNORECASE | re.MULTILINE)
+        return json_part.strip()
     return None
 
+# --- process_notice_content 함수 (수정됨) ---
+async def process_notice_content(title: str, body: str):
+    """
+    Processes notice content using a 2-step AI chain:
+    1. Classify hashtag
+    2. Extract structured JSON based on the hashtag
+    """
+    full_text = f"제목: {title}\n\n본문: {body}"
+    ai_extracted_json = None
+    hashtag = None
+    
+    # --- Step 1: Classify Hashtag ---
+    try:
+        hashtag_response = call_gemini_api(SYSTEM_PROMPT_CLASSIFY, full_text)
+        if hashtag_response:
+            # 해시태그가 여러 개 반환될 경우 (예: #장학, #국제교류) 첫 번째 것을 선택
+            hashtag = hashtag_response.strip().split(',')[0].strip()
+            if not hashtag.startswith('#'):
+                hashtag = None # 유효하지 않은 응답
+    except Exception as e:
+        print(f"Error in Step 1 (Classification): {e}")
+        hashtag = None # 실패 시
+    
+    if not hashtag or hashtag not in EXTRACTION_PROMPT_MAP:
+        hashtag = "#일반" # 분류 실패 시 '일반'으로 강제 지정
 
-def _generate_summary_fallback(
-    title: str,
-    text: str,
-    max_sentences: int,
-    max_chars: int
-) -> str:
-    """규칙 기반 폴백 요약 생성"""
-    
-    # 1. 제목에서 키워드 추출
-    keywords = _extract_keywords(title) if title else []
-    
-    # 2. 본문에서 정보 밀도 높은 문장 선택
-    sentences = _split_sentences(text)
-    if not sentences:
-        # 문장 분리 실패시 첫 부분만 사용
-        summary = text[:max_chars-3] + "..." if len(text) > max_chars else text
-        return _normalize_punctuation(summary)
-    
-    # 3. 키워드 관련성 + 숫자/날짜 포함 여부로 문장 점수 계산
-    scored_sentences = []
-    for sent in sentences[:10]:  # 처음 10문장만 고려
-        score = 0
-        sent_lower = sent.lower()
+    # --- Step 2: Extract JSON based on Hashtag ---
+    try:
+        # [수정] 해시태그에 맞는 프롬프트를 맵에서 선택
+        # .get()을 사용하여 기본 프롬프트를 안전하게 참조
+        extraction_prompt_template = EXTRACTION_PROMPT_MAP.get(hashtag, PROMPT_SIMPLE_DEFAULT)
         
-        # 키워드 매칭
-        for kw in keywords:
-            if kw.lower() in sent_lower:
-                score += 2
-        
-        # 중요 정보 패턴
-        if re.search(r'\d{4}[-년./]\d{1,2}[-월./]\d{1,2}', sent):  # 날짜
-            score += 3
-        if re.search(r'\d+[:시]\d+분?', sent):  # 시간
-            score += 2
-        if re.search(r'\d+[명원]', sent):  # 인원
-            score += 2
-        if re.search(r'\d+[만천백십]?\s?원', sent):  # 금액
-            score += 3
-        if any(word in sent for word in ['신청', '접수', '마감', '기한', '대상', '자격']):
-            score += 2
-        
-        # 문장 길이 페널티 (너무 긴 문장 회피)
-        if len(sent) > 100:
-            score -= 1
-        
-        scored_sentences.append((score, sent))
-    
-    # 4. 점수 높은 순으로 정렬하되, 원문 순서 유지
-    scored_sentences.sort(key=lambda x: (-x[0], sentences.index(x[1])))
-    
-    # 5. 상위 문장 선택 및 조합
-    selected = []
-    total_length = 0
-    
-    for score, sent in scored_sentences:
-        if len(selected) >= max_sentences:
-            break
-        
-        sent = _normalize_punctuation(sent)
-        test_length = total_length + len(sent) + (1 if selected else 0)
-        
-        if test_length <= max_chars:
-            selected.append(sent)
-            total_length = test_length
-    
-    # 6. 결과 조합
-    if selected:
-        summary = ' '.join(selected)
-    else:
-        # 아무것도 선택되지 않은 경우 제목 + 첫 문장
-        if title:
-            summary = title
-            if sentences and len(summary) < max_chars - 20:
-                first_sent = _normalize_punctuation(sentences[0])
-                if len(summary) + len(first_sent) + 2 <= max_chars:
-                    summary += ". " + first_sent
+        # [수정] 단순 프롬프트의 경우, {category_name}을 동적으로 삽입
+        if extraction_prompt_template == PROMPT_SIMPLE_DEFAULT:
+            extraction_prompt = extraction_prompt_template.format(
+                category_name=hashtag,
+                notice_text=full_text
+            )
         else:
-            summary = _normalize_punctuation(sentences[0]) if sentences else "요약할 수 없습니다."
-    
-    return _truncate_to_limit(summary, max_chars, max_sentences)
+            # 정교한 프롬프트는 {notice_text}만 포맷팅
+            extraction_prompt = extraction_prompt_template.format(notice_text=full_text)
+            
+        json_string_response = call_gemini_api(extraction_prompt, full_text)
+        
+        if json_string_response:
+            cleaned_json_str = clean_json_string(json_string_response)
+            if cleaned_json_str:
+                ai_extracted_json = json.loads(cleaned_json_str)
+            else:
+                print(f"Could not find valid JSON in response for: {title}")
+                ai_extracted_json = {"error": "Failed to parse JSON from AI response."}
+        else:
+            ai_extracted_json = {"error": "AI response was empty."}
+            
+    except json.JSONDecodeError as e:
+        print(f"JSONDecodeError: {e} - Response was: {json_string_response}")
+        ai_extracted_json = {"error": "Invalid JSON format received from AI."}
+    except Exception as e:
+        print(f"Error in Step 2 (Extraction): {e}")
+        ai_extracted_json = {"error": f"An unexpected error occurred during extraction: {e}"}
+
+    return hashtag, ai_extracted_json
+
+# --- 기존 테스트용 main (수정됨) ---
+if __name__ == "__main__":
+    import asyncio
+
+    async def main_test():
+        # 테스트 1: #장학 (정교한 추출)
+        title1 = "[Notice] 2025 Fall Semester Underwood Legacy Scholarship Notice"
+        body1 = """
+        1. Number of Recipients: 4 students per semester
+        2. Scholarship Amount: KRW 2,000,000 per student
+        3. Eligibility Requirements
+           - Completion of at least four semesters of enrollment
+           - Cumulative GPA of 3.5 or higher (on a 4.3 scale)
+           - Enrollment in at least 12 credits in the preceding semester
+        4. Application Timeline
+           - Application Deadline: Oct 17 (Fri) 17:00, 2025 KST (Late submissions will NOT be accepted)
+        """
+        
+        print("--- 테스트 1: #장학 (정교한 추출) ---")
+        tag1, json1 = await process_notice_content(title1, body1)
+        print(f"분류된 태그: {tag1}")
+        print(f"추출된 JSON: {json.dumps(json1, indent=2, ensure_ascii=False)}\n")
+
+        # 테스트 2: #국제교류 (정교한 추출 + 어학)
+        title2 = "[CAMPUS Asia] 2025년 하반기 태국 출라롱콘대 단기교류 파견학생 모집"
+        body2 = """
+        [CAMPUS Asia사업] 2025년 하반기 CAMPUS Asia 사업 태국 출라롱콘대 단기교류 파견학생 모집 안내
+        1. 지원 자격:
+           - 학부 2~7학기 이수자
+           - 총 평량평균 3.0/4.3 이상
+           - 어학성적: TOEIC 850점 또는 TOEFL iBT 90점 이상
+           - CAMPUS Asia 사업 참여 학과(경영학과, 경제학부) 학생
+        2. 마감 기한: ~10/10(금) 17시까지
+        """
+        print("--- 테스트 2: #국제교류 (정교한 추출) ---")
+        tag2, json2 = await process_notice_content(title2, body2)
+        print(f"분류된 태그: {tag2}")
+        print(f"추출된 JSON: {json.dumps(json2, indent=2, ensure_ascii=False)}\n")
+
+        # 테스트 3: #행사 (단순 추출)
+        title3 = "26학년도 전기 디지털애널리틱스융합협동과정 입학설명회 개최"
+        body3 = """
+        연세대학교 인공지능융합대학 디지털애널리틱스융합협동과정에서 26학년도 전기 입학설명회를 개최합니다.
+        - 대상: 본교 학부생, 대학원생 및 외부 관심자 누구나
+        - 일시 : 9월 29일(월) 오후 2시
+        - 장소 : 온라인(Zoom) 및 오프라인(연세대학교 제1공학관 A528호) 동시 진행
+        """
+        print("--- 테스트 3: #행사 (단순 추출) ---")
+        tag3, json3 = await process_notice_content(title3, body3)
+        print(f"분류된 태그: {tag3}")
+        print(f"추출된 JSON: {json.dumps(json3, indent=2, ensure_ascii=False)}\n")
+
+    asyncio.run(main_test())

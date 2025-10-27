@@ -1,47 +1,59 @@
 -- 005_search_fts.sql
--- 목적: notices의 제목/AI요약을 FTS 색인(tsvector)으로 관리하고 GIN 인덱스를 생성
--- 주: 한국어 완벽 형태소는 아님(간단 토크나이즈) → 보조 랭킹/AND·OR 질의용으로 충분
+-- PostgreSQL Full-Text Search implementation for notices table
+-- Uses title (A), hashtags (B), and body_text (C) for searching
 
 BEGIN;
 
--- 1) tsvector 컬럼 추가 (없으면 추가)
-ALTER TABLE notices
-ADD COLUMN IF NOT EXISTS ts_ko tsvector;
+-- 1. Add tsvector search column if not exists
+ALTER TABLE notices ADD COLUMN IF NOT EXISTS search_vector tsvector;
+COMMENT ON COLUMN notices.search_vector IS 'Full-text search vector (title A, hashtags B, body C)';
 
--- 2) 초기값 백필 (title + summary_ai)
-UPDATE notices
-SET ts_ko = to_tsvector(
-  'simple',
-  coalesce(title, '') || ' ' || coalesce(summary_ai, '')
-);
-
--- 3) 변경 시 자동 갱신 함수
-CREATE OR REPLACE FUNCTION notices_ts_ko_update()
-RETURNS trigger AS $$
+-- 2. Create/Replace function to automatically update the search vector
+CREATE OR REPLACE FUNCTION update_search_vector()
+RETURNS TRIGGER AS $$
 BEGIN
-  NEW.ts_ko := to_tsvector(
-    'simple',
-    coalesce(NEW.title, '') || ' ' || coalesce(NEW.summary_ai, '')
-  );
+  -- Assign weights: Title 'A', Hashtags 'B', Body 'C'
+  NEW.search_vector :=
+    setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
+    setweight(to_tsvector('simple',
+      CASE
+        WHEN NEW.hashtags_ai IS NOT NULL THEN array_to_string(NEW.hashtags_ai, ' ')
+        ELSE ''
+      END
+    ), 'B') ||
+    setweight(to_tsvector('simple', coalesce(NEW.body_text, '')), 'C');
   RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
--- 4) 트리거: INSERT/UPDATE 시 ts_ko 자동 생성/갱신
-DROP TRIGGER IF EXISTS trg_notices_ts_ko_update ON notices;
-CREATE TRIGGER trg_notices_ts_ko_update
-BEFORE INSERT OR UPDATE OF title, summary_ai ON notices
-FOR EACH ROW
-EXECUTE FUNCTION notices_ts_ko_update();
+-- 3. Create trigger to automatically update search_vector on insert or update
+DROP TRIGGER IF EXISTS trg_update_search_vector ON notices;
+CREATE TRIGGER trg_update_search_vector
+BEFORE INSERT OR UPDATE OF title, hashtags_ai, body_text ON notices
+FOR EACH ROW EXECUTE FUNCTION update_search_vector();
 
--- 5) GIN 인덱스 생성
-CREATE INDEX IF NOT EXISTS idx_notices_ts_ko
-ON notices USING GIN (ts_ko);
+-- 4. Create GIN index for high-performance search
+CREATE INDEX IF NOT EXISTS idx_notices_search_vector
+ON notices USING GIN(search_vector);
+
+-- 5. Backfill existing data (Important: Run this to index old notices)
+--    Run this separately if you have a large table.
+UPDATE notices
+SET search_vector =
+  setweight(to_tsvector('simple', coalesce(title, '')), 'A') ||
+  setweight(to_tsvector('simple',
+    CASE
+      WHEN hashtags_ai IS NOT NULL THEN array_to_string(hashtags_ai, ' ')
+      ELSE ''
+    END
+  ), 'B') ||
+  setweight(to_tsvector('simple', coalesce(body_text, '')), 'C')
+WHERE search_vector IS NULL; -- Only update rows that haven't been indexed
 
 COMMIT;
 
--- [롤백 안내]
--- DROP INDEX IF EXISTS idx_notices_ts_ko;
--- DROP TRIGGER IF EXISTS trg_notices_ts_ko_update ON notices;
--- DROP FUNCTION IF EXISTS notices_ts_ko_update();
--- ALTER TABLE notices DROP COLUMN IF EXISTS ts_ko;
+-- [Rollback Guide]
+-- DROP INDEX IF EXISTS idx_notices_search_vector;
+-- DROP TRIGGER IF EXISTS trg_update_search_vector ON notices;
+-- DROP FUNCTION IF EXISTS update_search_vector();
+-- ALTER TABLE notices DROP COLUMN IF EXISTS search_vector;

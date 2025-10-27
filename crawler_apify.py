@@ -1,29 +1,19 @@
-# crawler_apify.py (AI 필드 처리 통합 버전 + 쿼터 안전장치)
+# crawler_apify.py (개선된 normalize 로직)
 import os, time, json, hashlib, requests, psycopg2
 import re
-import datetime as dt
 from datetime import datetime, timezone
 from urllib.parse import urlencode, urlparse, urljoin
-from psycopg2.extras import RealDictCursor, Json
+from psycopg2.extras import RealDictCursor
 from dotenv import load_dotenv
 from typing import Optional, Dict, Any, List
 from html import unescape
 from bs4 import BeautifulSoup
 from colleges import COLLEGES
 
-# AI processor import 추가
-from ai_processor import (
-    extract_hashtags_from_title,
-    extract_notice_info,
-)
-
 load_dotenv(encoding="utf-8")
 
 APIFY_TOKEN = os.getenv("APIFY_TOKEN")
 DATABASE_URL = os.getenv("DATABASE_URL")
-AI_IN_PIPELINE = os.getenv("AI_IN_PIPELINE", "true").lower() == "true"
-AI_SLEEP_SEC = float(os.getenv("AI_SLEEP_SEC", "0.8"))
-AI_MAX_PER_COLLEGE = int(os.getenv("AI_MAX_PER_COLLEGE", "999999"))
 
 if not APIFY_TOKEN:
     raise RuntimeError("APIFY_TOKEN not set")
@@ -33,51 +23,39 @@ if not DATABASE_URL:
 SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json"})
 
-# AI 필드 포함된 UPSERT SQL (main.py와 동일)
 UPSERT_SQL = """
 INSERT INTO notices (
-    college_key, title, url, summary_raw, body_html, body_text, 
-    published_at, source_site, content_hash,
-    category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai
+  college_key, title, url, summary_raw, body_html, body_text, published_at, source_site, content_hash
 ) VALUES (
-    %(college_key)s, %(title)s, %(url)s, %(summary_raw)s, 
-    %(body_html)s, %(body_text)s, %(published_at)s, 
-    %(source_site)s, %(content_hash)s,
-    %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s
+  %(college_key)s, %(title)s, %(url)s, %(summary_raw)s, %(body_html)s, %(body_text)s, %(published_at)s, %(source_site)s, %(content_hash)s
 )
-ON CONFLICT (content_hash) 
-DO UPDATE SET
-    summary_raw = EXCLUDED.summary_raw,
-    body_html = EXCLUDED.body_html,
-    body_text = EXCLUDED.body_text,
-    category_ai = EXCLUDED.category_ai,
-    start_at_ai = EXCLUDED.start_at_ai,
-    end_at_ai = EXCLUDED.end_at_ai,
-    qualification_ai = EXCLUDED.qualification_ai,
-    hashtags_ai = EXCLUDED.hashtags_ai,
-    updated_at = CURRENT_TIMESTAMP
+ON CONFLICT (content_hash) DO UPDATE
+SET
+  title = EXCLUDED.title,
+  url = EXCLUDED.url,
+  summary_raw = EXCLUDED.summary_raw,
+  body_html = EXCLUDED.body_html,
+  body_text = EXCLUDED.body_text,
+  published_at = COALESCE(EXCLUDED.published_at, notices.published_at),
+  source_site = EXCLUDED.source_site,
+  updated_at = CURRENT_TIMESTAMP;
 """
-
-# AI 헬퍼 함수 추가 (main.py와 동일)
-def _to_utc_ts(date_yyyy_mm_dd: str | None):
-    """'YYYY-MM-DD' -> aware UTC midnight; None 유지 (방어적 파싱)"""
-    if not date_yyyy_mm_dd:
-        return None
-    try:
-        d = dt.date.fromisoformat(date_yyyy_mm_dd)
-        return dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc)
-    except Exception:
-        return None
 
 def clean_text(text: Optional[str], max_length: Optional[int] = None) -> str:
     """텍스트 정리 및 정규화"""
     if not text:
         return ""
     
+    # HTML 엔티티 디코딩
     text = unescape(text)
+    
+    # 여러 공백을 하나로 통합
     text = re.sub(r'\s+', ' ', text)
+    
+    # 앞뒤 공백 제거
     text = text.strip()
     
+    # 길이 제한 (필요시)
     if max_length and len(text) > max_length:
         text = text[:max_length-3] + "..."
     
@@ -91,9 +69,11 @@ def extract_text_from_html(html: Optional[str]) -> str:
     try:
         soup = BeautifulSoup(html, 'html.parser')
         
+        # script, style 태그 제거
         for tag in soup(['script', 'style', 'meta', 'link']):
             tag.decompose()
         
+        # 텍스트 추출
         text = soup.get_text(separator=' ', strip=True)
         return clean_text(text)
     except Exception as e:
@@ -107,12 +87,15 @@ def normalize_url(url: Optional[str], base_url: Optional[str] = None) -> str:
     
     url = url.strip()
     
+    # 상대 경로인 경우 base_url과 결합
     if base_url and not url.startswith(('http://', 'https://', '//')):
         url = urljoin(base_url, url)
     
+    # // 로 시작하는 경우 https:// 추가
     if url.startswith('//'):
         url = 'https:' + url
     
+    # URL 유효성 기본 검사
     parsed = urlparse(url)
     if not parsed.scheme or not parsed.netloc:
         return ""
@@ -120,32 +103,38 @@ def normalize_url(url: Optional[str], base_url: Optional[str] = None) -> str:
     return url
 
 def parse_dt(v: Any) -> Optional[datetime]:
-    """다양한 형식의 날짜/시간 파싱"""
+    """다양한 형식의 날짜/시간 파싱 (개선된 버전)"""
     if not v:
         return None
     
+    # datetime 객체인 경우
     if isinstance(v, datetime):
         return v if v.tzinfo else v.replace(tzinfo=timezone.utc)
     
+    # 숫자 타임스탬프인 경우
     if isinstance(v, (int, float)):
         try:
+            # 밀리초 타임스탬프 처리
             ts = v / 1000 if v > 10_000_000_000 else v
             return datetime.fromtimestamp(ts, tz=timezone.utc)
         except (ValueError, OSError):
             return None
     
+    # 문자열인 경우
     if isinstance(v, str):
         v = v.strip()
         if not v:
             return None
         
+        # ISO 형식 처리
         v = v.replace("Z", "+00:00")
         try:
-            dt_obj = datetime.fromisoformat(v)
-            return dt_obj if dt_obj.tzinfo else dt_obj.replace(tzinfo=timezone.utc)
+            dt = datetime.fromisoformat(v)
+            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
         except ValueError:
             pass
         
+        # 다양한 날짜 형식 시도
         date_formats = [
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M",
@@ -165,8 +154,8 @@ def parse_dt(v: Any) -> Optional[datetime]:
         
         for fmt in date_formats:
             try:
-                dt_obj = datetime.strptime(v, fmt)
-                return dt_obj.replace(tzinfo=timezone.utc)
+                dt = datetime.strptime(v, fmt)
+                return dt.replace(tzinfo=timezone.utc)
             except ValueError:
                 continue
     
@@ -176,6 +165,7 @@ def extract_field(item: Dict[str, Any], field_names: List[str],
                   default: str = "") -> Optional[str]:
     """여러 가능한 필드명에서 값 추출"""
     for field in field_names:
+        # 중첩된 필드 처리 (예: "meta.title")
         if '.' in field:
             parts = field.split('.')
             value = item
@@ -193,57 +183,24 @@ def extract_field(item: Dict[str, Any], field_names: List[str],
                 return value
     return default
 
-def _fix_title_and_date_for_liberal(title: str, published_at: Any, raw_item: dict) -> tuple:
-    """
-    문과대 특수 케이스 보정:
-    - 제목이 '작성일\tYYYY.MM.DD'로 시작하면 대체 제목 찾기
-    - 날짜 문자열에서 YYYY-MM-DD 추출
-    """
-    # 제목 보정: '작성일'로 시작하면 잘못된 제목
-    if title and title.startswith("작성일"):
-        # 대체 제목 후보 시도
-        alt_title = (
-            raw_item.get("headline") or 
-            raw_item.get("h1") or 
-            raw_item.get("subject") or
-            raw_item.get("name") or
-            ""
-        ).strip()
-        
-        if alt_title:
-            title = alt_title
-        else:
-            # 대체 제목이 없으면 '작성일 YYYY.MM.DD' 패턴 제거
-            title = re.sub(r"^작성일\s*\d{4}[./-]\d{2}[./-]\d{2}\s*", "", title).strip()
-            if not title:
-                title = "제목없음"
+def normalize_item(item: dict, base_url: Optional[str] = None) -> dict:
+    """아이템 정규화 (개선된 버전)"""
     
-    # 날짜 보정: 문자열에서 YYYY-MM-DD 패턴 추출
-    if isinstance(published_at, str):
-        # '작성일 2025.09.18' 또는 날짜 패턴이 포함된 경우
-        if "작성일" in published_at or re.search(r"\d{4}[./-]\d{2}[./-]\d{2}", published_at):
-            m = re.search(r"(\d{4})[./-](\d{2})[./-](\d{2})", published_at)
-            if m:
-                y, mth, d = m.groups()
-                published_at = f"{y}-{mth}-{d}"
-    
-    return title, published_at
-
-def normalize_item(item: dict, base_url: Optional[str] = None, college_key: Optional[str] = None) -> dict:
-    """아이템 정규화"""
-    
+    # 제목 추출 (더 많은 필드 확인)
     title_fields = [
         "title", "name", "subject", "headline", 
         "meta.title", "og:title", "titleText"
     ]
     title = clean_text(extract_field(item, title_fields), max_length=500)
     
+    # URL 추출 및 정규화
     url_fields = [
         "url", "link", "href", "permalink", 
         "canonical", "meta.url", "og:url"
     ]
     url = normalize_url(extract_field(item, url_fields), base_url)
     
+    # 요약 추출
     summary_fields = [
         "summary", "description", "excerpt", "preview",
         "meta.description", "og:description", "abstract"
@@ -252,18 +209,23 @@ def normalize_item(item: dict, base_url: Optional[str] = None, college_key: Opti
     if summary_raw:
         summary_raw = clean_text(summary_raw, max_length=1000)
     
+    # HTML 본문 처리
     html_fields = ["html", "content_html", "body_html", "htmlContent"]
     body_html = extract_field(item, html_fields)
     
+    # 텍스트 본문 처리
     text_fields = ["text", "content", "body", "body_text", "plainText"]
     body_text = extract_field(item, text_fields)
     
+    # HTML이 있지만 텍스트가 없는 경우, HTML에서 텍스트 추출
     if body_html and not body_text:
         body_text = extract_text_from_html(body_html)
     
+    # 텍스트가 있지만 요약이 없는 경우, 텍스트에서 요약 생성
     if body_text and not summary_raw:
         summary_raw = clean_text(body_text[:500])
     
+    # 날짜 추출 (더 많은 필드 확인)
     date_fields = [
         "publishedAt", "published_at", "pubDate", "date", 
         "datetime", "time", "createdAt", "created_at",
@@ -277,9 +239,11 @@ def normalize_item(item: dict, base_url: Optional[str] = None, college_key: Opti
             if published_at:
                 break
     
+    # 카테고리나 태그 정보 추출 (선택적)
     category_fields = ["category", "categories", "tag", "tags", "section"]
     category = extract_field(item, category_fields)
     
+    # 작성자 정보 추출 (선택적)
     author_fields = ["author", "writer", "creator", "by"]
     author = extract_field(item, author_fields)
     
@@ -292,6 +256,7 @@ def normalize_item(item: dict, base_url: Optional[str] = None, college_key: Opti
         "published_at": published_at,
     }
     
+    # 추가 메타데이터 (필요시 사용)
     if category:
         result["category"] = clean_text(str(category))
     if author:
@@ -301,15 +266,19 @@ def normalize_item(item: dict, base_url: Optional[str] = None, college_key: Opti
 
 def validate_normalized_item(item: dict) -> bool:
     """정규화된 아이템의 유효성 검증"""
+    # 필수 필드 확인
     if not item.get("title") or not item.get("url"):
         return False
     
+    # URL 유효성 확인
     if not item["url"].startswith(('http://', 'https://')):
         return False
     
+    # 제목 최소 길이 확인
     if len(item["title"]) < 3:
         return False
     
+    # 날짜가 미래가 아닌지 확인
     if item.get("published_at"):
         if item["published_at"] > datetime.now(timezone.utc):
             return False
@@ -318,61 +287,64 @@ def validate_normalized_item(item: dict) -> bool:
 
 def content_hash(college_key: str, title: str, url: str, 
                 published_at: Optional[datetime]) -> str:
-    """컨텐츠 해시 생성"""
+    """컨텐츠 해시 생성 (개선된 버전)"""
+    # URL 정규화 (trailing slash 제거 등)
     url = url.rstrip('/')
     
+    # 날짜는 일 단위로만 사용 (시간 무시)
     date_str = ""
     if published_at:
         date_str = published_at.date().isoformat()
     
+    # 제목 정규화 (대소문자 무시, 공백 정리)
     title_normalized = re.sub(r'\s+', ' ', title.lower().strip())
     
     base = f"{college_key}|{title_normalized}|{url}|{date_str}"
     return hashlib.sha256(base.encode('utf-8')).hexdigest()
 
-# ==============================================================================
-# ▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼▼
-# 수정된 부분: Apify API 헬퍼 함수
-# ==============================================================================
-def get_latest_run_for_task(task_id: str, timeout=30):
-    """GET /v2/actor-tasks/{taskId}/runs - 가장 최근 실행 1개만 가져오기"""
+# ---------------- Apify helpers (기존 코드 유지) ----------------
+
+def start_task_run(task_id: str, timeout=30):
+    """POST /v2/actor-tasks/{taskId}/runs"""
     url = f"https://api.apify.com/v2/actor-tasks/{task_id}/runs"
-    # 'desc=true'를 추가하여 최신순으로 정렬하고, 'limit=1'로 1개만 가져옵니다.
-    params = {"token": APIFY_TOKEN, "limit": 1, "desc": "true"}
-    
+    params = {"token": APIFY_TOKEN}
     try:
-        resp = SESSION.get(url, params=params, timeout=timeout)
+        resp = SESSION.post(url, params=params, timeout=timeout)
     except requests.RequestException as e:
-        print(f"  ❌ get runs error: {e}")
+        print(f"  ⌠start run error: {e}")
         return None
-    
-    if resp.status_code != 200:
-        print(f"  ❌ get runs HTTP {resp.status_code}: {resp.text[:300]}")
+    if resp.status_code not in (201, 200):
+        print(f"  ⌠start run HTTP {resp.status_code}: {resp.text[:300]}")
         return None
-    
     try:
         data = resp.json()
-        runs = data.get("data", {}).get("items", [])
     except ValueError:
-        print("  ⚠️ get runs: invalid response")
+        print("  ⚠️ start run: empty body")
         return None
-    
-    # 가장 최근 실행 1개가 있는지, 그리고 성공했는지 확인합니다.
-    if not runs:
-        print(f"  ⚠️ No recent run found for task {task_id}")
-        return None
+    run = data.get("data") or data
+    return run.get("id")
 
-    latest_run = runs[0]
-    if latest_run.get("status") == "SUCCEEDED":
-        # 성공한 경우에만 실행 정보를 반환합니다.
-        return latest_run
-    else:
-        # 실패했거나 아직 진행 중인 경우, 메시지를 출력하고 None을 반환합니다.
-        status = latest_run.get("status", "UNKNOWN")
-        print(f"  ⚠️ Latest run for task {task_id} was not successful (status: {status})")
-        return None
-# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-# ==============================================================================
+def poll_run_until_done(run_id: str, max_wait_sec=600, poll_interval=3):
+    """GET /v2/actor-runs/{runId} 상태 폴링"""
+    url = f"https://api.apify.com/v2/actor-runs/{run_id}"
+    params = {"token": APIFY_TOKEN}
+    waited = 0
+    while waited <= max_wait_sec:
+        try:
+            resp = SESSION.get(url, params=params, timeout=30)
+            if resp.status_code != 200:
+                print(f"  ⚠️ poll HTTP {resp.status_code}: {resp.text[:200]}")
+            else:
+                data = resp.json().get("data") or {}
+                status = data.get("status")
+                if status in ("SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"):
+                    return data
+        except requests.RequestException as e:
+            print(f"  ⚠️ poll error: {e}")
+        time.sleep(poll_interval)
+        waited += poll_interval
+    print("  ⚠️ poll timeout")
+    return None
 
 def fetch_dataset_items(dataset_id: str, timeout=300):
     """데이터셋 아이템 가져오기"""
@@ -388,14 +360,11 @@ def fetch_dataset_items(dataset_id: str, timeout=300):
         print(f"  ⚠️ items error: {e}")
     return []
 
-# 메인 실행 함수 (태스크 실행 대신 기존 데이터 가져오기)
+# ---------------- main flow (개선된 버전) ----------------
+
 def run():
     total_upserted = 0
     total_skipped = 0
-    
-    print(f"🤖 AI_IN_PIPELINE: {AI_IN_PIPELINE}")
-    print(f"⏱️  AI_SLEEP_SEC: {AI_SLEEP_SEC}")
-    print(f"🔢 AI_MAX_PER_COLLEGE: {AI_MAX_PER_COLLEGE}")
     
     with psycopg2.connect(DATABASE_URL) as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
         for ck, meta in COLLEGES.items():
@@ -403,23 +372,29 @@ def run():
             task_id = meta["task_id"]
             site = meta.get("url")
             
-            print(f"🔍 Fetching latest run for: {name} ({ck})")
+            print(f"🔍 Start task: {name} ({ck})")
             
-            # 가장 최근 성공한 실행 가져오기 (수정된 함수 사용)
-            run_data = get_latest_run_for_task(task_id)
+            # 태스크 실행
+            run_id = start_task_run(task_id)
+            if not run_id:
+                print(f"  ⌠cannot start run for {ck}")
+                continue
+
+            # 완료 대기
+            run_data = poll_run_until_done(run_id)
             if not run_data:
-                # 함수 내부에서 이미 메시지를 출력했으므로, 여기서는 그냥 넘어갑니다.
+                print(f"  ⌠run polling failed for {ck}")
                 continue
-            
-            run_id = run_data.get("id")
+                
+            status = run_data.get("status")
             ds_id = run_data.get("defaultDatasetId")
-            finished_at = run_data.get("finishedAt", "unknown")
             
-            if not ds_id:
-                print(f"  ❌ no datasetId for {ck}")
+            if status != "SUCCEEDED":
+                print(f"  ⌠run status={status} for {ck}")
                 continue
-            
-            print(f"  📅 Using run {run_id} finished at {finished_at}")
+            if not ds_id:
+                print(f"  ⌠no datasetId for {ck}")
+                continue
 
             # 데이터 가져오기
             items = fetch_dataset_items(ds_id)
@@ -427,7 +402,6 @@ def run():
             
             college_upserted = 0
             college_skipped = 0
-            ai_call_count = 0  # AI 호출 카운터
 
             for rec in items:
                 # 정규화
@@ -438,62 +412,10 @@ def run():
                     college_skipped += 1
                     continue
                 
-                # ============================================
-                # AI 자동추출 로직 통합 + 쿼터 안전장치
-                # ============================================
-                if AI_IN_PIPELINE and ai_call_count < AI_MAX_PER_COLLEGE:
-                    # AI 호출 전 슬립 (쿼터 보호)
-                    time.sleep(AI_SLEEP_SEC)
-                    
-                    try:
-                        title_for_ai = (norm.get("title") or "").strip()
-                        body_for_ai = (norm.get("body_text") or "").strip()
-
-                        # 1) 본문/제목 기반 구조화 추출
-                        ai = extract_notice_info(body_text=body_for_ai, title=title_for_ai) or {}
-
-                        # 2) 제목 해시태그 추출
-                        ht = extract_hashtags_from_title(title_for_ai) or {}
-
-                        # 3) 필드 매핑
-                        norm["category_ai"] = ai.get("category_ai")
-                        norm["start_at_ai"] = _to_utc_ts(ai.get("start_date_ai"))
-                        norm["end_at_ai"] = _to_utc_ts(ai.get("end_date_ai"))
-
-                        # qualification_ai: dict or {}
-                        qual_dict = ai.get("qualification_ai") or {}
-                        norm["qualification_ai"] = qual_dict
-
-                        # hashtags_ai: list or None
-                        norm["hashtags_ai"] = ht.get("hashtags") or None
-
-                        ai_call_count += 1
-
-                    except Exception as e:
-                        # 429 감지 시 추가 슬립
-                        if "429" in str(e):
-                            print(f"  ⚠️ 429 detected, sleeping 5 seconds...")
-                            time.sleep(5.0)
-                        
-                        # 실패 시에도 저장 진행 (기존 파이프라인을 막지 않음)
-                        print(f"  ⚠️ AI extraction soft-fail for {norm.get('title', 'unknown')[:50]}: {e}")
-                        norm["category_ai"] = None
-                        norm["start_at_ai"] = None
-                        norm["end_at_ai"] = None
-                        norm["qualification_ai"] = {}
-                        norm["hashtags_ai"] = None
-                else:
-                    # AI 비활성화 또는 배치 제한 초과 시 전부 None/빈값
-                    norm["category_ai"] = None
-                    norm["start_at_ai"] = None
-                    norm["end_at_ai"] = None
-                    norm["qualification_ai"] = {}
-                    norm["hashtags_ai"] = None
-                
                 # 해시 생성
                 h = content_hash(ck, norm["title"], norm["url"], norm["published_at"])
                 
-                # DB 저장 (AI 필드 포함)
+                # DB 저장
                 try:
                     cur.execute(UPSERT_SQL, {
                         "college_key": ck,
@@ -504,12 +426,7 @@ def run():
                         "body_text": norm["body_text"],
                         "published_at": norm["published_at"],
                         "source_site": site,
-                        "content_hash": h,
-                        "category_ai": norm.get("category_ai"),
-                        "start_at_ai": norm.get("start_at_ai"),
-                        "end_at_ai": norm.get("end_at_ai"),
-                        "qualification_ai": Json(norm.get("qualification_ai") or {}),
-                        "hashtags_ai": norm.get("hashtags_ai"),
+                        "content_hash": h
                     })
                     college_upserted += 1
                 except psycopg2.Error as e:
@@ -517,7 +434,7 @@ def run():
                     college_skipped += 1
             
             conn.commit()
-            print(f"  ✅ {name}: upserted={college_upserted}, skipped={college_skipped}, ai_calls={ai_call_count}")
+            print(f"  ✅ {name}: upserted={college_upserted}, skipped={college_skipped}")
             
             total_upserted += college_upserted
             total_skipped += college_skipped
