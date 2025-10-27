@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import datetime as dt
 import requests
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 import time
 import threading
 import json
@@ -22,7 +22,7 @@ import jwt
 from ai_processor import (
     extract_hashtags_from_title,
     extract_notice_info,
-    
+    extract_structured_info,
 )
 from comparison_logic import check_suitability
 # 캘린더 유틸리티 import (이번 작업)
@@ -636,111 +636,4 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
         "college": college_key,
         "upserted": upserted,
         "skipped": skipped,
-        "total_items": len(items)
-    }
-
-
-# 실시간 자격검증 엔드포인트
-class UserProfile(BaseModel):
-    grade: int | None = None
-    major: str | None = None
-    gpa: float | None = None
-    lang: list[str] | None = None
-
-@app.post("/notices/{notice_id}/verify-eligibility")
-def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
-    """사용자 프로필을 기반으로 공지 자격요건 검증"""
-    try:
-        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-              SELECT qualification_ai
-              FROM notices
-              WHERE id=%s
-            """, (notice_id,))
-            row = cur.fetchone()
-    except psycopg2.Error as e:
-        logger.error(f"Database error in verify_eligibility for {notice_id}: {e}")
-        raise HTTPException(status_code=500, detail="Database error checking notice")
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Notice not found")
-
-    qa = row.get("qualification_ai")
-
-    if not qa:
-        return {"eligible": False, "reason": "해당 공지에 AI 자격요건 데이터가 없습니다."}
-
-    if isinstance(qa, str):
-        try:
-            qa = json.loads(qa)
-        except json.JSONDecodeError:
-            logger.warning(f"Could not parse qualification_ai JSON string for notice {notice_id}: {qa}")
-            qa = {}
-
-    if not isinstance(qa, dict):
-         logger.error(f"qualification_ai for notice {notice_id} is not a dict or parsable string: {type(qa)}")
-         return {"eligible": False, "reason": "공지 자격요건 데이터 형식 오류입니다."}
-
-
-    try:
-        profile_dict = profile.model_dump(exclude_unset=True)
-        result = check_suitability(profile_dict, qa)
-        return {
-            "eligible": bool(result.get("eligible", False)),
-            "reason": result.get("reason", "AI 검증 중 오류 발생")
-        }
-    except Exception as e:
-        logger.error(f"AI verification failed for notice {notice_id}: {e}")
-        return {"eligible": False, "reason": "자격 검증 중 예상치 못한 오류가 발생했습니다."}
-
-
-# 캘린더 이벤트 파싱 엔드포인트 (이번 작업 추가)
-@app.get("/notices/{notice_id}/calendar-event")
-def get_calendar_event(notice_id: str):
-    """
-    공지사항의 주요 일정을 캘린더 이벤트 형식으로 반환
-    프론트엔드에서 "캘린더에 추가하시겠습니까?" 확인 팝업용
-    """
-    try:
-        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute("""
-              SELECT title, start_at_ai, end_at_ai
-              FROM notices
-              WHERE id = %s
-            """, [notice_id])
-            row = cur.fetchone()
-    except psycopg2.Error as e:
-        logger.error(f"Database error fetching calendar event for {notice_id}: {e}")
-        raise HTTPException(status_code=500, detail="Database error")
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Notice not found")
-
-    # start_at_ai가 있으면 캘린더 이벤트 생성
-    if row.get("start_at_ai"):
-        try:
-            # start_at_ai는 datetime 객체 (UTC)
-            start_dt = row["start_at_ai"]
-            # ISO 형식 문자열로 변환
-            start_iso = start_dt.isoformat() if isinstance(start_dt, datetime) else str(start_dt)
-            
-            calendar_event = normalize_datetime_for_calendar(
-                key_date=start_iso,
-                notice_title=row.get("title", "공지사항")
-            )
-            
-            return {
-                "has_event": True,
-                "calendar_event": calendar_event
-            }
-        except Exception as e:
-            logger.error(f"Failed to parse calendar event for notice {notice_id}: {e}")
-            return {
-                "has_event": False,
-                "reason": "일정 정보 파싱 실패"
-            }
-    else:
-        return {
-            "has_event": False,
-            "reason": "일정 정보 없음"
-        }
+        "total_items": len(items)}

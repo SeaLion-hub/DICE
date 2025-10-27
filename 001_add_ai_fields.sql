@@ -1,5 +1,6 @@
 -- Migration: Add AI-related fields if they don't exist
 -- Run this after 000_init.sql
+-- updated_at trigger logic removed as it exists in 000_init.sql
 
 BEGIN;
 
@@ -64,6 +65,8 @@ BEGIN
 END $$;
 
 -- Remove summary_ai column if it exists (Backward compatibility for removal)
+-- Note: This part might be redundant if 000_init.sql already excludes summary_ai,
+-- but keeping it ensures removal if it somehow existed before.
 DO $$
 BEGIN
     IF EXISTS (
@@ -78,9 +81,10 @@ END $$;
 -- Indexes for AI fields
 CREATE INDEX IF NOT EXISTS idx_notices_category_ai ON notices (category_ai);
 CREATE INDEX IF NOT EXISTS idx_notices_end_at_ai ON notices (end_at_ai DESC);
-CREATE INDEX IF NOT EXISTS idx_notices_hashtags_ai_gin ON notices USING GIN (hashtags_ai); -- 006에서 이동
+CREATE INDEX IF NOT EXISTS idx_notices_hashtags_ai_gin ON notices USING GIN (hashtags_ai); -- Ensure this index is appropriate here or in a later migration (like 006)
 
--- Statistics view updated (removed summary_ai fields)
+-- Statistics view updated (removed summary_ai fields if they were previously included)
+-- This assumes the original view might have referenced summary_ai
 CREATE OR REPLACE VIEW notice_stats AS
 SELECT
     COUNT(*) as total_notices,
@@ -88,8 +92,13 @@ SELECT
     COUNT(hashtags_ai) as notices_with_hashtags,
     COUNT(qualification_ai) as notices_with_qualification,
     COUNT(end_at_ai) as notices_with_deadline,
-    ROUND(COUNT(category_ai)::numeric / COUNT(*)::numeric * 100, 2) as category_coverage_pct,
-    ROUND(COUNT(hashtags_ai)::numeric / COUNT(*)::numeric * 100, 2) as hashtag_coverage_pct
+    -- Calculate coverage percentages safely, avoiding division by zero
+    CASE WHEN COUNT(*) > 0 THEN
+        ROUND(COUNT(category_ai)::numeric / COUNT(*)::numeric * 100, 2)
+    ELSE 0 END as category_coverage_pct,
+    CASE WHEN COUNT(*) > 0 THEN
+        ROUND(COUNT(hashtags_ai)::numeric / COUNT(*)::numeric * 100, 2)
+    ELSE 0 END as hashtag_coverage_pct
 FROM notices;
 
 COMMIT;

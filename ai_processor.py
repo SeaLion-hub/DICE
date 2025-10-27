@@ -3,6 +3,7 @@ import os
 import re
 import json
 from dotenv import load_dotenv
+from typing import Dict, Any, Tuple # Tuple 추가
 
 load_dotenv()
 
@@ -39,7 +40,7 @@ model = genai.GenerativeModel(
 
 # --- 1단계: 분류 프롬프트 (기존과 동일) ---
 SYSTEM_PROMPT_CLASSIFY = """
-당신은 연세대학교 공지사항을 분류하는 AI입니다. 
+당신은 연세대학교 공지사항을 분류하는 AI입니다.
 주어진 [공지 텍스트]를 읽고, 다음 7가지 카테고리 중 가장 적합한 해시태그 1개만 반환해 주세요:
 [#학사, #장학, #취업, #행사, #공모전/대회, #국제교류, #일반]
 
@@ -49,9 +50,7 @@ SYSTEM_PROMPT_CLASSIFY = """
 3. 2개 이상 해당되면, 가장 중요하다고 생각되는 1개만 반환합니다.
 """
 
-# --- 2단계: 추출 프롬프트 (신규 추가 및 수정) ---
-# 기존 SYSTEM_PROMPT_EXTRACT_JSON 삭제
-
+# --- 2단계: 추출 프롬프트 (기존과 동일) ---
 # [신규] #장학 프롬프트
 PROMPT_SCHOLARSHIP = """
 당신은 '장학금' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
@@ -197,10 +196,12 @@ def call_gemini_api(system_prompt, user_prompt):
     Helper function to call the Gemini API.
     """
     try:
+        # 시스템 프롬프트를 history에 포함시키는 방식 고려 (API 문서 확인 필요)
+        # 예시: chat_session = model.start_chat(history=[{'role':'system', 'parts': system_prompt}])
+        # 현재는 단순 문자열 결합 유지
+        full_prompt = f"SYSTEM_PROMPT: {system_prompt}\n\nUSER_PROMPT: {user_prompt}"
         chat_session = model.start_chat(history=[])
-        response = chat_session.send_message(
-            f"SYSTEM_PROMPT: {system_prompt}\n\nUSER_PROMPT: {user_prompt}"
-        )
+        response = chat_session.send_message(full_prompt)
         return response.text
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
@@ -213,7 +214,7 @@ def clean_json_string(text):
     # Find the first '{' and the last '}'
     start_index = text.find('{')
     end_index = text.rfind('}')
-    
+
     if start_index != -1 and end_index != -1 and end_index > start_index:
         json_part = text[start_index : end_index + 1]
         # Remove common markdown artifacts like "```json\n" and "\n```"
@@ -222,119 +223,153 @@ def clean_json_string(text):
         return json_part.strip()
     return None
 
-# --- process_notice_content 함수 (수정됨) ---
-async def process_notice_content(title: str, body: str):
+
+# --- [수정] 1단계: 해시태그 분류 함수 ---
+# async 키워드 제거 (main.py에서 async로 호출하지 않으므로)
+def classify_notice_category(title: str, body: str) -> str:
     """
-    Processes notice content using a 2-step AI chain:
-    1. Classify hashtag
-    2. Extract structured JSON based on the hashtag
+    Processes notice content to classify a single category hashtag.
+    """
+    full_text = f"제목: {title}\n\n본문: {body}"
+    hashtag = "#일반" # 기본값
+
+    try:
+        # 여기서는 system_prompt가 SYSTEM_PROMPT_CLASSIFY 임
+        hashtag_response = call_gemini_api(SYSTEM_PROMPT_CLASSIFY, full_text)
+        if hashtag_response:
+            # 해시태그가 여러 개 반환될 경우 첫 번째 것을 선택
+            potential_hashtag = hashtag_response.strip().split(',')[0].strip()
+            # 유효한 해시태그인지 확인
+            if potential_hashtag.startswith('#') and potential_hashtag in EXTRACTION_PROMPT_MAP:
+                hashtag = potential_hashtag
+            else:
+                 print(f"Invalid or unknown hashtag '{potential_hashtag}' received, defaulting to #일반 for: {title[:30]}...")
+    except Exception as e:
+        print(f"Error during classification for '{title[:30]}...': {e}")
+        # 실패 시 기본값 '#일반' 사용
+
+    return hashtag
+
+# --- [수정] 2단계: 구조화된 정보 추출 함수 ---
+# async 키워드 제거
+def extract_structured_info(title: str, body: str, category: str) -> Dict[str, Any]:
+    """
+    Extracts structured JSON based on the provided category hashtag.
     """
     full_text = f"제목: {title}\n\n본문: {body}"
     ai_extracted_json = None
-    hashtag = None
-    
-    # --- Step 1: Classify Hashtag ---
-    try:
-        hashtag_response = call_gemini_api(SYSTEM_PROMPT_CLASSIFY, full_text)
-        if hashtag_response:
-            # 해시태그가 여러 개 반환될 경우 (예: #장학, #국제교류) 첫 번째 것을 선택
-            hashtag = hashtag_response.strip().split(',')[0].strip()
-            if not hashtag.startswith('#'):
-                hashtag = None # 유효하지 않은 응답
-    except Exception as e:
-        print(f"Error in Step 1 (Classification): {e}")
-        hashtag = None # 실패 시
-    
-    if not hashtag or hashtag not in EXTRACTION_PROMPT_MAP:
-        hashtag = "#일반" # 분류 실패 시 '일반'으로 강제 지정
 
-    # --- Step 2: Extract JSON based on Hashtag ---
+    # 유효하지 않은 카테고리거나 맵에 없으면 기본 프롬프트 사용
+    if not category or category not in EXTRACTION_PROMPT_MAP:
+        category = "#일반" # DB 조회 시 category_ai가 NULL일 경우 대비
+
     try:
-        # [수정] 해시태그에 맞는 프롬프트를 맵에서 선택
-        # .get()을 사용하여 기본 프롬프트를 안전하게 참조
-        extraction_prompt_template = EXTRACTION_PROMPT_MAP.get(hashtag, PROMPT_SIMPLE_DEFAULT)
-        
-        # [수정] 단순 프롬프트의 경우, {category_name}을 동적으로 삽입
+        # 카테고리에 맞는 프롬프트 템플릿 선택
+        extraction_prompt_template = EXTRACTION_PROMPT_MAP.get(category, PROMPT_SIMPLE_DEFAULT)
+
+        # 프롬프트 포맷팅 (시스템 프롬프트 역할)
         if extraction_prompt_template == PROMPT_SIMPLE_DEFAULT:
-            extraction_prompt = extraction_prompt_template.format(
-                category_name=hashtag,
-                notice_text=full_text
+            # 단순 프롬프트는 category_name 포함하여 포맷팅
+            system_prompt_for_extraction = extraction_prompt_template.format(
+                category_name=category,
+                notice_text="{notice_text}" # user_prompt에서 채울 부분 남겨둠
             )
         else:
-            # 정교한 프롬프트는 {notice_text}만 포맷팅
-            extraction_prompt = extraction_prompt_template.format(notice_text=full_text)
-            
-        json_string_response = call_gemini_api(extraction_prompt, full_text)
-        
+            # 정교한 프롬프트는 notice_text만 남겨둠
+            system_prompt_for_extraction = extraction_prompt_template.format(
+                 notice_text="{notice_text}" # user_prompt에서 채울 부분 남겨둠
+            )
+
+        # API 호출 (user_prompt는 실제 공지 내용)
+        # call_gemini_api는 system과 user 프롬프트를 합쳐서 보내므로,
+        # 여기서는 system_prompt 부분에 포맷팅된 프롬프트를 넣고, user_prompt에 full_text를 넣음
+        json_string_response = call_gemini_api(system_prompt_for_extraction.replace("{notice_text}", ""), full_text)
+
+
         if json_string_response:
             cleaned_json_str = clean_json_string(json_string_response)
             if cleaned_json_str:
                 ai_extracted_json = json.loads(cleaned_json_str)
             else:
-                print(f"Could not find valid JSON in response for: {title}")
+                print(f"Could not find valid JSON in response for: {title[:30]}...")
                 ai_extracted_json = {"error": "Failed to parse JSON from AI response."}
         else:
             ai_extracted_json = {"error": "AI response was empty."}
-            
+
     except json.JSONDecodeError as e:
-        print(f"JSONDecodeError: {e} - Response was: {json_string_response}")
+        print(f"JSONDecodeError for '{title[:30]}...': {e} - Response was: {json_string_response}")
         ai_extracted_json = {"error": "Invalid JSON format received from AI."}
     except Exception as e:
-        print(f"Error in Step 2 (Extraction): {e}")
+        print(f"Error during extraction for '{title[:30]}...': {e}")
         ai_extracted_json = {"error": f"An unexpected error occurred during extraction: {e}"}
 
-    return hashtag, ai_extracted_json
+    return ai_extracted_json
 
-# --- 기존 테스트용 main (수정됨) ---
+
+# --- 기존 제목 기반 해시태그 추출 함수 (하위 호환성 위해 유지) ---
+def extract_hashtags_from_title(title: str, college: str = None):
+    """기존 제목 기반 해시태그 추출 함수 (내용은 없지만 유지)"""
+    # 실제 구현이 필요하면 여기에 로직 추가
+    # 예시: return {"hashtags": ["#키워드1", "#키워드2"]}
+    print(f"Warning: extract_hashtags_from_title called but has no implementation for title: {title}")
+    return {"hashtags": None} # None 또는 빈 배열 반환
+
+# --- extract_notice_info 함수는 더 이상 사용되지 않으므로 삭제 ---
+# def extract_notice_info(body_text: str, title: str):
+#    ...
+
+
+# --- 기존 테스트용 main 수정 ---
 if __name__ == "__main__":
-    import asyncio
+    # 테스트 1: #장학 (분류 -> 추출)
+    title1 = "[Notice] 2025 Fall Semester Underwood Legacy Scholarship Notice"
+    body1 = """
+    1. Number of Recipients: 4 students per semester
+    2. Scholarship Amount: KRW 2,000,000 per student
+    3. Eligibility Requirements
+       - Completion of at least four semesters of enrollment
+       - Cumulative GPA of 3.5 or higher (on a 4.3 scale)
+       - Enrollment in at least 12 credits in the preceding semester
+    4. Application Timeline
+       - Application Deadline: Oct 17 (Fri) 17:00, 2025 KST (Late submissions will NOT be accepted)
+    """
 
-    async def main_test():
-        # 테스트 1: #장학 (정교한 추출)
-        title1 = "[Notice] 2025 Fall Semester Underwood Legacy Scholarship Notice"
-        body1 = """
-        1. Number of Recipients: 4 students per semester
-        2. Scholarship Amount: KRW 2,000,000 per student
-        3. Eligibility Requirements
-           - Completion of at least four semesters of enrollment
-           - Cumulative GPA of 3.5 or higher (on a 4.3 scale)
-           - Enrollment in at least 12 credits in the preceding semester
-        4. Application Timeline
-           - Application Deadline: Oct 17 (Fri) 17:00, 2025 KST (Late submissions will NOT be accepted)
-        """
-        
-        print("--- 테스트 1: #장학 (정교한 추출) ---")
-        tag1, json1 = await process_notice_content(title1, body1)
-        print(f"분류된 태그: {tag1}")
+    print("--- 테스트 1: #장학 (분류 -> 추출) ---")
+    tag1 = classify_notice_category(title1, body1)
+    print(f"분류된 태그: {tag1}")
+    if tag1:
+        json1 = extract_structured_info(title1, body1, tag1)
         print(f"추출된 JSON: {json.dumps(json1, indent=2, ensure_ascii=False)}\n")
 
-        # 테스트 2: #국제교류 (정교한 추출 + 어학)
-        title2 = "[CAMPUS Asia] 2025년 하반기 태국 출라롱콘대 단기교류 파견학생 모집"
-        body2 = """
-        [CAMPUS Asia사업] 2025년 하반기 CAMPUS Asia 사업 태국 출라롱콘대 단기교류 파견학생 모집 안내
-        1. 지원 자격:
-           - 학부 2~7학기 이수자
-           - 총 평량평균 3.0/4.3 이상
-           - 어학성적: TOEIC 850점 또는 TOEFL iBT 90점 이상
-           - CAMPUS Asia 사업 참여 학과(경영학과, 경제학부) 학생
-        2. 마감 기한: ~10/10(금) 17시까지
-        """
-        print("--- 테스트 2: #국제교류 (정교한 추출) ---")
-        tag2, json2 = await process_notice_content(title2, body2)
-        print(f"분류된 태그: {tag2}")
-        print(f"추출된 JSON: {json.dumps(json2, indent=2, ensure_ascii=False)}\n")
+    # 테스트 2: #국제교류 (분류 -> 추출)
+    title2 = "[CAMPUS Asia] 2025년 하반기 태국 출라롱콘대 단기교류 파견학생 모집"
+    body2 = """
+    [CAMPUS Asia사업] 2025년 하반기 CAMPUS Asia 사업 태국 출라롱콘대 단기교류 파견학생 모집 안내
+    1. 지원 자격:
+       - 학부 2~7학기 이수자
+       - 총 평량평균 3.0/4.3 이상
+       - 어학성적: TOEIC 850점 또는 TOEFL iBT 90점 이상
+       - CAMPUS Asia 사업 참여 학과(경영학과, 경제학부) 학생
+    2. 마감 기한: ~10/10(금) 17시까지
+    """
+    print("--- 테스트 2: #국제교류 (분류 -> 추출) ---")
+    tag2 = classify_notice_category(title2, body2)
+    print(f"분류된 태그: {tag2}")
+    if tag2:
+         json2 = extract_structured_info(title2, body2, tag2)
+         print(f"추출된 JSON: {json.dumps(json2, indent=2, ensure_ascii=False)}\n")
 
-        # 테스트 3: #행사 (단순 추출)
-        title3 = "26학년도 전기 디지털애널리틱스융합협동과정 입학설명회 개최"
-        body3 = """
-        연세대학교 인공지능융합대학 디지털애널리틱스융합협동과정에서 26학년도 전기 입학설명회를 개최합니다.
-        - 대상: 본교 학부생, 대학원생 및 외부 관심자 누구나
-        - 일시 : 9월 29일(월) 오후 2시
-        - 장소 : 온라인(Zoom) 및 오프라인(연세대학교 제1공학관 A528호) 동시 진행
-        """
-        print("--- 테스트 3: #행사 (단순 추출) ---")
-        tag3, json3 = await process_notice_content(title3, body3)
-        print(f"분류된 태그: {tag3}")
-        print(f"추출된 JSON: {json.dumps(json3, indent=2, ensure_ascii=False)}\n")
-
-    asyncio.run(main_test())
+    # 테스트 3: #행사 (분류 -> 추출)
+    title3 = "26학년도 전기 디지털애널리틱스융합협동과정 입학설명회 개최"
+    body3 = """
+    연세대학교 인공지능융합대학 디지털애널리틱스융합협동과정에서 26학년도 전기 입학설명회를 개최합니다.
+    - 대상: 본교 학부생, 대학원생 및 외부 관심자 누구나
+    - 일시 : 9월 29일(월) 오후 2시
+    - 장소 : 온라인(Zoom) 및 오프라인(연세대학교 제1공학관 A528호) 동시 진행
+    """
+    print("--- 테스트 3: #행사 (분류 -> 추출) ---")
+    tag3 = classify_notice_category(title3, body3)
+    print(f"분류된 태그: {tag3}")
+    if tag3:
+         json3 = extract_structured_info(title3, body3, tag3)
+         print(f"추출된 JSON: {json.dumps(json3, indent=2, ensure_ascii=False)}\n")

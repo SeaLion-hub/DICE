@@ -1,12 +1,11 @@
 """
-Summary backfill script for existing notices
+AI fields backfill script for existing notices
 Usage:
-  python backfill_summary.py                     # Default: backfill summaries
-  python backfill_summary.py --task=summary      # Explicit summary backfill
-  python backfill_summary.py --limit=100         # Process only 100 records
-  python backfill_summary.py --dry-run           # Preview without updating
-  python backfill_summary.py --college=main      # Filter by college
-  python backfill_summary.py --since=2024-01-01  # Filter by date
+  python backfill_ai.py                     # Default: backfill AI fields
+  python backfill_ai.py --limit=100         # Process only 100 records
+  python backfill_ai.py --dry-run           # Preview without updating
+  python backfill_ai.py --college=main      # Filter by college
+  python backfill_ai.py --since=2024-01-01  # Filter by date
 """
 
 import os
@@ -22,7 +21,7 @@ from typing import Optional, Dict, Any
 import logging
 
 # Import AI processor
-from ai_processor import generate_brief_summary, extract_notice_info, extract_hashtags_from_title
+from ai_processor import extract_notice_info, extract_hashtags_from_title
 
 
 from dotenv import load_dotenv
@@ -42,15 +41,6 @@ if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL not set")
 
 # Queries
-QUERY_SUMMARY_MISSING = """
-SELECT id, title, summary_raw, body_text, body_html
-FROM notices
-WHERE (summary_ai IS NULL OR summary_ai = '')
-  {filters}
-ORDER BY published_at DESC NULLS LAST, created_at DESC
-LIMIT %s OFFSET %s;
-"""
-
 QUERY_AI_FIELDS_MISSING = """
 SELECT id, title, body_text
 FROM notices
@@ -60,12 +50,6 @@ WHERE category_ai IS NULL
   {filters}
 ORDER BY created_at DESC
 LIMIT %s;
-"""
-
-UPDATE_SUMMARY = """
-UPDATE notices
-SET summary_ai = %s, updated_at = CURRENT_TIMESTAMP
-WHERE id = %s;
 """
 
 UPDATE_AI_FIELDS = """
@@ -138,93 +122,6 @@ def build_filters(args) -> tuple[str, list]:
     return filter_clause, params
 
 
-def backfill_summaries(args):
-    """Backfill missing summaries"""
-    stats = BackfillStats()
-    filter_clause, filter_params = build_filters(args)
-    
-    with psycopg2.connect(DATABASE_URL) as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            offset = args.resume_from or 0
-            
-            while True:
-                # Fetch batch
-                query = QUERY_SUMMARY_MISSING.format(filters=filter_clause)
-                cur.execute(query, filter_params + [args.limit or BATCH_SIZE, offset])
-                rows = cur.fetchall()
-                
-                if not rows:
-                    logger.info("No more rows to process")
-                    break
-                
-                logger.info(f"Processing batch of {len(rows)} items (offset: {offset})")
-                stats.total += len(rows)
-                
-                for row in rows:
-                    row_start = time.time()
-                    
-                    try:
-                        # Skip if already has summary (race condition check)
-                        if row.get("summary_ai") and len(row["summary_ai"].strip()) > 10:
-                            logger.debug(f"Skipping {row['id']}: already has summary")
-                            stats.add_skip()
-                            continue
-                        
-                        # Prepare input
-                        title = row.get("title", "").strip()
-                        # Priority: summary_raw > body_text > body_html (stripped)
-                        text = row.get("summary_raw") or row.get("body_text") or ""
-                        if not text and row.get("body_html"):
-                            # Simple HTML stripping
-                            import re
-                            text = re.sub(r'<[^>]+>', ' ', row["body_html"])
-                            text = re.sub(r'\s+', ' ', text).strip()
-                        
-                        if args.dry_run:
-                            logger.info(f"[DRY RUN] Would generate summary for: {title[:50]}")
-                            stats.add_success(processing_time=time.time() - row_start)
-                            continue
-                        
-                        # Generate summary
-                        time.sleep(SLEEP_SEC)  # Rate limiting
-                        summary = generate_brief_summary(title, text)
-                        
-                        if not summary or len(summary) < 5:
-                            logger.warning(f"Empty summary generated for {row['id']}")
-                            stats.add_failure()
-                            continue
-                        
-                        # Check if fallback was used (heuristic: very similar to title)
-                        is_fallback = summary[:50].lower() == title[:50].lower()
-                        
-                        # Update database
-                        cur.execute(UPDATE_SUMMARY, (summary, row['id']))
-                        conn.commit()
-                        
-                        processing_time = time.time() - row_start
-                        stats.add_success(is_fallback=is_fallback, processing_time=processing_time)
-                        
-                        if is_fallback:
-                            logger.info(f"✓ {row['id']}: Summary generated (fallback) - {len(summary)} chars")
-                        else:
-                            logger.info(f"✓ {row['id']}: Summary generated - {len(summary)} chars")
-                    
-                    except Exception as e:
-                        logger.error(f"✗ {row['id']}: Failed - {e}")
-                        stats.add_failure()
-                        if not args.continue_on_error:
-                            raise
-                
-                # Check limit
-                if args.limit and stats.total >= args.limit:
-                    logger.info(f"Reached limit of {args.limit} items")
-                    break
-                
-                offset += len(rows)
-    
-    print(stats.get_summary())
-
-
 def backfill_ai_fields(args):
     """Backfill all AI fields (category, dates, qualification, hashtags)"""
     stats = BackfillStats()
@@ -287,32 +184,22 @@ def backfill_ai_fields(args):
 
 def main():
     parser = argparse.ArgumentParser(description="Backfill AI-generated fields for notices")
-    parser.add_argument("--task", choices=["summary", "ai_fields", "all"], 
-                       default="summary", help="Backfill task to run")
     parser.add_argument("--limit", type=int, help="Maximum number of records to process")
     parser.add_argument("--college", help="Filter by college key")
     parser.add_argument("--since", help="Filter by date (YYYY-MM-DD)")
     parser.add_argument("--dry-run", action="store_true", help="Preview without updating")
-    parser.add_argument("--resume-from", type=int, help="Resume from offset (for summary task)")
     parser.add_argument("--continue-on-error", action="store_true", 
                        help="Continue processing even if some items fail")
     
     args = parser.parse_args()
     
-    logger.info(f"Starting backfill task: {args.task}")
+    logger.info("Starting backfill task: ai_fields")
     
     if args.dry_run:
         logger.warning("DRY RUN MODE - No database updates will be made")
     
     try:
-        if args.task == "summary":
-            backfill_summaries(args)
-        elif args.task == "ai_fields":
-            backfill_ai_fields(args)
-        elif args.task == "all":
-            logger.info("Running all backfill tasks...")
-            backfill_ai_fields(args)
-            backfill_summaries(args)
+        backfill_ai_fields(args)
         
     except KeyboardInterrupt:
         logger.info("\nBackfill interrupted by user")
