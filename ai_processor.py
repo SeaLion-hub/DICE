@@ -8,12 +8,12 @@ from typing import Dict, Any, Tuple # Tuple 추가
 load_dotenv()
 
 # --- 기존 코드 (API 설정) ---
-GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # GOOGLE_API_KEY 대신 GEMINI_API_KEY 사용
 
-if not GOOGLE_API_KEY:
-    raise ValueError("GOOGLE_API_KEY not found in .env file")
+if not GEMINI_API_KEY:
+    raise ValueError("GEMINI_API_KEY not found in .env file") # 오류 메시지도 함께 수정
 
-genai.configure(api_key=GOOGLE_API_KEY)
+genai.configure(api_key=GEMINI_API_KEY) # 설정 부분도 수정
 
 generation_config = genai.GenerationConfig(
     temperature=0.1,
