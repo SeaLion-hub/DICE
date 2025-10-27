@@ -21,7 +21,7 @@ import jwt
 # AI processor import (extract_notice_info 포함)
 from ai_processor import (
     extract_hashtags_from_title,
-    extract_notice_info,
+    classify_notice_category, # <-- 새로 추가
     extract_structured_info,
 )
 from comparison_logic import check_suitability
@@ -560,14 +560,26 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                         title_for_ai = norm.get("title", "")
                         body_for_ai = norm.get("body_text", "")
 
-                        ai_info = extract_notice_info(body_text=body_for_ai, title=title_for_ai)
-                        hashtags_info = extract_hashtags_from_title(title=title_for_ai, college=college_key)
+                        # 1단계: 카테고리 분류
+                        category_ai = classify_notice_category(title=title_for_ai, body=body_for_ai)
+                        norm["category_ai"] = category_ai # 분류 결과 저장
+                        norm["hashtags_ai"] = [category_ai] if category_ai else None # 해시태그는 분류 결과 사용
 
-                        norm["category_ai"] = ai_info.get("category_ai")
-                        norm["start_at_ai"] = _to_utc_ts(ai_info.get("start_date_ai"))
-                        norm["end_at_ai"] = _to_utc_ts(ai_info.get("end_date_ai"))
-                        norm["qualification_ai"] = ai_info.get("qualification_ai", {})
-                        norm["hashtags_ai"] = hashtags_info.get("hashtags")
+                        # 2단계: 구조화된 정보 추출 (분류된 카테고리 사용)
+                        structured_info = extract_structured_info(title=title_for_ai, body=body_for_ai, category=category_ai)
+
+                        # --- structured_info에서 start_at_ai, end_at_ai, qualification_ai 추출 ---
+                        # 이 부분은 ai_processor.py의 JSON 구조에 맞게 구현해야 합니다.
+                        # 예시: key_date 필드를 파싱하거나, qualifications 객체를 사용합니다.
+                        # calendar_utils.py의 normalize_datetime_for_calendar 함수 활용 고려
+                        start_at_ai = None # structured_info['key_date'] 등을 파싱하여 설정
+                        end_at_ai = None   # structured_info['key_date'] 등을 파싱하여 설정
+                        qualification_ai = structured_info.get("qualifications", structured_info if isinstance(structured_info, dict) else {}) # 구조 확인 필요
+
+
+                        norm["start_at_ai"] = start_at_ai
+                        norm["end_at_ai"] = end_at_ai
+                        norm["qualification_ai"] = qualification_ai
 
                     except Exception as e:
                         logger.warning(f"AI extraction failed for '{norm.get('title', 'N/A')[:50]}...': {e}. Proceeding without AI data.")
