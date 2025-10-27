@@ -22,9 +22,9 @@ import jwt
 from ai_processor import (
     extract_hashtags_from_title,
     extract_notice_info,
-    verify_eligibility_ai,
+    
 )
-
+from comparison_logic import check_suitability
 # 캘린더 유틸리티 import (이번 작업)
 from calendar_utils import normalize_datetime_for_calendar
 
@@ -684,7 +684,7 @@ def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
 
     try:
         profile_dict = profile.model_dump(exclude_unset=True)
-        result = verify_eligibility_ai(qa, profile_dict)
+        result = check_suitability(profile_dict, qa)
         return {
             "eligible": bool(result.get("eligible", False)),
             "reason": result.get("reason", "AI 검증 중 오류 발생")
