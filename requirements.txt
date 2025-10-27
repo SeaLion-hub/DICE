@@ -4,3 +4,4 @@ python-dotenv
 psycopg2-binary
 requests
 beautifulsoup4
+PyJWT>=2.8.0
