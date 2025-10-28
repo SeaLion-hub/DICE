@@ -13,6 +13,7 @@ from urllib.parse import urlparse, unquote
 import psycopg2
 import psycopg2.extensions
 from psycopg2.pool import SimpleConnectionPool, PoolError
+from fastapi import HTTPException  # <-- 1. HTTPException을 import 합니다
 
 # Module-level logger
 logger = logging.getLogger(__name__)
@@ -138,14 +139,21 @@ def get_conn() -> Generator[psycopg2.extensions.connection, None, None]:
             
         yield conn
         
+    except HTTPException as e:  # <-- 2. HTTPException을 먼저 잡아서
+        # Do not wrap HTTPException. Let it propagate to FastAPI.
+        raise e  # <-- 3. 그대로 다시 raise 합니다.
+        
     except PoolError as e:
+        logger.error(f"Pool error in connection context: {e}")
         raise RuntimeError(f"Pool error: {e}") from e
+    except psycopg2.Error as e:
+        # Handle actual DB errors (e.g., connection lost during query)
+        logger.error(f"Database error in connection context: {e}")
+        raise RuntimeError(f"Database error: {e}") from e
     except Exception as e:
-        # Log unexpected errors before re-raising for better debugging
-        if not isinstance(e, RuntimeError):
-            logger.error(f"Unexpected error in connection context: {e}")
-            raise RuntimeError(f"Connection error: {e}") from e
-        raise
+        # Handle other unexpected errors
+        logger.error(f"Unexpected error in connection context: {e}")
+        raise RuntimeError(f"Unexpected connection error: {e}") from e
     finally:
         # Always return connection to pool
         if conn is not None and _pool is not None:
