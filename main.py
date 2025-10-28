@@ -21,7 +21,7 @@ import jwt
 # AI processor import (extract_notice_info 포함)
 from ai_processor import (
     extract_hashtags_from_title,
-    classify_notice_category, # <-- 새로 추가
+    classify_notice_category,
     extract_structured_info,
 )
 from comparison_logic import check_suitability
@@ -479,7 +479,7 @@ def get_notice(notice_id: str):
 
 @app.post("/apify/webhook")
 def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
-    """Apify webhook 엔드포인트 - 크롤링 완료 시 호출됨 (AI 처리 포함)"""
+    """Apify webhook 엔드포인트 - 크롤링 완료 시 호출됨 (카테고리 분류만 수행)"""
     # 1) 보안 토큰 확인
     if token != APIFY_WEBHOOK_TOKEN:
         logger.warning(f"Invalid webhook token attempt")
@@ -544,7 +544,7 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
 
     logger.info(f"Processing for college: {college_key}")
 
-    # 5) upsert (AI 추출 포함)
+    # 5) upsert (카테고리 분류만 수행)
     upserted, skipped = 0, 0
     try:
         with get_conn() as conn, conn.cursor() as cur:
@@ -554,35 +554,24 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
                     skipped += 1
                     continue
 
-                # AI 자동추출
+                # AI 자동추출 - 카테고리 분류만 수행
                 if AI_IN_PIPELINE:
                     try:
                         title_for_ai = norm.get("title", "")
                         body_for_ai = norm.get("body_text", "")
 
-                        # 1단계: 카테고리 분류
+                        # 카테고리 분류만 수행
                         category_ai = classify_notice_category(title=title_for_ai, body=body_for_ai)
-                        norm["category_ai"] = category_ai # 분류 결과 저장
-                        norm["hashtags_ai"] = [category_ai] if category_ai else None # 해시태그는 분류 결과 사용
+                        norm["category_ai"] = category_ai
+                        norm["hashtags_ai"] = [category_ai] if category_ai else None
 
-                        # 2단계: 구조화된 정보 추출 (분류된 카테고리 사용)
-                        structured_info = extract_structured_info(title=title_for_ai, body=body_for_ai, category=category_ai)
-
-                        # --- structured_info에서 start_at_ai, end_at_ai, qualification_ai 추출 ---
-                        # 이 부분은 ai_processor.py의 JSON 구조에 맞게 구현해야 합니다.
-                        # 예시: key_date 필드를 파싱하거나, qualifications 객체를 사용합니다.
-                        # calendar_utils.py의 normalize_datetime_for_calendar 함수 활용 고려
-                        start_at_ai = None # structured_info['key_date'] 등을 파싱하여 설정
-                        end_at_ai = None   # structured_info['key_date'] 등을 파싱하여 설정
-                        qualification_ai = structured_info.get("qualifications", structured_info if isinstance(structured_info, dict) else {}) # 구조 확인 필요
-
-
-                        norm["start_at_ai"] = start_at_ai
-                        norm["end_at_ai"] = end_at_ai
-                        norm["qualification_ai"] = qualification_ai
+                        # 자격 요건 추출은 수행하지 않음 - 빈 값으로 설정
+                        norm["start_at_ai"] = None
+                        norm["end_at_ai"] = None
+                        norm["qualification_ai"] = {}
 
                     except Exception as e:
-                        logger.warning(f"AI extraction failed for '{norm.get('title', 'N/A')[:50]}...': {e}. Proceeding without AI data.")
+                        logger.warning(f"AI classification failed for '{norm.get('title', 'N/A')[:50]}...': {e}. Proceeding without AI data.")
                         norm["category_ai"] = None
                         norm["start_at_ai"] = None
                         norm["end_at_ai"] = None
@@ -648,4 +637,99 @@ def apify_webhook(token: str = Query(...), payload: dict = Body(...)):
         "college": college_key,
         "upserted": upserted,
         "skipped": skipped,
-        "total_items": len(items)}
+        "total_items": len(items)
+    }
+
+
+# 새로운 엔드포인트: 자격 요건 수동 추출
+class ExtractQualificationsRequest(BaseModel):
+    notice_id: str
+
+@app.post("/notices/extract-qualifications")
+def extract_qualifications(request: ExtractQualificationsRequest):
+    """특정 공지사항에 대해 자격 요건을 수동으로 추출합니다."""
+    notice_id = request.notice_id
+
+    # 1. 데이터베이스에서 공지사항 조회
+    try:
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, title, body_text, category_ai, qualification_ai
+                FROM notices WHERE id = %s
+            """, [notice_id])
+            notice = cur.fetchone()
+    except Exception as e:
+        logger.error(f"DB error fetching notice {notice_id}: {e}")
+        raise HTTPException(status_code=500, detail="Database error fetching notice")
+
+    if not notice:
+        raise HTTPException(status_code=404, detail="Notice not found")
+
+    # 2. qualification_ai 필드 확인
+    existing_qualification = notice.get('qualification_ai')
+    
+    # qualification_ai가 이미 존재하고 비어있지 않은 경우, 기존 값 반환
+    if existing_qualification and existing_qualification != {}:
+        logger.info(f"Returning existing qualification_ai for notice {notice_id}")
+        return {
+            "status": "success",
+            "notice_id": notice_id,
+            "qualification_ai": existing_qualification,
+            "from_cache": True
+        }
+
+    # 3. qualification_ai가 없거나 빈 딕셔너리인 경우, AI 추출 수행
+    title = notice.get('title', '')
+    body_text = notice.get('body_text', '')
+    category_ai = notice.get('category_ai') or '#일반'
+
+    logger.info(f"Extracting qualifications for notice {notice_id} with category {category_ai}")
+
+    # 4. extract_structured_info 호출
+    try:
+        structured_info = extract_structured_info(title=title, body=body_text, category=category_ai)
+    except Exception as e:
+        logger.error(f"AI extraction failed for notice {notice_id}: {e}")
+        raise HTTPException(status_code=500, detail=f"AI extraction failed: {str(e)}")
+
+    # 5. 추출된 정보에서 필요한 필드 파싱
+    qualification_ai = structured_info.get("qualifications", structured_info if isinstance(structured_info, dict) else {})
+    
+    # start_at_ai, end_at_ai는 현재 구현에서는 None으로 유지
+    # (필요시 structured_info에서 key_date 등을 파싱하여 설정 가능)
+    start_at_ai = None
+    end_at_ai = None
+
+    # 6. 데이터베이스 업데이트
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                UPDATE notices
+                SET qualification_ai = %s,
+                    start_at_ai = %s,
+                    end_at_ai = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+            """, [Json(qualification_ai), start_at_ai, end_at_ai, notice_id])
+            conn.commit()
+            
+            if cur.rowcount == 0:
+                logger.warning(f"No rows updated for notice {notice_id}")
+            else:
+                logger.info(f"Successfully updated qualification_ai for notice {notice_id}")
+                
+    except Exception as e:
+        logger.error(f"DB error updating notice {notice_id}: {e}")
+        raise HTTPException(status_code=500, detail="Database error updating notice")
+
+    # 7. 캐시 무효화
+    cache_key = f"notice_{notice_id}"
+    cache_set(cache_key, None, ttl=1)
+
+    # 8. 성공 응답 반환
+    return {
+        "status": "success",
+        "notice_id": notice_id,
+        "qualification_ai": qualification_ai,
+        "from_cache": False
+    }
