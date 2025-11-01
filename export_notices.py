@@ -2,7 +2,7 @@
 """
 export_notices.py
 
-notices 테이블의 'title', 'body_text', 'hashtags_ai' 컬럼을
+notices 테이블의 단과대 이름, 'title', 'body_text', 'hashtags_ai' 컬럼을
 CSV (notices_export.csv) 파일로 추출하는 스크립트.
 
 필요한 라이브러리:
@@ -33,15 +33,18 @@ def export_data():
         logger.error("오류: DATABASE_URL이 .env 파일에 설정되지 않았습니다.")
         return
 
-    # SQL 쿼리: title, body_text, hashtags_ai 조회
+    # SQL 쿼리: 단과대 이름(c.name), title, body_text, hashtags_ai 조회
+    # LEFT JOIN을 사용하여 colleges 테이블과 조인
     # COALESCE를 사용하여 NULL 값인 경우 빈 문자열이나 빈 배열로 처리
     SQL_QUERY = """
     SELECT 
-        title, 
-        COALESCE(body_text, ''), 
-        COALESCE(hashtags_ai, ARRAY[]::text[])
-    FROM notices
-    ORDER BY created_at DESC;
+        COALESCE(c.name, 'N/A') AS college_name,
+        n.title, 
+        COALESCE(n.body_text, ''), 
+        COALESCE(n.hashtags_ai, ARRAY[]::text[])
+    FROM notices n
+    LEFT JOIN colleges c ON n.college_key = c.key
+    ORDER BY n.created_at DESC;
     """
 
     logger.info(f"데이터베이스 연결 시도...")
@@ -60,8 +63,8 @@ def export_data():
                 with open(OUTPUT_FILE, 'w', newline='', encoding='utf-8') as f:
                     writer = csv.writer(f)
                     
-                    # 4. 헤더 행(Header Row) 작성
-                    writer.writerow(["title", "body_text", "hashtags"])
+                    # 4. 헤더 행(Header Row) 작성 (college_name 추가)
+                    writer.writerow(["college_name", "title", "body_text", "hashtags"])
                     
                     logger.info("쿼리 실행...")
                     cur.execute(SQL_QUERY)
@@ -71,15 +74,16 @@ def export_data():
                     # 5. 데이터 행(Data Rows) 작성
                     # cur.fetchall() 대신 이터레이터로 순회하여 메모리 효율적 처리
                     for row in cur:
-                        title, body_text, hashtags_list = row
+                        # college_name 언패킹 추가
+                        college_name, title, body_text, hashtags_list = row
                         
                         # 6. 데이터 변환
                         # hashtags_ai (text[]) 컬럼을 쉼표로 구분된 단일 문자열로 변환
                         # 예: ['#학사', '#취업'] -> "#학사,#취업"
                         hashtags_str = ",".join(hashtags_list)
                         
-                        # 7. CSV에 행 쓰기
-                        writer.writerow([title, body_text, hashtags_str])
+                        # 7. CSV에 행 쓰기 (college_name 추가)
+                        writer.writerow([college_name, title, body_text, hashtags_str])
                         total_rows += 1
 
         logger.info(f"🎉 {total_rows}개의 공지사항을 '{OUTPUT_FILE}'(으)로 성공적으로 추출했습니다.")

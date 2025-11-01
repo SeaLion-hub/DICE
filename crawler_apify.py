@@ -164,37 +164,78 @@ RETURNING id; -- Optional: 반환 값 추가하여 업데이트 확인 가능
 # --- 기존 헬퍼 함수들 (clean_text, extract_text_from_html, ...) ---
 # 여기에 기존 헬퍼 함수들이 있다고 가정합니다. (코드가 너무 길어져 생략)
 def clean_text(text: Optional[str], max_length: Optional[int] = None) -> str:
+    """텍스트 정리 (줄바꿈은 유지하도록 수정)"""
     if not text: return ""
     text = unescape(text) # HTML 엔티티 디코딩
-    text = re.sub(r'\s+', ' ', text) # 연속 공백을 하나로
+    
+    # 여러 줄의 공백/개행을 최대 2줄로
+    text = re.sub(r'(\n\s*){3,}', '\n\n', text)
+    # 일반적인 연속 공백 (줄바꿈 제외)을 하나로
+    text = re.sub(r'[ \t\r\f\v]+', ' ', text)
+    
     text = text.strip() # 앞뒤 공백 제거
     if max_length and len(text) > max_length: # 길이 제한
         text = text[:max_length-3] + "..."
     return text
 
 def extract_text_from_html(html: Optional[str]) -> str:
-    """HTML에서 주요 텍스트 내용만 추출 시도"""
+    """HTML에서 주요 텍스트 내용만 추출 시도 (오류나는 대학 패턴 수정)"""
     if not html: return ""
     try:
-        # 특정 패턴('게시글 내용' ~ '목록') 사이 내용 우선 추출 시도
-        content_pattern = r'게시글 내용(.*?)목록'
-        content_match = re.search(content_pattern, html, re.DOTALL)
-        soup_text = html
-        if content_match:
-            soup_text = content_match.group(1).strip()
+        # 1. CDATA 스크립트 먼저 제거 (파싱 오류 방지)
+        text_content = re.sub(r'//<!\[CDATA\[.*?//\]\]>', '', html, flags=re.DOTALL)
+        
+        # 2. BeautifulSoup으로 파싱
+        soup = BeautifulSoup(text_content, 'html.parser')
 
-        # BeautifulSoup으로 파싱
-        soup = BeautifulSoup(soup_text, 'html.parser')
-
-        # 불필요한 태그 제거
-        for tag in soup(['script', 'style', 'meta', 'link', 'header', 'footer', 'nav', 'aside']):
+        # 3. 불필요한 태그 제거 (기존 로직 유지)
+        for tag in soup(['script', 'style', 'meta', 'link', 'header', 'footer', 'nav', 'aside', 'form']):
             tag.decompose()
 
-        # 텍스트 추출 및 정리
-        text = soup.get_text(separator=' ', strip=True)
-        # 불필요한 파이프 문자 정리 (예: ' | ')
-        text = re.sub(r'(\s*\|\s*)+', ' ', text)
+        # 4. 텍스트 추출 (줄바꿈 유지)
+        text = soup.get_text(separator='\n', strip=True)
+
+        # 5. 헤더(Header) 정보 제거
+        #    '게시글 내용' 마커는 불안정하므로 제거
+        header_end_patterns = [
+            r'조회수\s+\d+',
+            r'\.(xlsx|pdf|hwp|doc|docx|zip|jpg|png|jpeg|gif)(\s|\n|$)', # 첨부파일
+        ]
+        
+        last_header_end_index = -1
+        for pattern in header_end_patterns:
+            matches = list(re.finditer(pattern, text, re.IGNORECASE))
+            if matches:
+                # 마지막 일치 항목의 끝 위치를 찾음
+                last_match_end = matches[-1].end()
+                if last_match_end > last_header_end_index:
+                    last_header_end_index = last_match_end
+
+        if last_header_end_index != -1 and last_header_end_index < len(text):
+            text = text[last_header_end_index:] # 헤더 마커 *이후*의 텍스트
+
+        # 6. 푸터(Footer) 정보 제거
+        #    '목록' 관련 마커는 불안정하므로 제거
+        footer_markers = [
+            r'연세대학교 의과대학 TAG',
+            r'\sTAG\s',
+            r'연세대학교 관련사이트',
+            r'COPYRIGHT©',
+            r'채용공고\s+입찰공고',
+            r'개인정보처리방침',
+            # r'목록 이전글', # <-- 이 마커가 문제를 일으킴 (제거)
+        ]
+        footer_pattern = re.compile('|'.join(footer_markers), re.IGNORECASE | re.DOTALL)
+        match = footer_pattern.search(text)
+        if match:
+            text = text[:match.start()] # 푸터 마커 *이전*의 텍스트
+
+        # 7. '게시글 내용' 텍스트가 남아있다면 직접 제거
+        text = text.replace("게시글 내용", "")
+        
+        # 8. 마지막으로 1단계에서 수정한 clean_text 함수로 최종 정리
         return clean_text(text)
+        
     except Exception as e:
         logger.warning(f"  ⚠️ HTML parsing error: {e}")
         return "" # 오류 발생 시 빈 문자열 반환
