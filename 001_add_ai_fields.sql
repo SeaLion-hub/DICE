@@ -65,8 +65,6 @@ BEGIN
 END $$;
 
 -- Remove summary_ai column if it exists (Backward compatibility for removal)
--- Note: This part might be redundant if 000_init.sql already excludes summary_ai,
--- but keeping it ensures removal if it somehow existed before.
 DO $$
 BEGIN
     IF EXISTS (
@@ -74,6 +72,17 @@ BEGIN
         WHERE table_name = 'notices' AND column_name = 'summary_ai'
     ) THEN
         ALTER TABLE notices DROP COLUMN summary_ai;
+    END IF;
+END $$;
+
+-- (추가된 부분) Remove summary_raw column if it exists
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_name = 'notices' AND column_name = 'summary_raw'
+    ) THEN
+        ALTER TABLE notices DROP COLUMN summary_raw;
     END IF;
 END $$;
 

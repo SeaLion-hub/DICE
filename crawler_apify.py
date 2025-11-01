@@ -37,6 +37,72 @@ except ImportError:
             print(f"Warning: Invalid date format: {date_yyyy_mm_dd}. Returning None.")
             return None
 
+def clean_body_text(raw_text: str) -> str:
+    """
+    Apify에서 크롤링한 원본 body_text에서 불필요한
+    CDATA 스크립트, HTML 태그, 헤더, 푸터 정보를 제거하여 순수 본문만 추출합니다.
+    """
+    if not raw_text:
+        return ""
+
+    # 1. HTML 엔티티 복원 (e.g., &lt; -> <)
+    #    (파일의 291번째 줄에 있던 unescape를 여기로 가져옵니다)
+    text = unescape(raw_text)
+
+    # 2. JavaScript CDATA 블록 제거 (사용자 예시 패턴)
+    #    예: 학부 //<![CDATA[ ... //]]> 봉사활동
+    text = re.sub(r'//<!\[CDATA\[.*?//\]\]>', '', text, flags=re.DOTALL)
+
+    # 3. BeautifulSoup을 사용하여 HTML 태그 제거 및 텍스트만 추출
+    #    separator='\n'을 사용해 줄바꿈을 어느 정도 유지
+    soup = BeautifulSoup(text, 'html.parser')
+    text = soup.get_text(separator='\n', strip=True)
+
+    # 4. 헤더(Header) 정보 제거
+    #    관찰된 헤더 메타데이터의 *마지막* 부분 뒤에서 본문이 시작
+    header_end_patterns = [
+        r'조회수\s+\d+',  # '조회수 1137'
+        # '.xlsx', '.pdf' 등 첨부파일 링크 (공백이나 줄바꿈으로 끝남)
+        r'\.(xlsx|pdf|hwp|doc|docx|zip|jpg|png|jpeg|gif)(\s|\n|$)',
+        r'게시글 내용'  # CSV에서 발견된 마커
+    ]
+    
+    last_header_end_index = -1
+    for pattern in header_end_patterns:
+        # finditer로 모든 일치 항목을 찾음
+        matches = list(re.finditer(pattern, text, re.IGNORECASE))
+        if matches:
+            # 마지막 일치 항목의 끝 위치를 찾음
+            last_match_end = matches[-1].end()
+            if last_match_end > last_header_end_index:
+                last_header_end_index = last_match_end
+
+    # 헤더 마커가 발견되었다면, 그 위치 다음부터 본문으로 간주
+    if last_header_end_index != -1 and last_header_end_index < len(text):
+        text = text[last_header_end_index:]
+
+    # 5. 푸터(Footer) 정보 제거
+    #    관찰된 푸터 시작 키워드들을 기준으로 텍스트를 분리하여 앞부분만 선택
+    footer_markers = [
+        r'연세대학교 의과대학 TAG',  # 사용자 예시
+        r'\sTAG\s',               # 일반적인 TAG
+        r'목록 이전글',            # 사용자 예시 및 CSV
+        r'연세대학교 관련사이트',        # CSV
+        r'COPYRIGHT©',           # CSV (특수문자 포함)
+        r'채용공고\s+입찰공고'      # CSV
+    ]
+    footer_pattern = re.compile('|'.join(footer_markers), re.IGNORECASE | re.DOTALL)
+    
+    match = footer_pattern.search(text)
+    if match:
+        # 푸터 마커가 시작되는 위치의 텍스트만 사용
+        text = text[:match.start()]
+
+    # 6. 최종 정리: 앞뒤 공백 및 불필요한 개행 문자 정돈
+    text = re.sub(r'(\n\s*){3,}', '\n\n', text) # 3줄 이상의 개행을 2줄로
+    
+    return text.strip()
+
 
 load_dotenv(encoding="utf-8")
 
@@ -265,16 +331,20 @@ def normalize_item(item: dict, base_url: Optional[str] = None) -> dict:
     # HTML 본문 추출
     body_html = extract_field(item, ["html", "content_html", "body_html", "htmlContent", "content", "text"], default=None) # HTML은 그대로 유지 시도
     # 텍스트 본문 추출 (raw text 우선, 없으면 HTML에서 추출)
+    # (약 251번째 줄 근처)
+    body_html = extract_field(item, ["html", "content_html", "body_html", "htmlContent", "content", "text"], default=None) # HTML은 그대로 유지 시도
+    
+    # ⭐️ 2단계 수정 위치입니다 ⭐️
+    # 텍스트 본문 추출 ('text' 필드에 지저분한 원본이 들어있다고 가정)
     body_text_raw = extract_field(item, ["text", "content", "body", "body_text", "plainText"], default=None)
-    body_text = clean_text(body_text_raw) # raw text 클리닝
+    
+    # 1단계에서 추가한 clean_body_text 함수로 원본 텍스트를 직접 정제
+    body_text = clean_body_text(body_text_raw)
 
-    # HTML이 있고, 거기서 추출한 텍스트가 더 길거나 raw text가 없으면 HTML 기반 텍스트 사용
-    if body_html:
-        body_text_from_html = extract_text_from_html(body_html)
-        if len(body_text_from_html) > len(body_text):
-            body_text = body_text_from_html
-        elif not body_text and body_text_from_html: # raw text가 없고 HTML text만 있을 때
-            body_text = body_text_from_html
+    # (비상 로직) 만약 body_text_raw에 내용이 없고 body_html에만 내용이 있는 경우,
+    # body_html을 정제 시도
+    if not body_text and body_html:
+         body_text = clean_body_text(body_html)
 
     # 요약이 없고 본문 텍스트가 있으면 본문 앞부분을 요약으로 사용
     if body_text and not summary_raw:
