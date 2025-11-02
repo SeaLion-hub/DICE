@@ -1,753 +1,721 @@
-# comparison_logic.py
+# comparison_logic.py 
+# - 스키마 정합성 (auth_schemas v2), JSONB language_scores 다중 시험 지원
+# - 필수/우대/선택 태깅 + confidence 가중치 반영
+# - 논리 연산(AND/OR/괄호) 1단계 지원
+# - 어학 점수 표준화/정규화(숫자형·등급형 혼합)
+# - GPA 스케일 환산(4.3/4.5 스케일 혼재 대응)
+# - 전공 매칭 유사도(간단 trigram 유사도 + 매핑 테이블)
+# - 키워드 Jaccard 보너스(0.7~1.1)
+# - 가중합 점수(필수/우대/선택 0.5/0.3/0.2) + 컷오프(0.8/0.5)
+# - 시간 가중치(마감 임박/신선도/학기 시점) + 클램프
+# - 설명 가능성(reason_codes/reasons_human/missing_info) 강화
+# - 로깅/에러 내성
 
+from __future__ import annotations
 import re
-from typing import Dict, Any, List, Tuple
+import logging
+from typing import Dict, Any, List, Tuple, Literal, Optional, Set, Union
+from dataclasses import dataclass
+from datetime import datetime, timezone
 
-# --- 1. 정규화 및 매핑 데이터 (Ontology) ---
-# --- 1. 정규화 및 매핑 데이터 (Ontology) ---
+logger = logging.getLogger(__name__)
 
-# 학과 매핑: '사용자 프로필 학과': ['공지사항에서 허용되는 동의어/상위그룹']
+# =========================
+# 0) 튜닝/정책 상수
+# =========================
+
+# 항목 가중치 (필수/우대/선택)
+CRITERIA_WEIGHTS = {
+    "required": 0.50,
+    "preferred": 0.30,
+    "optional": 0.20,
+}
+
+# 라벨 컷오프 (가중 점수 기준)
+CUTOFFS = {
+    "eligible": 0.80,    # 0.80 이상 → ELIGIBLE
+    "borderline": 0.50,  # 0.50~0.80 → BORDERLINE
+}
+
+# Temporal 가중치 (deadline/freshness/term)
+TEMPORAL_WEIGHTS = {
+    "deadline": {
+        "passed_penalty": 0.75,
+        "gt_30d": 1.00,
+        "15_30d": 1.03,
+        "7_15d": 1.06,
+        "3_7d": 1.12,
+        "0_3d": 1.20
+    },
+    "freshness": {
+        "gt_60d": 0.92,
+        "30_60d": 0.96,
+        "7_30d": 1.00,
+        "0_7d": 1.04
+    },
+    "term": {
+        "perfect": 1.08,
+        "ok": 1.02,
+        "far": 0.97,
+        "unknown": 1.00
+    },
+    "cap": (0.80, 1.30)
+}
+
+# 키워드 보너스 (Jaccard) → 0.7 ~ 1.1 사이로 선형 맵핑
+JACCARD_BOUNDS = (0.0, 1.0)
+KEYWORD_WEIGHT_BOUNDS = (0.70, 1.10)
+
+# GPA 스케일 기본값
+DEFAULT_GPA_SCALE = 4.5
+
+# =========================
+# 1) 어학 정규화 온톨로지
+# =========================
+
+LANGUAGE_KEY_MAP = {
+    'toeic': 'TOEIC', '토익': 'TOEIC',
+    'toefl': 'TOEFL_IBT', '토플': 'TOEFL_IBT', 'toefl ibt': 'TOEFL_IBT', 'ibt': 'TOEFL_IBT',
+    'ielts': 'IELTS', '아이엘츠': 'IELTS',
+    'jlpt': 'JLPT',
+    'opic': 'OPIC', '오픽': 'OPIC', 'opi c': 'OPIC',
+    'toeic speaking': 'TOEIC_SPEAKING', '토익스피킹': 'TOEIC_SPEAKING', 'toeic spk': 'TOEIC_SPEAKING',
+    'teps': 'TEPS', '텝스': 'TEPS',
+    'hsk': 'HSK',
+}
+
+# 등급→서열 점수(높을수록 좋음)
+LANGUAGE_LEVEL_MAP = {
+    'JLPT': {'N1': 5, 'N2': 4, 'N3': 3, 'N4': 2, 'N5': 1},
+    'HSK': {'6급': 6, '5급': 5, '4급': 4, '3급': 3, '2급': 2, '1급': 1},
+    'OPIC': {'AL': 7, 'IH': 6, 'IM3': 5, 'IM2': 4, 'IM1': 3, 'IL': 2, 'NH': 1, 'NM': 0, 'NL': 0},
+    'TOEIC_SPEAKING': {  # 다양한 표기 흡수
+        'ADVANCED HIGH': 8, 'ADVANCED MID': 7, 'ADVANCED LOW': 7, 'AL': 7,
+        'INTERMEDIATE HIGH': 6, 'IH': 6,
+        'INTERMEDIATE MID 3': 5, 'IM3': 5,
+        'INTERMEDIATE MID 2': 4, 'IM2': 4,
+        'INTERMEDIATE MID 1': 3, 'IM1': 3,
+        'INTERMEDIATE LOW': 2, 'IL': 2,
+        'NOVICE HIGH': 1, 'NH': 1,
+        'NOVICE MID': 0, 'NM': 0, 'NOVICE LOW': 0, 'NL': 0
+    }
+}
+
+# 숫자형 시험의 최대 점수(정규화용)
+LANGUAGE_MAX_SCORE = {
+    'TOEIC': 990.0,
+    'TOEFL_IBT': 120.0,
+    'IELTS': 9.0,
+    'TEPS': 600.0,  # (최근 기준 600 만점)
+    # 등급형은 후술 정규화
+}
+
+# 등급형 최대 서열값
+LANG_LEVEL_MAX = {
+    'JLPT': max(LANGUAGE_LEVEL_MAP['JLPT'].values()),
+    'HSK': max(LANGUAGE_LEVEL_MAP['HSK'].values()),
+    'OPIC': max(LANGUAGE_LEVEL_MAP['OPIC'].values()),
+    'TOEIC_SPEAKING': max(LANGUAGE_LEVEL_MAP['TOEIC_SPEAKING'].values()),
+}
+
+# =========================
+# 2) 전공 매핑/유사도
+# =========================
+
 DEPARTMENT_MAP = {
-    # 기존 학과 매핑 유지
     '경영학과': ['경영대학', '상경대학', '상경‧경영대학', '경영/경제 계열'],
     '경제학부': ['경제대학', '상경대학', '상경‧경영대학', '경영/경제 계열'],
-    '응용통계학과': ['상경대학', '상경‧경영대학', '통계데이터사이언스학과', '통계학과'], # CSV 데이터 반영
-    '컴퓨터과학과': ['공과대학', '첨단컴퓨팅학부', 'AI·ICT 관련 학과', 'IT 계열', '이공 계열', '인공지능융합대학'], # CSV 데이터 반영
+    '응용통계학과': ['상경대학', '상경‧경영대학', '통계데이터사이언스학과', '통계학과'],
+    '컴퓨터과학과': ['공과대학', '첨단컴퓨팅학부', 'AI·ICT 관련 학과', 'IT 계열', '이공 계열', '인공지능융합대학'],
     '인공지능학과': ['인공지능융합대학', '첨단컴퓨팅학부', 'AI·ICT 관련 학과', 'IT 계열', '이공 계열'],
-    '전기전자공학부': ['공과대학', 'AI·ICT 관련 학과', 'IT 계열', '이공 계열'],
-    '생명공학과': ['생명시스템대학', '바이오 분야', '이공 계열', '자연계'], # CSV 데이터 반영
-    '화학과': ['이과대학', '바이오 분야', '이공 계열', '자연계'], # CSV 데이터 반영
-    '문헌정보학과': ['문과대학', '인문사회계열'], # CSV 데이터 반영
-    '국어국문학과': ['문과대학', '인문사회계열'], # CSV 데이터 반영
-    '의예과': ['의과대학', '의학계열'],
-    '의학과': ['의과대학', '의학계열'], # CSV 데이터 반영
-    '치과대학': ['치과대학', '치의예과', '치의학과', '의학계열'], # CSV 데이터 반영
-    '간호학과': ['간호대학', '의학계열'],
-    '약학과': ['약학대학'], # CSV 데이터 반영
-    '신학과': ['신과대학'], # CSV 데이터 반영
-    '사회학과': ['사회과학대학', '인문사회계열'], # CSV 데이터 반영
-    '행정학과': ['사회과학대학', '인문사회계열'], # CSV 데이터 반영
-    '정치외교학과': ['사회과학대학', '인문사회계열'], # CSV 데이터 반영
-    '언론홍보영상학부': ['사회과학대학', '인문사회계열'], # CSV 데이터 반영
-    '사회복지학과': ['사회과학대학', '인문사회계열'], # CSV 데이터 반영
-    '문화인류학과': ['사회과학대학', '인문사회계열'], # CSV 데이터 반영
-    '음악대학': ['음악대학', '교회음악과', '성악과', '피아노과', '관현악과', '작곡과', '예체능계열'], # CSV 데이터 반영
-    '생활과학대학': ['생활과학대학', '의류환경학과', '식품영양학과', '실내건축학과', '아동가족학과', '생활디자인학과', '인문사회계열', '자연계열'], # CSV 데이터 반영 (통합디자인은 생활디자인으로 간주)
-    '교육과학대학': ['교육과학대학', '교육학부', '체육교육학과', '스포츠응용산업학과', '인문사회계열', '예체능계열'], # CSV 데이터 반영
-    '언더우드국제대학': ['언더우드국제대학', 'UIC'], # CSV 데이터 반영
-    '글로벌인재대학': ['글로벌인재대학', 'GLC'], # CSV 데이터 반영
-    # 기타 학과 및 계열 매핑 추가 (CSV에서 발견된 표현 기반)
-    '시스템반도체공학과': ['공과대학', 'IT 계열', '이공 계열'],
-    '디스플레이융합공학과': ['공과대학', 'IT 계열', '이공 계열'],
-    '이과대학': ['이과대학', '수학과', '물리학과', '화학과', '지구시스템과학과', '천문우주학과', '대기과학과', '자연계열', '이공 계열'],
-    '공과대학': ['공과대학', '화공생명공학부', '전기전자공학부', '건축공학과', '도시공학과', '토목환경공학과', '기계공학부', '신소재공학부', '산업공학과', '컴퓨터과학과', '시스템반도체공학과', '디스플레이융합공학과', 'IT 계열', '이공 계열', '자연계열'],
-    '생명시스템대학': ['생명시스템대학', '시스템생물학과', '생화학과', '생명공학과', '자연계열', '이공 계열'],
-    '인공지능융합대학': ['인공지능융합대학', '컴퓨터과학과', '인공지능학과', '데이터사이언스융합전공', 'AI·ICT 관련 학과', 'IT 계열', '이공 계열'],
-    '자연계': ['자연계', '자연계 대학원', '이과대학', '공과대학', '생명시스템대학', '인공지능융합대학', '약학대학', '의과대학', '치과대학', '간호대학'], # CSV 데이터 반영
-    '인문사회계열': ['인문사회계열', '문과대학', '상경대학', '경영대학', '신과대학', '사회과학대학', '생활과학대학', '교육과학대학'], # CSV 데이터 반영
-    '예체능계열': ['예체능계열', '음악대학', '체육교육학과', '스포츠응용산업학과'], # CSV 데이터 반영
+    # ... 필요 시 확장
 }
 
-# 학년/학기 정규화: '사용자 프로필 텍스트': (레벨, 학기)
-# (1학년 1학기=1, 1학년 2학기=2, ... 4학년 2학기=8, 대학원 1학기=9...)
-GRADE_TO_SEMESTER_MAP = {
-    '학부 1학년': ('학부', 1), # 1학기 재학 중
-    '학부 2학년': ('학부', 3), # 2학년 1학기 재학 중 (CSV: '2~4학년' 표현 고려)
-    '학부 3학년': ('학부', 5), # 3학년 1학기 재학 중
-    '학부 4학년': ('학부', 7), # 4학년 1학기 재학 중 (CSV: '졸업 예정인 학부생' 고려)
-    '학부 재학생': ('학부', 1), # 최소 학기로 가정 (CSV: '학부 재학생' 표현)
-    '학부 졸업예정자': ('학부', 7), # 최소 7학기로 가정
-    '학부 졸업생': ('학부', 9), # 졸업 상태 (학기 9로 임의 지정)
-    '대학원생': ('대학원', 9), # 대학원 1학기로 가정 (CSV: '대학원생')
-    '대학원 재학생': ('대학원', 9), # 대학원 1학기로 가정 (CSV: '대학원 재학생')
-    '대학원 석사과정': ('대학원', 9), # 석사 1학기로 가정
-    '대학원 박사과정': ('대학원', 13), # 박사 1학기 (석사 4학기 이후)로 가정 (CSV: '박사과정 재학생')
-    '대학원 석박사통합과정': ('대학원', 9), # 통합 1학기로 가정 (CSV: '석·박사통합과정')
-    '대학원 1학기': ('대학원', 9),
-    '대학원 2학기': ('대학원', 10),
-    '대학원 3학기': ('대학원', 11),
-    '대학원 4학기': ('대학원', 12), # 석사 수료 시점
-    '대학원 5학기 이상': ('대학원', 13), # 박사 과정 시작 또는 통합과정 (CSV: '통합과정 5학기 이상')
-    '대학원 졸업생': ('대학원', 17), # 졸업 상태 (학기 17로 임의 지정)
-    # 추가적인 학기 표현 매핑 가능
+def _trigram_similarity(a: str, b: str) -> float:
+    """아주 간단한 trigram 유사도 (0~1). 성능 목적상 경량화."""
+    a = (a or "").lower()
+    b = (b or "").lower()
+    if not a or not b:
+        return 0.0
+    def trigrams(s: str) -> Set[str]:
+        return {s[i:i+3] for i in range(len(s)-2)} if len(s) >= 3 else {s}
+    A, B = trigrams(a), trigrams(b)
+    inter = len(A & B)
+    union = len(A | B) or 1
+    return inter / union
+
+# =========================
+# 3) 반환 타입/코드
+# =========================
+
+CheckStatus = Literal['PASS', 'FAIL', 'VERIFY']
+
+@dataclass
+class CheckResult:
+    status: CheckStatus
+    reason_code: str
+    message: str
+    is_required: bool = True
+    confidence: float = 1.0  # 추출 신뢰도(0~1)
+
+# 표준 코드 → 기본 메시지 템플릿 (UI에서 아이콘/번역 매핑 가능)
+REASON_TEMPLATES = {
+    "GPA_FAIL": "학점 미달",
+    "LANG_FAIL_SCORE": "어학 요건 미충족",
+    "LANG_SCORE_MISSING": "어학 점수 정보 없음",
+    "DEPT_FAIL_MISMATCH": "전공 요건 불일치",
+    "GRADE_FAIL_LEVEL": "학위(학부/대학원) 요건 불일치",
+    "GRADE_FAIL_SEMESTER": "학기 범위 불충족",
+    "GRADE_FAIL_YEAR": "학년 요건 불충족",
+    "INCOME_FAIL_CAP": "소득분위 요건 초과",
+    "GENDER_FAIL": "성별 요건 불일치",
+    "MILITARY_FAIL": "병역 요건 불일치",
+    "OTHER_VERIFY": "기타 조건 확인 필요",
 }
 
-# 성별 매핑: '사용자 프로필 값': ['공지사항에서 허용되는 동의어/표현']
-GENDER_MAP = {
-    '여성': ['여성', '여학생', '여자', 'female', 'woman'],
-    '남성': ['남성', '남학생', '남자', 'male', 'man'],
-    # '무관' 키 추가: 성별 제한 없는 경우
-    '무관': ['성별무관', '성별 무관', '남녀무관', '남녀 무관', '성별 제한 없음'],
-}
+# =========================
+# 4) 정규식(사전 컴파일)
+# =========================
+RE_GPA_NUM = re.compile(r'(\d(?:\.\d{1,2})?)')
+RE_GRADE_RANGE = re.compile(r'(\d)[\s~.~-]+(\d)\s*학기')
+RE_GRADE_ABOVE = re.compile(r'(\d)\s*학년\s*이상')
+RE_ANY_DEPT_ANYONE = re.compile(r'전\s*(계열|학과)|모든\s*학과|누구나|학과\s*무관')
+RE_OR = re.compile(r'\b(또는|or|OR)\b')
+RE_AND = re.compile(r'\b(그리고|및|and|AND)\b')
+RE_PAREN = re.compile(r'[\(\)]')
 
-# 병역 매핑: '사용자 프로필 값': ['공지사항에서 허용되는 동의어/표현']
-MILITARY_SERVICE_MAP = {
-    '군필': ['군필', '병역필', '전역', 'served', 'completed military service', '군필자'],
-    '미필': ['미필', '병역미필', 'unserved', 'not completed military service', '보충역'], # 보충역은 미필 상태로 간주
-    '면제': ['면제', '병역면제', 'exempt', 'exemption', '군 면제'],
-    '해당없음': ['여성', 'female', '병역 해당 없음'], # 병역 의무 없는 경우
-    '전문연구요원': ['전문연구요원', '전문연구요원 복무', 'specialized research personnel'], # CSV 데이터 반영
-    # '무관' 키 추가: 병역 제한 없는 경우
-    '무관': ['병역무관', '병역 무관', '병역 관계 없음', '병역 제한 없음'],
-}
+# 언어 요구 추출
+RE_LANG_REQ = re.compile(
+    r'(TOEIC|TOEFL|IELTS|JLPT|HSK|OPI[cC]|TEPS|TOEIC\s*SPEAKING|토익|토플|아이엘츠|오픽|텝스|토익\s*스피킹)'
+    r'[\s:/-]*'
+    r'([0-9]+\.?[0-9]*|N[1-5]|AL|IH|IM[1-3]|IL|NH|NM|NL|[1-6]급|[A-Za-z ]{2,})',
+    re.IGNORECASE
+)
 
+# =========================
+# 5) 공통 유틸
+# =========================
 
-# --- 2. 헬퍼 함수 (비교 로직 업그레이드) ---
+def _parse_iso(dt_str: Optional[str]) -> Optional[datetime]:
+    if not dt_str or not isinstance(dt_str, str):
+        return None
+    try:
+        s = dt_str.strip().replace("Z", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+def _clamp(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+def _current_term(now: datetime) -> Tuple[int, int]:
+    m = now.month
+    sem = 1 if 3 <= m <= 8 else 2
+    return (now.year, sem)
+
+def _parse_target_term(notice: Dict[str, Any]) -> Optional[Tuple[int, int]]:
+    tt = notice.get("target_term_ai")
+    if isinstance(tt, str) and "-" in tt:
+        try:
+            y_str, s_str = tt.split("-", 1)
+            return (int(y_str), int(s_str))
+        except Exception:
+            pass
+    start_iso = _parse_iso(notice.get("start_at_ai"))
+    if start_iso:
+        return _current_term(start_iso)
+    txt = ""
+    quals = notice.get("qualifications") or {}
+    gl = quals.get("grade_level") or ""
+    if isinstance(gl, str):
+        txt = gl
+    t = txt.replace(" ", "").lower()
+    now = datetime.now(timezone.utc)
+    y_now, s_now = _current_term(now)
+    if "1학기" in t or "봄" in t:
+        return (y_now if s_now == 1 else y_now + 1, 1)
+    if "2학기" in t or "가을" in t or "fall" in t:
+        return (y_now if s_now == 2 else y_now, 2)
+    if "내년" in t or "nextyear" in t:
+        return (y_now + 1, s_now)
+    return None
+
+def _temporal_weight(notice: Dict[str, Any]) -> float:
+    now = datetime.now(timezone.utc)
+    # 1) deadline
+    w_deadline = 1.0
+    deadline_dt = _parse_iso(notice.get("deadline_ai")) or _parse_iso(notice.get("end_at_ai"))
+    if deadline_dt:
+        days = (deadline_dt - now).total_seconds() / 86400.0
+        d = TEMPORAL_WEIGHTS["deadline"]
+        if days < 0:
+            w_deadline = d["passed_penalty"]
+        elif days <= 3:
+            w_deadline = d["0_3d"]
+        elif days <= 7:
+            w_deadline = d["3_7d"]
+        elif days <= 15:
+            w_deadline = d["7_15d"]
+        elif days <= 30:
+            w_deadline = d["15_30d"]
+        else:
+            w_deadline = d["gt_30d"]
+    # 2) freshness
+    w_fresh = 1.0
+    created_dt = _parse_iso(notice.get("created_at"))
+    if created_dt:
+        age_days = (now - created_dt).total_seconds() / 86400.0
+        f = TEMPORAL_WEIGHTS["freshness"]
+        if age_days <= 7:
+            w_fresh = f["0_7d"]
+        elif age_days <= 30:
+            w_fresh = f["7_30d"]
+        elif age_days <= 60:
+            w_fresh = f["30_60d"]
+        else:
+            w_fresh = f["gt_60d"]
+    # 3) term
+    w_term = 1.0
+    tterm = _parse_target_term(notice)
+    if tterm:
+        y_now, s_now = _current_term(now)
+        y_tar, s_tar = tterm
+        steps = (y_tar - y_now) * 2 + (s_tar - s_now)
+        t = TEMPORAL_WEIGHTS["term"]
+        if steps in (0, 1):
+            w_term = t["perfect"]
+        elif 2 <= steps <= 3:
+            w_term = t["ok"]
+        elif steps >= 4 or steps < 0:
+            w_term = t["far"]
+        else:
+            w_term = t["unknown"]
+    else:
+        w_term = TEMPORAL_WEIGHTS["term"]["unknown"]
+    lo, hi = TEMPORAL_WEIGHTS["cap"]
+    return _clamp(w_deadline * w_fresh * w_term, lo, hi)
+
+def _jaccard_bonus(user_keywords: Set[str], notice_hashtags: Set[str]) -> float:
+    if not user_keywords or not notice_hashtags:
+        return 1.0
+    inter = len(user_keywords & notice_hashtags)
+    union = len(user_keywords | notice_hashtags) or 1
+    jaccard = inter / union  # 0~1
+    lo_j, hi_j = JACCARD_BOUNDS
+    lo_w, hi_w = KEYWORD_WEIGHT_BOUNDS
+    # 선형 맵핑
+    k = (hi_w - lo_w) / (hi_j - lo_j) if (hi_j - lo_j) != 0 else 0
+    return _clamp(lo_w + k * (jaccard - lo_j), lo_w, hi_w)
+
+# =========================
+# 6) 프로필 정규화
+# =========================
 
 def _normalize_user_profile(profile: Dict[str, Any]) -> Dict[str, Any]:
-    """사용자 프로필(UserProfileRequest 스키마 기반)을 비교 가능한 표준 형태로 정규화합니다."""
-    norm = profile.copy()
+    norm = dict(profile or {})
+    norm['gender'] = profile.get('gender')
+    norm['age'] = profile.get('age')
+    norm['major'] = profile.get('major') or ""
+    norm['grade'] = profile.get('grade')
+    norm['keywords'] = set(profile.get('keywords', []))
+    norm['military_service'] = profile.get('military_service')
+    norm['income_bracket'] = profile.get('income_bracket')
+    norm['gpa'] = profile.get('gpa')
+    norm['gpa_scale'] = float(profile.get('gpa_scale') or DEFAULT_GPA_SCALE)
 
-    # 학년/학기 정규화 (profile 딕셔너리에 'grade' 키가 있다고 가정)
-    grade = profile.get('grade') # UserProfileRequest 모델에 따라 'grade' 사용
-    level, semester = ('N/A', 0)
-    if isinstance(grade, int):
-        if 1 <= grade <= 4:
+    # 언어 정규화: 숫자형은 max로 나눠 0~1, 등급형은 서열/최대서열
+    norm_scores: Dict[str, float] = {}
+    raw_scores = profile.get('language_scores') or {}
+    for raw_key, value in raw_scores.items():
+        key = LANGUAGE_KEY_MAP.get(raw_key.lower().strip(), None)
+        if not key:
+            continue
+        # 등급형
+        if key in LANGUAGE_LEVEL_MAP and isinstance(value, str):
+            ordinal = LANGUAGE_LEVEL_MAP[key].get(value.upper().strip())
+            if ordinal is None:
+                continue
+            norm_scores[key] = float(ordinal) / float(LANG_LEVEL_MAX[key])
+        else:
+            try:
+                val = float(re.sub(r'[^0-9.]', '', str(value)))
+            except Exception:
+                continue
+            maxv = LANGUAGE_MAX_SCORE.get(key)
+            if not maxv or maxv <= 0:
+                continue
+            norm_scores[key] = _clamp(val / maxv, 0.0, 1.0)
+    norm['norm_lang_scores'] = norm_scores
+
+    # 학부/대학원 + 학기 추정
+    level, semester = 'N/A', 0
+    g = norm.get('grade')
+    if isinstance(g, int):
+        if 1 <= g <= 4:
             level = '학부'
-            # 학년만 있으므로, 해당 학년의 첫 학기(예: 3학년 -> 5학기)로 가정
-            semester = (grade - 1) * 2 + 1
-        elif grade > 4: # 예시: 대학원생을 5, 6 등으로 표현한 경우
-             level = '대학원'
-             # 대학원 학기 계산 로직은 단순화됨, 필요시 구체화
-             semester = grade - 4 # 예: 5학년->1학기, 6학년->2학기
-
-    # GRADE_TO_SEMESTER_MAP을 사용할 키 생성 (더 견고한 방식 필요 시 수정)
-    grade_text_key = f"{level} {grade}학년" if level == '학부' and grade else None
-    if level == '대학원' and semester > 0:
-        grade_text_key = f"대학원 {semester}학기"
-
-    if grade_text_key:
-        level_from_map, semester_from_map = GRADE_TO_SEMESTER_MAP.get(grade_text_key, (level, semester))
-        norm['norm_level'] = level_from_map
-        norm['norm_semester'] = semester_from_map
-    else:
-        norm['norm_level'] = level
-        norm['norm_semester'] = semester
-
-
-    # 학점 정규화 (숫자로 변환, UserProfileRequest 모델에 따라 'gpa' 사용)
-    try:
-        # UserProfileRequest에서 gpa는 Optional[float]
-        gpa_value = profile.get('gpa')
-        norm['norm_gpa'] = float(gpa_value) if gpa_value is not None else 0.0
-    except (ValueError, TypeError):
-        norm['norm_gpa'] = 0.0
-
-    # 소득분위 정규화 (숫자로 변환, profile에 'income_bracket' 키가 있다고 가정)
-    # UserProfileRequest 스키마에는 없으므로, 프로필 데이터에 이 키가 있을 경우를 대비
-    try:
-        income_text = profile.get('income_bracket', '99') # 기본값 99 (정보 없음 의미)
-        match = re.search(r'(\d+)', str(income_text))
-        norm['norm_income'] = int(match.group(1)) if match else 99
-    except (ValueError, TypeError):
-        norm['norm_income'] = 99
-
-    # UserProfileRequest 모델에 있는 다른 필드들도 가져오기
-    norm['major'] = profile.get('major') # 'major' 필드
-    norm['toeic'] = profile.get('toeic') # 'toeic' 필드
-
-    # 어학 점수 딕셔너리 생성 (UserProfileRequest에는 TOEIC만 있음)
-    norm['language_scores'] = {}
-    if norm['toeic'] is not None:
-        # API 및 비교 함수에서 사용할 키 형식 (대문자, 공백/특수문자 제거)
-        norm['language_scores']['TOEIC'] = norm['toeic']
-    # 만약 profile 딕셔너리에 다른 어학 점수 필드가 있다면 여기에 추가
-    # 예: norm['language_scores']['TOEFL_IBT'] = profile.get('toefl_ibt')
-
-    # 기타 필드 (UserProfileRequest 스키마에 없으므로 가정)
-    norm['military_service'] = profile.get('military_service', '') # 예시
-    norm['gender'] = profile.get('gender', '') # 예시
-    norm['degree'] = profile.get('degree', '') # 예시 (학위 정보, 예: '학사 재학', '석사 졸업')
-
+            semester = (g - 1) * 2 + 1
+        elif g >= 5:
+            level = '대학원'
+            semester = (g - 5) * 2 + 1
+    norm['norm_level'] = level
+    norm['norm_semester'] = semester
     return norm
 
+# =========================
+# 7) 요건 파싱·태깅·신뢰도
+# =========================
 
-def _check_gpa(user_gpa: float, req_text: str) -> Tuple[bool, str]:
-    """GPA 요구사항을 비교합니다."""
-    if req_text == "N/A" or not req_text:
-        return True, "" # 조건 없으면 통과
+@dataclass
+class Requirement:
+    key: str
+    text: str
+    tag: Literal['required', 'preferred', 'optional']
+    confidence: float
 
-    # "3.5/4.3", "3.5", "Cumulative GPA of 3.5 or higher" 등에서 숫자 추출
-    # 소수점 한 자리 또는 두 자리 숫자 추출 (예: 3.0, 3.75)
-    match = re.search(r'(\d\.\d{1,2})', req_text)
-    if match:
+def _infer_tag_and_conf(text_or_obj: Union[str, Dict[str, Any]], default_tag='required') -> Tuple[str, float, str]:
+    """
+    qualifications의 값이 문자열 또는 {text, tag, confidence}일 수 있다는 가정.
+    문자열만 있으면 '우대' 포함 시 preferred, 그 외 required.
+    """
+    if isinstance(text_or_obj, dict):
+        txt = (text_or_obj.get('text') or '').strip()
+        tag = text_or_obj.get('tag') or default_tag
+        conf = float(text_or_obj.get('confidence') or 1.0)
+        tag = tag if tag in ('required', 'preferred', 'optional') else default_tag
+        return tag, _clamp(conf, 0.0, 1.0), txt
+    txt = (text_or_obj or '').strip()
+    tag = 'preferred' if ('우대' in txt or 'preferred' in txt.lower()) else default_tag
+    return tag, 1.0, txt
+
+# =========================
+# 8) 개별 비교기
+# =========================
+
+def _check_gpa(user_gpa: Optional[float], user_scale: float, req: Requirement) -> CheckResult:
+    if user_gpa is None:
+        return CheckResult('VERIFY', 'GPA_MISSING', f"GPA 정보 없음 (요구: {req.text})", req.tag=='required', req.confidence)
+    # 요구 스케일 탐지 (4.3/4.5)
+    req_scale = 4.5
+    if '4.3' in req.text:
+        req_scale = 4.3
+    # 요구 최소값 추출
+    m = RE_GPA_NUM.search(req.text)
+    if not m:
+        return CheckResult('PASS', 'GPA_PARSE_FAIL', "", req.tag=='required', req.confidence)
+    try:
+        req_gpa_raw = float(m.group(1))
+    except Exception:
+        return CheckResult('PASS', 'GPA_PARSE_FAIL', "", req.tag=='required', req.confidence)
+    # 사용자 GPA를 요구 스케일로 환산
+    user_gpa_on_req_scale = (user_gpa / max(user_scale, 0.1)) * req_scale
+    if user_gpa_on_req_scale + 1e-9 < req_gpa_raw:
+        return CheckResult('FAIL', 'GPA_FAIL',
+                           f"학점 미달 (요구≥{req_gpa_raw:.2f}/{req_scale:.1f} | 보유≈{user_gpa_on_req_scale:.2f}/{req_scale:.1f})",
+                           req.tag=='required', req.confidence)
+    return CheckResult('PASS', 'GPA_PASS', "", req.tag=='required', req.confidence)
+
+def _check_grade_level(user_level: str, user_semester: int, req: Requirement) -> CheckResult:
+    if user_semester == 0:
+        return CheckResult('VERIFY', 'GRADE_MISSING', f"학년/학기 정보 없음 (요구: {req.text})", req.tag=='required', req.confidence)
+    t = req.text.replace(" ", "").lower()
+    if '대학원' in t and user_level != '대학원':
+        return CheckResult('FAIL', 'GRADE_FAIL_LEVEL', "대학원생 대상", req.tag=='required', req.confidence)
+    if ('학부' in t or '학년' in t) and user_level != '학부':
+        return CheckResult('FAIL', 'GRADE_FAIL_LEVEL', "학부생 대상", req.tag=='required', req.confidence)
+    rt = t
+    m = RE_GRADE_RANGE.search(rt)
+    if m:
+        min_sem, max_sem = int(m.group(1)), int(m.group(2))
+        if not (min_sem <= user_semester <= max_sem):
+            return CheckResult('FAIL', 'GRADE_FAIL_SEMESTER',
+                               f"학기 미충족 (요구: {min_sem}~{max_sem}학기 | 현재: {user_semester}학기)",
+                               req.tag=='required', req.confidence)
+        return CheckResult('PASS', 'GRADE_PASS', "", req.tag=='required', req.confidence)
+    m2 = RE_GRADE_ABOVE.search(rt)
+    if m2:
+        min_grade = int(m2.group(1))
+        min_sem_req = (min_grade - 1) * 2 + 1
+        if user_semester < min_sem_req:
+            return CheckResult('FAIL', 'GRADE_FAIL_YEAR',
+                               f"학년 미충족 (요구: {min_grade}학년 이상 | 현재: {user_semester}학기)",
+                               req.tag=='required', req.confidence)
+        return CheckResult('PASS', 'GRADE_PASS', "", req.tag=='required', req.confidence)
+    return CheckResult('PASS', 'GRADE_PASS_AMBIGUOUS', "", req.tag=='required', req.confidence)
+
+def _check_department(user_major: str, req: Requirement) -> CheckResult:
+    if not user_major:
+        return CheckResult('VERIFY', 'MAJOR_MISSING', "전공 정보 없음", req.tag=='required', req.confidence)
+    if RE_ANY_DEPT_ANYONE.search(req.text):
+        return CheckResult('PASS', 'DEPT_PASS_ANY', "", req.tag=='required', req.confidence)
+    groups = DEPARTMENT_MAP.get(user_major, [user_major])
+    txt = req.text.lower()
+    # 포함 매칭 + 유사도 병렬
+    for g in groups:
+        if g.lower() in txt:
+            return CheckResult('PASS', 'DEPT_PASS', "", req.tag=='required', req.confidence)
+        if _trigram_similarity(g, txt) >= 0.33:
+            return CheckResult('PASS', 'DEPT_PASS_FUZZY', "", req.tag=='required', req.confidence)
+    return CheckResult('FAIL', 'DEPT_FAIL_MISMATCH', f"전공 미충족 (요구: {req.text})", req.tag=='required', req.confidence)
+
+def _check_income(user_income: Optional[int], req: Requirement) -> CheckResult:
+    if user_income is None:
+        return CheckResult('VERIFY', 'INCOME_MISSING', "소득분위 정보 없음", req.tag=='required', req.confidence)
+    m = re.search(r'(\d+)[\s]*분위', req.text)
+    if m:
         try:
-            req_gpa = float(match.group(1))
-            # 정확히 일치 요구가 아닌 이상(>=)으로 비교
-            if user_gpa < req_gpa:
-                # 평점 기준(4.3 또는 4.5) 명시 시 메시지에 포함 고려
-                scale_match = re.search(r'/(\d\.\d)', req_text)
-                scale_info = f" ({scale_match.group(1)} 만점 기준)" if scale_match else ""
-                return False, f"학점 미달 (요구: {req_gpa}{scale_info} / 현재: {user_gpa:.2f})"
-            else:
-                return True, "" # 조건 충족
-        except ValueError:
-            print(f"Warning: Could not parse required GPA from '{req_text}'")
-            return True, "" # 숫자 파싱 실패 시 일단 통과 처리 (확인 필요 메시지 가능)
-    else:
-        # 요구 학점 정보가 명확하지 않으면 일단 통과 (확인 필요 메시지 가능)
-        print(f"Warning: No clear GPA requirement found in '{req_text}'")
-        return True, "(GPA 요건 확인 필요)"
+            cap = int(m.group(1))
+            if user_income > cap:
+                return CheckResult('FAIL', 'INCOME_FAIL_CAP',
+                                   f"소득분위 초과 (요구≤{cap}분위 | 현재 {user_income}분위)",
+                                   req.tag=='required', req.confidence)
+            return CheckResult('PASS', 'INCOME_PASS', "", req.tag=='required', req.confidence)
+        except Exception:
+            pass
+    if '기초생활수급' in req.text or '가계곤란' in req.text:
+        return CheckResult('VERIFY', 'INCOME_VERIFY_RECIPIENT', "수급자/가계곤란 여부 확인 필요", req.tag=='required', req.confidence)
+    return CheckResult('PASS', 'INCOME_PASS_AMBIGUOUS', "", req.tag=='required', req.confidence)
 
-    return True, ""
+def _check_simple_text(user_value: Optional[str], req: Requirement, field_name: str) -> CheckResult:
+    if not user_value:
+        return CheckResult('VERIFY', f'{field_name.upper()}_MISSING', f"{field_name} 정보 없음", req.tag=='required', req.confidence)
+    t = req.text.lower()
+    if re.search(r'무관|없음|제한없음', t):
+        return CheckResult('PASS', f'{field_name.upper()}_PASS_ANY', "", req.tag=='required', req.confidence)
+    u = user_value.lower()
+    if field_name == 'military_service' and (('군필' in t) or ('면제' in t)) and u == 'pending':
+        return CheckResult('FAIL', 'MILITARY_FAIL', "병역 요건 미충족(군필/면제 요구)", req.tag=='required', req.confidence)
+    if field_name == 'gender' and (('여성' in t) or ('여학생' in t)) and u == 'male':
+        return CheckResult('FAIL', 'GENDER_FAIL', "성별 요건 불일치(여성 대상)", req.tag=='required', req.confidence)
+    return CheckResult('PASS', f'{field_name.upper()}_PASS', "", req.tag=='required', req.confidence)
 
+def _normalize_lang_key(s: str) -> Optional[str]:
+    k = LANGUAGE_KEY_MAP.get(s.lower().strip())
+    return k
 
-def _check_grade_level(user_level: str, user_semester: int, req_text: str) -> Tuple[bool, str]:
-    """학년/학기 요구사항을 비교합니다. (가장 복잡한 로직)"""
-    if req_text == "N/A" or not req_text or user_semester == 0:
-        return True, "" # 조건 없거나 사용자 정보 없으면 통과
+def _norm_required_value(test_key: str, val: str) -> Optional[float]:
+    """요구 텍스트의 점수/등급을 0~1로 정규화."""
+    if test_key in LANGUAGE_LEVEL_MAP:
+        # 등급형
+        v = LANGUAGE_LEVEL_MAP[test_key].get(val.upper().strip())
+        if v is None:
+            return None
+        return v / LANG_LEVEL_MAX[test_key]
+    # 숫자형
+    try:
+        num = float(re.sub(r'[^0-9.]', '', val))
+    except Exception:
+        return None
+    maxv = LANGUAGE_MAX_SCORE.get(test_key)
+    if not maxv:
+        return None
+    return _clamp(num / maxv, 0.0, 1.0)
 
-    req_text_norm = req_text.lower().strip()
+def _check_language(norm_user_scores: Dict[str, float], req: Requirement) -> CheckResult:
+    txt = req.text
+    requirements = RE_LANG_REQ.findall(txt)
+    if not requirements:
+        if "우대" in txt:
+            return CheckResult('PASS', 'LANG_PASS_PREFER', "", req.tag=='required', req.confidence)
+        if "능통" in txt or "fluent" in txt.lower():
+            return CheckResult('VERIFY', 'LANG_VERIFY_FLUENCY', "어학 능통 여부 확인 필요", req.tag=='required', req.confidence)
+        return CheckResult('PASS', 'LANG_PASS_NONE', "", req.tag=='required', req.confidence)
 
-    # 1. 레벨 비교 (학부/대학원)
-    is_grad_req = '대학원' in req_text_norm or '석사' in req_text_norm or '박사' in req_text_norm
-    # '재학생', '학부생' 등 키워드 확인, '대학원' 키워드 없을 때만 학부생 요구로 간주
-    is_undergrad_req = ('학부' in req_text_norm or '재학생' in req_text_norm or re.search(r'\d\s*학년', req_text_norm)) and not is_grad_req
+    # 괄호/AND/OR 처리 (간단 토큰화)
+    expr = txt
+    # 우선 개별 요구를 평가하여 원자항 TRUE/FALSE/UNKNOWN으로 치환
+    atoms: List[bool] = []
+    missing: Set[str] = set()
+    fail_msgs: List[str] = []
 
-    if is_grad_req and user_level != '대학원':
-        return False, "대학원생 대상"
-    if is_undergrad_req and user_level == '대학원':
-        # 석박사 과정생도 포함하는 경우가 아니라면 불충족
-        if '석박사' not in req_text_norm:
-             return False, "학부생 대상"
-
-    # 2. 학기 범위 비교 (예: "3~7차 학기", "2~7학기")
-    match = re.search(r'(\d)[\s~.~-]+(\d)\s*학기', req_text_norm)
-    if match:
-        try:
-            min_sem, max_sem = int(match.group(1)), int(match.group(2))
-            if not (min_sem <= user_semester <= max_sem):
-                return False, f"학기 미충족 (요구: {min_sem}~{max_sem}학기 / 현재: {user_semester}학기)"
-            return True, "" # 범위 비교 통과 시 종료
-        except ValueError:
-            print(f"Warning: Could not parse semester range from '{req_text_norm}'")
-
-    # 3. 특정 학년 범위 또는 단일 학년 비교 (예: "1~4학년", "4학년", "2학년 이상")
-    range_match = re.search(r'(\d)[\s~.~-]+(\d)\s*학년', req_text_norm) # 예: "1~4학년"
-    grade_match = re.search(r'(\d)\s*학년', req_text_norm) # 예: "4학년", "2학년 이상"
-
-    if range_match: # "X~Y학년" 형태 먼저 처리
-         try:
-             min_grade, max_grade = int(range_match.group(1)), int(range_match.group(2))
-             # 학부생 대상 조건인지 확인
-             if user_level != '학부': return False, "학부생 대상"
-             min_sem_req = (min_grade - 1) * 2 + 1
-             max_sem_req = max_grade * 2
-             if not (min_sem_req <= user_semester <= max_sem_req):
-                 return False, f"학년 범위 미충족 (요구: {min_grade}~{max_grade}학년 / 현재: {user_semester}학기)"
-             return True, ""
-         except ValueError:
-              print(f"Warning: Could not parse grade range from '{req_text_norm}'")
-    elif grade_match: # "X학년" 또는 "X학년 이상/이하"
-        try:
-            req_grade = int(grade_match.group(1))
-            # 학부생 대상 조건인지 확인
-            if user_level != '학부': return False, "학부생 대상"
-            req_sem_min = (req_grade - 1) * 2 + 1 # 예: 4학년 -> 7학기 시작
-            req_sem_max = req_grade * 2         # 예: 4학년 -> 8학기 끝
-
-            if '이상' in req_text_norm or 'Completion of at least' in req_text_norm: # 영어 케이스 추가
-                if user_semester < req_sem_min:
-                    return False, f"학년 미충족 (요구: {req_grade}학년 이상 / 현재: {user_semester}학기)"
-            elif '이하' in req_text_norm:
-                 if user_semester > req_sem_max:
-                    return False, f"학년 미충족 (요구: {req_grade}학년 이하 / 현재: {user_semester}학기)"
-            else: # 정확히 해당 학년
-                if not (req_sem_min <= user_semester <= req_sem_max):
-                     return False, f"학년 미충족 (요구: {req_grade}학년 / 현재: {user_semester}학기)"
-            return True, ""
-        except ValueError:
-             print(f"Warning: Could not parse grade requirement from '{req_text_norm}'")
-
-    # 4. 특정 학기 수 이상/이하 비교 (예: "Completion of at least four semesters")
-    # 정규식 수정: '최소', '적어도' 등 한국어 키워드 및 다양한 표현 고려
-    semester_count_match = re.search(r'(최소|적어도|at least)\s*(\d+)\s*(학기|semesters)', req_text_norm, re.IGNORECASE)
-    if semester_count_match:
-        try:
-            min_semesters_req = int(semester_count_match.group(2))
-            # 사용자 학기는 '현재 진행 중인 학기'이므로, '이수한 학기 수'는 user_semester - 1 로 계산
-            completed_semesters = max(0, user_semester - 1) # 1학기생은 0학기 이수
-            if completed_semesters < min_semesters_req:
-                return False, f"이수 학기 수 미충족 (요구: 최소 {min_semesters_req}학기 이수 / 현재: {completed_semesters}학기 이수)"
-            return True, ""
-        except ValueError:
-            print(f"Warning: Could not parse minimum semester count from '{req_text_norm}'")
-
-    # 5. 기타 케이스
-    if '졸업예정자' in req_text_norm and user_semester < 7: # 보통 7, 8학기
-        # 단, 조기졸업 대상자는 해당될 수 있으므로, 프로필에 조기졸업 여부 확인 로직 추가 가능
-        return False, "졸업예정자 대상 아님"
-    # '재학생'만 언급된 경우 (다른 학년/학기 조건 없이) -> user_semester > 0 이면 통과
-    if '재학생' in req_text_norm and user_semester > 0 and not grade_match and not range_match and not match and not semester_count_match:
-        return True, ""
-
-    # 위 조건들에 해당하지 않으면 불확실 -> 확인 필요 메시지 반환
-    print(f"Notice: Grade requirement '{req_text_norm}' could not be definitively checked against user semester {user_semester}.")
-    return True, f"(학년/학기 요건 '{req_text_norm}' 확인 필요)"
-
-
-def _check_department(user_dept: str, req_text: str) -> Tuple[bool, str]:
-    """학과 요구사항을 비교합니다. (매핑 테이블 사용)"""
-    if req_text == "N/A" or not req_text or not user_dept:
-        return True, "" # 조건 없거나 사용자 정보 없으면 통과
-
-    req_text_norm = req_text.strip() # 공백 제거
-
-    # 1. "전 계열", "모든 학과", "누구나" 등 전체 허용 키워드
-    # 정규식 사용하여 더 유연하게 매칭 (예: "전학과", "전계열")
-    if re.search(r'전\s*(계열|학과)|모든\s*학과|누구나|학과\s*무관', req_text_norm):
-        return True, ""
-
-    # 2. 사용자의 학과가 공지 텍스트에 직접 포함되는지 확인 (띄어쓰기 무시, 소문자 변환 비교)
-    user_dept_processed = user_dept.replace(" ", "").lower()
-    req_text_processed = req_text_norm.replace(" ", "").lower()
-    if user_dept_processed in req_text_processed:
-        return True, ""
-
-    # 3. 매핑 테이블(동의어/상위그룹) 확인
-    allowed_groups = DEPARTMENT_MAP.get(user_dept, [])
-    for group in allowed_groups:
-        group_processed = group.replace(" ", "").lower()
-        if group_processed in req_text_processed:
-            return True, ""
-
-    # 4. 특정 분야 키워드 확인 (예: '이공계', '바이오', 'IT') - DEPARTMENT_MAP 값 활용
-    # 사용자의 학과가 속한 카테고리(매핑 테이블의 value 리스트) 찾기
-    user_categories = set()
-    for dept, groups in DEPARTMENT_MAP.items():
-        if dept == user_dept:
-            user_categories.update(groups) # 해당 학과의 모든 카테고리 추가
-
-    # 공지사항 텍스트에 사용자의 카테고리 중 하나라도 포함되는지 확인
-    for cat in user_categories:
-        cat_processed = cat.replace(" ", "").lower()
-        if cat_processed in req_text_processed:
-            return True, ""
-
-    # 모든 검사를 통과하지 못하면 불일치
-    return False, f"학과 미충족 (요구: {req_text_norm} / 현재: {user_dept})"
-
-
-def _check_income(user_income_bracket: int, req_text: str) -> Tuple[bool, str]:
-    """소득분위 요구사항을 비교합니다."""
-    if req_text == "N/A" or not req_text:
-        return True, "" # 조건 없으면 통과
-
-    req_text_norm = req_text.strip()
-
-    # "X분위 이하" 패턴 (예: "8분위 이하", "소득분위 기준 8")
-    match = re.search(r'(\d+)[\s]*분위', req_text_norm)
-    if match:
-        try:
-            req_cap = int(match.group(1))
-            # user_income_bracket 값이 99이면 정보 없음으로 간주하여 확인 필요
-            if user_income_bracket == 99:
-                 print(f"Notice: Income bracket requirement '{req_text_norm}' needs verification as user data is missing.")
-                 return True, f"(소득 {req_cap}분위 이하 확인 필요)"
-            if user_income_bracket > req_cap:
-                return False, f"소득분위 초과 (요구: {req_cap}분위 이하 / 현재: {user_income_bracket}분위)"
-            else:
-                return True, "" # 조건 만족
-        except ValueError:
-            print(f"Warning: Could not parse income bracket cap from '{req_text_norm}'")
-
-    # "기초생활수급자" 또는 "가계 곤란" 키워드
-    if '기초생활수급자' in req_text_norm or '가계 곤란' in req_text_norm or 'Need-based' in req_text_norm.lower():
-        # 사용자 프로필에 해당 정보가 있는지 확인하는 로직 필요
-        # 예: if norm_profile.get('is_basic_recipient'): return True, ""
-        # 현재 프로필에 해당 정보가 없으므로, 확인 필요 메시지와 함께 통과
-        print(f"Notice: Income requirement '{req_text_norm}' needs verification based on user status.")
-        return True, "(수급자/가계곤란 해당 여부 확인 필요)"
-
-    # 특정 분위 조건이나 키워드가 없으면 일단 통과 (다른 소득 관련 조건은 추가 파싱 필요)
-    return True, ""
-
-
-def _check_language(user_scores: Dict[str, Any], req_text: str) -> Tuple[bool, str]:
-    """어학 요구사항을 비교합니다. (Regex 및 '또는'/'and' 논리)"""
-    if req_text == "N/A" or not req_text:
-        return True, "" # 조건 없으면 통과
-
-    # 1. 요구되는 모든 어학 점수/등급 찾기 (정규식 개선)
-    # 시험명 약어(TEPS 등), 점수(소수점 포함), 등급(N1, IH, AL, Level 5 등) 포괄
-    req_list = re.findall(
-        r'(TOEIC|TOEFL\s*(?:iBT|ITP)?|IELTS|JLPT|HSK|TEPS|OPIc|G-TELP)[\s:]*(?:level)?\s*([0-9]+\.?[0-9]*|N[1-5]|[A-Z]{1,3}\d?|[A-Z]{2,})',
-        req_text,
-        re.IGNORECASE
-    )
-
-    if not req_list:
-        # "영어 능통자", "Fluent in English" 등 텍스트만 있는 경우
-        if any(kw in req_text.lower() for kw in ['능통', 'fluent', 'proficient']):
-            print(f"Notice: Language requirement '{req_text}' needs verification for proficiency.")
-            return True, "(어학 능통 여부 확인 필요)"
-        # "우대" 조건인 경우 일단 통과
-        if '우대' in req_text:
-            return True, ""
-        # 특정 시험 언급 없으면 일단 통과 (다른 언어 요구 조건은 추가 파싱 필요)
-        return True, ""
-
-    # 2. '또는' (OR) 논리인지 '그리고' (AND / 기본값) 논리인지 확인
-    is_or_logic = '또는' in req_text or ' or ' in req_text.lower()
-    # 'and' 또는 쉼표(,)가 여러 조건을 나열하는 데 사용될 수 있으므로 AND로 간주 (단순화)
-    is_and_logic = ' and ' in req_text.lower() or ',' in req_text
-
-    pass_results = []
-    missing_scores = [] # 사용자가 점수 정보를 입력하지 않은 시험
-    requirements_details = [] # 요구 조건 상세 저장
-
-    # OPIc / 토익스피킹 등급 순서 (높은 순 -> 낮은 순, 점수 매핑)
-    level_scores = {
-        'OPIC': {'AL': 6, 'IH': 5, 'IM3': 4, 'IM2': 3, 'IM1': 2, 'IL': 1, 'NH': 0},
-        'TOEIC_SPEAKING': {'AL': 8, 'AH': 7, 'IM3': 6, 'IM2': 5, 'IM1': 4, 'IL': 3, 'NH': 0} # 예시 점수
-        # 기타 등급 시험 추가 가능
-    }
-
-    for test_name, req_score_str in req_list:
-        # 시험명 정규화 (API 키와 일치하도록)
-        test_key_raw = test_name.upper().replace(' ', '').replace('IBT','_IBT').replace('SPEAKING', '_SPEAKING')
-        test_key = test_key_raw # 최종 키
-
-        # 요구 조건 상세 저장
-        requirements_details.append(f"{test_name} {req_score_str}")
-
-        # 사용자 점수 가져오기
-        user_score_val = user_scores.get(test_key)
-
-        if user_score_val is None:
-            missing_scores.append(test_key)
-            pass_results.append(False) # 점수 없으면 일단 False
+    for raw_name, raw_req in requirements:
+        key = _normalize_lang_key(raw_name)
+        if not key:
             continue
+        req_norm = _norm_required_value(key, raw_req)
+        if req_norm is None:
+            continue
+        user_val = norm_user_scores.get(key)
+        if user_val is None:
+            atoms.append(False)
+            missing.add(key)
+            continue
+        if user_val + 1e-9 >= req_norm:
+            atoms.append(True)
+        else:
+            atoms.append(False)
+            fail_msgs.append(f"{key} 미달(요구≈{raw_req} | 보유 정규화≈{user_val:.2f})")
 
-        req_score_str_norm = req_score_str.upper() # 대소문자 통일
-
-        current_pass = False
-        try:
-            # 등급 기반 시험 처리 (JLPT, HSK, OPIc, TOEIC_SPEAKING 등)
-            if test_key in ['JLPT', 'HSK']:
-                req_level_match = re.search(r'(\d)', req_score_str_norm)
-                user_level_match = re.search(r'(\d)', str(user_score_val))
-                if req_level_match and user_level_match:
-                    req_val = int(req_level_match.group(1))
-                    user_val = int(user_level_match.group(1))
-                    if (test_key == 'JLPT' and user_val <= req_val): # 숫자가 작을수록 높음
-                        current_pass = True
-                    elif (test_key == 'HSK' and user_val >= req_val): # 숫자가 클수록 높음
-                        current_pass = True
-            elif test_key in level_scores: # OPIc, TOEIC Speaking 등
-                 level_map = level_scores[test_key]
-                 req_level_score = level_map.get(req_score_str_norm, -1)
-                 user_level_str = str(user_score_val).upper()
-                 user_level_score = level_map.get(user_level_str, -1)
-                 if req_level_score != -1 and user_level_score >= req_level_score:
-                     current_pass = True
-
-            # 점수 기반 시험 처리 (TOEIC, TOEFL, IELTS, TEPS 등)
-            else:
-                req_score_num = float(req_score_str_norm)
-                # 사용자 점수가 숫자 형태가 아니면 변환 시도
-                if not isinstance(user_score_val, (int, float)):
-                     user_score_val = float(str(user_score_val))
-
-                if user_score_val >= req_score_num:
-                    current_pass = True
-
-            pass_results.append(current_pass)
-
-        except (ValueError, TypeError) as e:
-             print(f"Warning: Error comparing language score for {test_key}. Req: '{req_score_str}', User: '{user_score_val}'. Error: {e}")
-             pass_results.append(False) # 파싱 또는 비교 실패 시 False
-
-    # 최종 판정
-    final_pass = False
-    num_requirements = len(req_list)
-
-    if is_or_logic: # '또는' 조건 명시 시
-        if any(pass_results):
-            final_pass = True
-    elif is_and_logic: # 'and' 또는 ',' 사용 시 (명시적 AND)
-        if all(pass_results) and len(pass_results) == num_requirements:
-            final_pass = True
-    else: # 조건이 하나거나, 논리 연산자 불분명 시 (기본 AND 간주)
-         if all(pass_results) and len(pass_results) == num_requirements:
-             final_pass = True
-
+    # OR/AND 판단
+    # 간단히: '또는/or'가 한 번이라도 있으면 OR 그룹으로, 아니면 AND
+    is_or = bool(RE_OR.search(txt)) and not bool(RE_AND.search(txt))
+    # 괄호가 복잡해도, 원자평균/any/all로 처리(간소화)
+    final_pass = any(atoms) if is_or else all(atoms) if atoms else True
 
     if final_pass:
-        return True, ""
+        return CheckResult('PASS', 'LANG_PASS', "", req.tag=='required', req.confidence)
     else:
-        reason_msg = f"어학 요건 미충족 (요구: {', '.join(requirements_details)})"
-        if missing_scores:
-            missing_str = ', '.join(sorted(list(set(missing_scores)))) # 중복 제거 및 정렬
-            reason_msg += f" (점수 입력 필요: {missing_str})"
-        return False, reason_msg
+        if missing:
+            return CheckResult('VERIFY', 'LANG_SCORE_MISSING',
+                               f"어학 점수 정보 없음 (요구 항목: {', '.join(sorted(missing))})",
+                               req.tag=='required', req.confidence)
+        return CheckResult('FAIL', 'LANG_FAIL_SCORE',
+                           f"어학 요건 미충족 ({'; '.join(fail_msgs)})",
+                           req.tag=='required', req.confidence)
 
-
-def _check_simple_text(user_value: str, req_text: str, map_dict: Dict[str, List[str]] = None) -> Tuple[bool, str]:
-    """성별, 병역 등 단순 텍스트 요구사항을 매핑 테이블을 사용하여 비교합니다."""
-    if req_text == "N/A" or not req_text:
-        return True, "" # 조건 없으면 통과
-
-    req_text_norm = req_text.lower().strip()
-
-    # "무관" 키워드가 공지사항에 있으면 사용자 값과 관계없이 항상 통과
-    # 매핑 테이블의 '무관' 키에 해당하는 표현들 확인
-    if map_dict and any(keyword.lower() in req_text_norm for keyword in map_dict.get('무관', [])):
-        return True, ""
-    # 일반적인 '무관' 표현 확인
-    if any(keyword in req_text_norm for keyword in ['무관', '상관없음', '제한 없음', '관계 없음']):
-         return True, ""
-
-    # 사용자 정보가 없는 경우
-    if not user_value:
-        # 확인 필요 메시지와 함께 일단 통과 (일치율 계산에는 영향 O)
-        print(f"Notice: Simple text requirement '{req_text}' needs verification as user data is missing.")
-        return True, f"({req_text} 관련 정보 확인 필요)"
-
-    user_value_norm = user_value.lower().strip() # 사용자 값 정규화
-
-    # 1. 매핑 테이블 사용 (map_dict가 제공된 경우)
-    if map_dict:
-        matched = False
-        # 사용자의 상태(user_value)에 해당하는 허용 표현(allowed_expressions) 목록 가져오기
-        # 사용자 값이 map_dict의 키에 없을 수 있으므로 get 사용
-        allowed_expressions = [expr.lower() for expr in map_dict.get(user_value, [])]
-
-        # 공지사항 요구사항(req_text_norm)에 사용자의 상태를 나타내는 허용 표현 중 하나라도 포함되는지 확인
-        if any(expr in req_text_norm for expr in allowed_expressions):
-            matched = True
-
-        # 위에서 매칭되지 않았다면, 반대로 공지사항의 특정 요구사항이 사용자 상태와 호환되는지 확인
-        # (예: 공지 '군필 또는 면제', 사용자 '군필')
-        if not matched:
-            for status_key, req_keyword_list in map_dict.items():
-                # 공지사항 텍스트에 특정 상태(예: '군필', '면제')를 나타내는 키워드가 있는지 확인
-                req_keywords_in_text = [req_keyword.lower() for req_keyword in req_keyword_list if req_keyword.lower() in req_text_norm]
-                if req_keywords_in_text:
-                    # 해당 키워드 상태(status_key)가 사용자의 상태(user_value)와 일치하는지 확인
-                    if status_key == user_value:
-                         matched = True
-                         break # 하나라도 맞으면 매칭 성공
-
-        if matched:
-            return True, ""
-        else:
-            # 매핑 테이블 기준으로 명확히 불일치
-            return False, f"조건 불일치 (요구: {req_text} / 현재: {user_value})"
-
-    # 2. 매핑 테이블 없이 직접 비교 (Fallback)
-    # (이 부분은 매핑 테이블이 항상 제공된다면 제거 가능)
-    if req_text_norm in user_value_norm or user_value_norm in req_text_norm:
-        return True, ""
-
-    # 특정 키워드 기반 불일치 확인 (매핑 없을 때 fallback)
-    if ('여학생' in req_text_norm or 'female' in req_text_norm) and user_value_norm in ['남성', 'male']:
-        return False, f"성별 미충족 (요구: {req_text})"
-    if ('남학생' in req_text_norm or 'male' in req_text_norm) and user_value_norm in ['여성', 'female']:
-        return False, f"성별 미충족 (요구: {req_text})"
-    if ('군필' in req_text_norm or '면제' in req_text_norm) and user_value_norm in ['미필', 'unserved']:
-         # 전문연구요원은 별도 처리되었으므로 여기서는 제외해도 됨
-         return False, f"병역 요건 미충족 (요구: {req_text})"
-
-    # 매핑 없고 직접 비교도 실패 시 불일치
-    # 또는 불확실하므로 확인 필요 메시지 반환
-    print(f"Notice: Simple text requirement '{req_text}' could not be definitively checked against user value '{user_value}'.")
-    return True, f"({req_text} 관련 조건 확인 필요)"
-
-
-# --- 3. 메인 비교 함수 (수정본) ---
+# =========================
+# 9) 메인 비교
+# =========================
 
 def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any]) -> Dict[str, Any]:
     """
-    사용자 프로필과 AI가 추출한 공지사항 JSON을 비교하여 적합도와 일치율(%)을 반환합니다.
+    사용자 프로필 vs 공지(AI 추출)를 비교하여 결과 반환.
 
-    Args:
-        user_profile (Dict[str, Any]): 사용자 프로필 딕셔너리 (UserProfileRequest 스키마 기반).
-        notice_json (Dict[str, Any]): AI가 추출한 공지사항 정보 딕셔너리.
-
-    Returns:
-        Dict[str, Any]: 비교 결과 딕셔너리.
-            - suitable (bool): 모든 명시적 불충족 조건이 없는 경우 True.
-            - reason (str): 불충족 시 사유 또는 충족/확인필요 메시지.
-            - match_percentage (float): 전체 관련 조건 중 충족한 조건의 비율 (0.0 ~ 100.0).
-            - pass (bool): suitable과 동일 (기존 호환성).
+    반환:
+      - eligibility: 'ELIGIBLE' | 'BORDERLINE' | 'INELIGIBLE'
+      - suitable: bool
+      - reason_codes: List[str]
+      - reasons_human: List[str]
+      - missing_info: List[str]
+      - match_percentage: float (0~100)
     """
-
-    # 1. 단순 정보성 공지 처리 (비교 대상 아님)
-    # qualifications 필드가 없거나, 있더라도 비어있는 경우
-    if "qualifications" not in notice_json or not notice_json.get("qualifications"):
+    # 정보성 공지(요건 없음)
+    quals = notice_json.get("qualifications")
+    if not quals or not isinstance(quals, dict) or not any(v not in [None, "N/A", ""] for v in quals.values()):
         return {
-            "suitable": True, # 정보성 공지는 누구나 볼 수 있으므로 True
-            "reason": "정보성 공지 (자격 요건 없음)",
-            "match_percentage": 100.0, # 비교할 조건이 없으므로 100%
-            "pass": True
+            "eligibility": "ELIGIBLE",
+            "suitable": True,
+            "reason_codes": ["INFO_NOTICE"],
+            "reasons_human": ["정보성 공지 (특별한 자격 요건 없음)"],
+            "missing_info": [],
+            "match_percentage": 100.0
         }
-
-    quals = notice_json.get("qualifications", {})
-    # quals가 문자열 등으로 잘못 들어올 경우 처리
-    if not isinstance(quals, dict):
-         return {
-            "suitable": True, # 자격 요건 파싱 실패 시 일단 True 처리
-            "reason": f"자격 요건 정보 형식 오류 (예상: dict, 실제: {type(quals)})",
-            "match_percentage": 100.0, # 비교 불가
-            "pass": True
-        }
-
-
-    fail_reasons: List[str] = []
-    met_criteria_count = 0
-    total_relevant_criteria = 0
-    verification_needed_reasons: List[str] = [] # 확인 필요 항목 저장
 
     try:
-        # 2. 사용자 프로필 표준화
-        norm_profile = _normalize_user_profile(user_profile)
+        norm = _normalize_user_profile(user_profile)
 
-        # 3. 개별 항목 비교 및 카운트
-        # (조건 키, 검사 함수, 사용자 값(들)...) 튜플 리스트
-        checks_to_perform = [
-            # quals 딕셔너리에 해당 키가 있을 때 사용할 비교 함수 및 사용자 프로필 값
-            ('gpa_min', _check_gpa, norm_profile['norm_gpa']),
-            ('grade_level', _check_grade_level, norm_profile['norm_level'], norm_profile['norm_semester']),
-            ('department', _check_department, norm_profile.get('major', '')), # 프로필의 'major' 사용
-            ('income_status', _check_income, norm_profile['norm_income']),
-            ('language_requirements_text', _check_language, norm_profile.get('language_scores', {})),
-            ('military_service', _check_simple_text, norm_profile.get('military_service', ''), MILITARY_SERVICE_MAP), # 병역 맵 전달
-            ('gender', _check_simple_text, norm_profile.get('gender', ''), GENDER_MAP), # 성별 맵 전달
-            ('degree', _check_simple_text, norm_profile.get('degree', '')), # 학위 조건 (맵 없이)
-            # ('other', _check_simple_text, norm_profile.get('other_profile_field', '')), # 기타 조건 비교 함수 필요 시 추가
-        ]
+        # 1) 태깅/신뢰도 포함 요건 리스트 구성
+        reqs: Dict[str, Requirement] = {}
+        for k, v in quals.items():
+            tag, conf, txt = _infer_tag_and_conf(v)
+            # 공정성 가드레일: 성별/병역은 공지에 명시된 경우에만 비교
+            if k in ('gender', 'military_service') and not txt:
+                continue
+            reqs[k] = Requirement(k, txt, tag, conf)
 
-        # quals 딕셔너리에 있는 모든 키에 대해 반복
-        for key, req_text in quals.items():
-            # 값이 존재하고 "N/A"가 아니며 비어있지 않은 경우에만 관련 조건으로 간주
-            if req_text and req_text != 'N/A':
-                total_relevant_criteria += 1
-                found_check = False
-                # 해당 키에 대한 검사 함수 찾기
-                for check_key, check_func, *user_values in checks_to_perform:
-                    if key == check_key:
-                        found_check = True
-                        try:
-                            # *user_values 언패킹 시 map_dict 포함될 수 있음
-                            passed, reason = check_func(*user_values, req_text)
-                            if passed:
-                                met_criteria_count += 1
-                                # 확인 필요 메시지가 반환된 경우 저장
-                                if reason and reason.startswith("("):
-                                    verification_needed_reasons.append(reason.strip("()"))
-                            else:
-                                fail_reasons.append(reason)
-                        except Exception as check_err:
-                             print(f"Error checking condition '{key}': {check_err}")
-                             fail_reasons.append(f"{key} 조건 비교 중 오류")
-                        break # 해당 키 검사 완료
+        # 2) 키별 비교기 맵
+        check_map = {
+            'gpa_min': lambda r: _check_gpa(norm.get('gpa'), norm.get('gpa_scale'), r),
+            'grade_level': lambda r: _check_grade_level(norm.get('norm_level'), norm.get('norm_semester'), r),
+            'department': lambda r: _check_department(norm.get('major'), r),
+            'income_status': lambda r: _check_income(norm.get('income_bracket'), r),
+            'language_requirements_text': lambda r: _check_language(norm.get('norm_lang_scores', {}), r),
+            'military_service': lambda r: _check_simple_text(norm.get('military_service'), r, 'military_service'),
+            'gender': lambda r: _check_simple_text(norm.get('gender'), r, 'gender'),
+            # 필요 시 확장: degree, certificate 등
+        }
 
-                # 'other' 필드 또는 checks_to_perform에 정의되지 않은 키 처리
-                if not found_check and key == 'other':
-                     # 'other' 조건은 복잡하여 자동 비교 어려움 -> 확인 필요
-                     verification_needed_reasons.append(f"기타 조건 확인 필요: {req_text}")
-                     # 일단 충족한 것으로 간주하여 match_percentage에 반영 (선택적)
-                     # met_criteria_count += 1
-                elif not found_check:
-                     print(f"Warning: No check function defined for qualification key '{key}'. Needs verification.")
-                     verification_needed_reasons.append(f"{key} 조건({req_text}) 확인 필요")
-                     # 일단 충족한 것으로 간주할지 여부 결정 필요
-                     # met_criteria_count += 1
+        # 3) 항목별 평가 + 가중합 점수(필수/우대/선택 * confidence)
+        weighted_sum = 0.0
+        weight_total = 0.0
 
+        reasons: List[CheckResult] = []
 
-        # 4. 일치율 계산
-        if total_relevant_criteria > 0:
-            match_percentage = (met_criteria_count / total_relevant_criteria) * 100
+        for key, req in reqs.items():
+            if not req.text or req.text == 'N/A':
+                continue
+            check_fn = check_map.get(key)
+            if not check_fn:
+                # 기타 조건은 확인 필요로 처리(신뢰도 반영)
+                reasons.append(CheckResult('VERIFY', 'OTHER_VERIFY', f"기타 조건 확인 필요: {req.text}",
+                                           req.tag=='required', req.confidence))
+                continue
+
+            res = check_fn(req)
+            reasons.append(res)
+
+            # 점수 계산
+            w_tag = CRITERIA_WEIGHTS.get(req.tag, 0.2)
+            w = w_tag * _clamp(req.confidence, 0.0, 1.0)
+            weight_total += w
+
+            if res.status == 'PASS':
+                weighted_sum += w
+            elif res.status == 'FAIL':
+                # 필수 실패는 별도 처리(라벨 단계), 점수에서는 0으로 둠
+                pass
+            elif res.status == 'VERIFY':
+                # 확인 필요는 0.5 배점 정도로 중립 반영해도 되지만, 여기서는 점수화X
+                pass
+
+        base_score = (weighted_sum / weight_total) if weight_total > 1e-9 else 1.0
+
+        # 4) 키워드 Jaccard 보너스
+        user_kw = norm.get('keywords', set())
+        notice_kw = set(notice_json.get('hashtags_ai', []) or [])
+        kw_bonus = _jaccard_bonus(user_kw, notice_kw)
+
+        # 5) 시간 가중치
+        temporal_w = _temporal_weight(notice_json)
+
+        final_score = _clamp(base_score * kw_bonus * temporal_w, 0.0, 1.0)
+
+        # 6) 라벨 결정 (필수 실패 우선)
+        required_fail = any((r.status == 'FAIL' and r.is_required) for r in reasons)
+        if required_fail:
+            eligibility = 'INELIGIBLE'
+            suitable = False
         else:
-            # 관련 조건이 아예 없으면 (모두 "N/A" 등) 100% 일치로 간주
-            match_percentage = 100.0
+            if final_score >= CUTOFFS['eligible']:
+                eligibility = 'ELIGIBLE'
+                suitable = True
+            elif final_score >= CUTOFFS['borderline']:
+                eligibility = 'BORDERLINE'
+                suitable = True
+            else:
+                eligibility = 'INELIGIBLE'
+                suitable = False
 
-        # 5. 최종 결과 조합
-        final_reason = ""
-        # 중복 제거 및 정렬을 위해 set 사용
-        unique_fails = sorted(list(set(fail_reasons)))
-        unique_verifications = sorted(list(set(verification_needed_reasons)))
+        # 7) 설명/결손 정보
+        reason_codes = sorted(set(r.reason_code for r in reasons if r.reason_code))
+        human_msgs: List[str] = []
+        for r in reasons:
+            if r.status == 'PASS':
+                continue
+            if r.message:
+                human_msgs.append(r.message)
+            elif r.reason_code in REASON_TEMPLATES:
+                human_msgs.append(REASON_TEMPLATES[r.reason_code])
 
-        if not unique_fails: # 명시적 실패 조건 없음
-            final_reason = "모든 명시적 조건 충족"
-            if unique_verifications:
-                final_reason += f" (단, 확인 필요: {'; '.join(unique_verifications)})"
-        else: # 실패 조건 있음
-            final_reason = "; ".join(unique_fails)
-            if unique_verifications:
-                final_reason += f" (추가 확인 필요: {'; '.join(unique_verifications)})"
+        missing_info = sorted(set(
+            r.reason_code.split('_MISSING')[0].lower()
+            for r in reasons
+            if r.status == 'VERIFY' and r.reason_code.endswith('_MISSING')
+        ))
 
-        is_suitable = not unique_fails # 실패 사유가 없으면 적합 (확인 필요 항목은 suitable에 영향 안 줌)
+        if not human_msgs and eligibility == 'ELIGIBLE':
+            human_msgs.append("대부분의 핵심 요건에 부합합니다.")
+        elif not human_msgs and eligibility == 'BORDERLINE':
+            human_msgs.append("주요 요건은 충족하였으나, 일부 확인이 필요합니다.")
 
         return {
-            "suitable": is_suitable,
-            "reason": final_reason,
-            "match_percentage": round(match_percentage, 1), # 소수점 첫째 자리까지
-            "pass": is_suitable # 기존 pass 필드 유지
+            "eligibility": eligibility,
+            "suitable": suitable,
+            "reason_codes": reason_codes,
+            "reasons_human": sorted(set(human_msgs)),
+            "missing_info": missing_info,
+            "match_percentage": round(final_score * 100.0, 1),
         }
 
     except Exception as e:
-        # 전체 비교 로직에서 예외 발생 시
-        import traceback
-        print(f"Error during comparison process: {e}\n{traceback.format_exc()}") # 스택 트레이스 출력
+        logger.error(f"[comparison_logic] 오류: {e}", exc_info=True)
         return {
-            "suitable": False,
-            "reason": f"전체 비교 처리 중 오류 발생: {e}",
-            "match_percentage": 0.0,
-            "pass": False
+            "eligibility": "BORDERLINE",
+            "suitable": True,
+            "reason_codes": ["COMPARISON_ERROR"],
+            "reasons_human": ["적합도 비교 중 오류가 발생했습니다. 직접 확인해주세요."],
+            "missing_info": [],
+            "match_percentage": 50.0
         }
-
-# --- 테스트 예시 (필요 시 주석 해제하여 사용) ---
-# if __name__ == "__main__":
-#     # 예시 사용자 프로필 (UserProfileRequest 스키마 가정)
-#     test_user_profile = {
-#         "grade": 3,              # 학년 (정수)
-#         "major": "컴퓨터과학과",
-#         "gpa": 3.8,
-#         "toeic": 850,
-#         "keywords": ["#취업", "#공모전"],
-#         # --- 스키마 외 필드 (가정) ---
-#         "language_scores": {"TOEIC": 850, "OPIC": "IH"}, # 다양한 어학 점수
-#         "military_service": "군필",
-#         "gender": "남성",
-#         "degree": "학사 재학",
-#         "income_bracket": 5 # 소득 분위
-#     }
-#
-#     # 예시 공고 JSON (AI 추출 결과 가정)
-#     test_notice_json_1 = {
-#         "qualifications": {
-#             "gpa_min": "3.5",
-#             "grade_level": "학부 3학년 이상",
-#             "department": "이공 계열",
-#             "language_requirements_text": "TOEIC 800점 이상 또는 OPIc IH 이상",
-#             "military_service": "군필 또는 면제자",
-#             "other": "Python 사용 경험자 우대"
-#         }
-#     }
-#
-#     test_notice_json_2 = {
-#         "qualifications": {
-#             "grade_level": "대학원생",
-#             "department": "인문사회계열",
-#             "income_status": "4분위 이하",
-#         }
-#     }
-#
-#     test_notice_json_3 = { # 정보성 공지 (자격 요건 없음)
-#         "title": "행사 안내",
-#         "body_text": "..."
-#     }
-#
-#     print("--- 비교 결과 1 ---")
-#     result1 = check_suitability(test_user_profile, test_notice_json_1)
-#     print(json.dumps(result1, indent=2, ensure_ascii=False))
-#
-#     print("\n--- 비교 결과 2 ---")
-#     result2 = check_suitability(test_user_profile, test_notice_json_2)
-#     print(json.dumps(result2, indent=2, ensure_ascii=False))
-#
-#     print("\n--- 비교 결과 3 (정보성) ---")
-#     result3 = check_suitability(test_user_profile, test_notice_json_3)
-#     print(json.dumps(result3, indent=2, ensure_ascii=False))
