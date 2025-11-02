@@ -31,14 +31,14 @@ BEFORE UPDATE ON colleges
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
--- 3.2 notices
+-- 3.2 notices (summary_ai 컬럼 제거)
 CREATE TABLE IF NOT EXISTS notices (
   id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   college_key   TEXT REFERENCES colleges(key) ON DELETE SET NULL,
   title         TEXT NOT NULL,
   url           TEXT NOT NULL,
   summary_raw   TEXT,
-  summary_ai    TEXT,
+  -- summary_ai    TEXT,  -- 제거됨
   body_html     TEXT,
   body_text     TEXT,
   published_at  TIMESTAMPTZ,
@@ -57,3 +57,19 @@ EXECUTE FUNCTION set_updated_at();
 -- 4) 인덱스
 CREATE INDEX IF NOT EXISTS idx_notices_college_pub ON notices (college_key, published_at DESC);
 CREATE INDEX IF NOT EXISTS idx_notices_url        ON notices (url);
+
+-- AI 필드 (001_add_ai_fields.sql 에서 추가됨)
+-- category_ai TEXT;
+-- start_at_ai TIMESTAMPTZ;
+-- end_at_ai TIMESTAMPTZ;
+-- qualification_ai JSONB;
+-- hashtags_ai TEXT[];
+
+-- FTS 필드 (005_search_fts.sql 에서 추가됨)
+-- search_vector tsvector;
+
+-- Link Health 필드 (007_link_health.sql 에서 추가됨)
+-- url_ok BOOLEAN;
+-- url_status_code INTEGER;
+-- url_checked_at TIMESTAMPTZ;
+-- url_final TEXT;
