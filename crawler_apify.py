@@ -1,4 +1,4 @@
-# crawler_apify.py (수정된 run 함수 포함)
+# crawler_apify.py (raw_text 저장 및 정제 로직 포함)
 import os
 import time
 import json
@@ -37,63 +37,94 @@ except ImportError:
             print(f"Warning: Invalid date format: {date_yyyy_mm_dd}. Returning None.")
             return None
 
-def clean_body_text(raw_text: str) -> str:
+# [변경 없음] clean_body_text 함수는 이미 raw_text를 받아 정제하도록 되어 있음
+def clean_body_text(raw_text: str, college_key: Optional[str] = None) -> str:
     """
     Apify에서 크롤링한 원본 body_text에서 불필요한
     CDATA 스크립트, HTML 태그, 헤더, 푸터 정보를 제거하여 순수 본문만 추출합니다.
+    (사용자 요청에 따라 "게시글 내용"과 푸터 마커 사이를 추출하도록 수정)
     """
     if not raw_text:
         return ""
 
     # 1. HTML 엔티티 복원 (e.g., &lt; -> <)
-    #    (파일의 291번째 줄에 있던 unescape를 여기로 가져옵니다)
     text = unescape(raw_text)
 
     # 2. JavaScript CDATA 블록 제거 (사용자 예시 패턴)
-    #    예: 학부 //<![CDATA[ ... //]]> 봉사활동
     text = re.sub(r'//<!\[CDATA\[.*?//\]\]>', '', text, flags=re.DOTALL)
 
     # 3. BeautifulSoup을 사용하여 HTML 태그 제거 및 텍스트만 추출
-    #    separator='\n'을 사용해 줄바꿈을 어느 정도 유지
     soup = BeautifulSoup(text, 'html.parser')
     text = soup.get_text(separator='\n', strip=True)
 
     # 4. 헤더(Header) 정보 제거
-    #    관찰된 헤더 메타데이터의 *마지막* 부분 뒤에서 본문이 시작
-    header_end_patterns = [
-        r'조회수\s+\d+',  # '조회수 1137'
-        # '.xlsx', '.pdf' 등 첨부파일 링크 (공백이나 줄바꿈으로 끝남)
-        r'\.(xlsx|pdf|hwp|doc|docx|zip|jpg|png|jpeg|gif)(\s|\n|$)',
-        r'게시글 내용'  # CSV에서 발견된 마커
-    ]
+    #    사용자 요청: "게시글 내용"을 시작 마커로 사용
+    start_marker = r'게시글 내용'
+    start_match = re.search(start_marker, text, re.IGNORECASE)
     
-    last_header_end_index = -1
-    for pattern in header_end_patterns:
-        # finditer로 모든 일치 항목을 찾음
-        matches = list(re.finditer(pattern, text, re.IGNORECASE))
-        if matches:
-            # 마지막 일치 항목의 끝 위치를 찾음
-            last_match_end = matches[-1].end()
-            if last_match_end > last_header_end_index:
-                last_header_end_index = last_match_end
+    start_index = 0
+    if start_match:
+        start_index = start_match.end() # "게시글 내용" *이후* 부터
+    else:
+        # "게시글 내용"이 없으면, 기존의 다른 헤더 마커로 대체 (안전장치)
+        header_end_patterns = [
+            r'조회수\s+\d+',
+            # '.xlsx', '.pdf' 등 첨부파일 링크 (공백이나 줄바꿈으로 끝남)
+            r'\.(xlsx|pdf|hwp|doc|docx|zip|jpg|png|jpeg|gif)(\s|\n|$)',
+        ]
+        last_header_end_index = -1
+        for pattern in header_end_patterns:
+            matches = list(re.finditer(pattern, text, re.IGNORECASE))
+            if matches:
+                # 마지막 일치 항목의 끝 위치를 찾음
+                last_match_end = matches[-1].end()
+                if last_match_end > last_header_end_index:
+                    last_header_end_index = last_match_end
 
-    # 헤더 마커가 발견되었다면, 그 위치 다음부터 본문으로 간주
-    if last_header_end_index != -1 and last_header_end_index < len(text):
-        text = text[last_header_end_index:]
+        if last_header_end_index != -1 and last_header_end_index < len(text):
+            start_index = last_header_end_index # 다른 헤더 마커 위치
+        # else: start_index는 0 유지 (처음부터)
+    
+    # "게시글 내용" 마커를 찾았든 못 찾았든, start_index부터 텍스트를 자름
+    text = text[start_index:]
+
 
     # 5. 푸터(Footer) 정보 제거
-    #    관찰된 푸터 시작 키워드들을 기준으로 텍스트를 분리하여 앞부분만 선택
-    footer_markers = [
-        r'연세대학교 의과대학 TAG',  # 사용자 예시
-        r'\sTAG\s',               # 일반적인 TAG
-        r'목록 이전글',            # 사용자 예시 및 CSV
-        r'연세대학교 관련사이트',        # CSV
-        r'COPYRIGHT©',           # CSV (특수문자 포함)
-        r'채용공고\s+입찰공고'      # CSV
+    #    사용자 요청에 따라 마커 우선순위 및 규칙 변경
+
+    # 5a. college_key에 따른 예외 처리 (의과대학)
+    # (colleges.py의 'med' 키라고 가정)
+    if college_key == 'med':
+        primary_footer_markers = [
+            r'연세대학교 의과대학 TAG',  # 의대 우선
+            r'\sTAG\s',               # 의대 우선
+        ]
+    else:
+        # 5b. 일반 규칙
+        primary_footer_markers = [
+            r'목록\s+이전글' # '목록 이전글', '목록  이전글'
+        ]
+
+    # 5c. (Fallback) 기존의 다른 푸터 마커들
+    fallback_footer_markers = [
+        r'연세대학교 관련사이트',
+        r'COPYRIGHT©',
+        r'채용공고\s+입찰공고'
     ]
-    footer_pattern = re.compile('|'.join(footer_markers), re.IGNORECASE | re.DOTALL)
     
-    match = footer_pattern.search(text)
+    # college_key 조건에 따라 fallback 마커 목록을 조정
+    if college_key == 'med':
+        # 의대인 경우, '목록 이전글'을 fallback에 추가
+        fallback_footer_markers.append(r'목록\s+이전글')
+    else:
+        # 의대가 아닌 경우, 'TAG' 관련을 fallback에 추가
+        fallback_footer_markers.extend([r'연세대학교 의과대학 TAG', r'\sTAG\s'])
+
+    # 5d. 푸터 패턴 컴파일 및 검색 (우선순위 마커 + fallback 마커)
+    all_footer_markers = primary_footer_markers + fallback_footer_markers
+    footer_pattern = re.compile('|'.join(all_footer_markers), re.IGNORECASE | re.DOTALL)
+    
+    match = footer_pattern.search(text) # (이제 text는 start_index 이후의 내용임)
     if match:
         # 푸터 마커가 시작되는 위치의 텍스트만 사용
         text = text[:match.start()]
@@ -125,21 +156,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json"})
 
-# AI 필드 포함된 UPSERT SQL 
+# ⭐️ [수정] UPSERT SQL: search_vector 관련 로직 제거 및 오타 수정
 UPSERT_SQL = """
 INSERT INTO notices (
-    college_key, title, url, body_html, body_text,
+    college_key, title, url, body_html, body_text, raw_text, -- raw_text 추가
     published_at, source_site, content_hash,
-    category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
-    search_vector
+    category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai
+    -- search_vector 컬럼 제거 (트리거가 자동 생성)
 ) VALUES (
     %(college_key)s, %(title)s, %(url)s,
-    %(body_html)s, %(body_text)s, %(published_at)s,
-    %(source_site)s, %(content_hash)s,
-    %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s,
-    setweight(to_tsvector('simple', coalesce(%(title)s, '')), 'A') ||
-    setweight(to_tsvector('simple', coalesce(array_to_string(%(hashtags_ai)s, ' '), '')), 'B') ||
-    setweight(to_tsvector('simple', coalesce(%(body_text)s, '')), 'C')
+    %(body_html)s, %(body_text)s, %(raw_text)s, -- %(raw_text)s 추가
+    %(published_at)s, %(source_site)s, %(content_hash)s,
+    %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s
+    -- search_vector 값 (setweight...) 제거
 )
 ON CONFLICT (content_hash)
 DO UPDATE SET
@@ -147,16 +176,16 @@ DO UPDATE SET
     url = EXCLUDED.url,
     body_html = EXCLUDED.body_html,
     body_text = EXCLUDED.body_text,
+    raw_text = EXCLUDED.raw_text, -- raw_text 업데이트 추가
     published_at = EXCLUDED.published_at,
     category_ai = EXCLUDED.category_ai,
     start_at_ai = EXCLUDED.start_at_ai,
-    end_at_ai = EXCLUDED.end_at_ai,
+    end_at_ai = EXCLUDED.end_at_ai, -- 'EXcluded' -> 'EXCLUDED' 오타 수정
     qualification_ai = EXCLUDED.qualification_ai,
     hashtags_ai = EXCLUDED.hashtags_ai,
-    updated_at = CURRENT_TIMESTAMP,
-    search_vector = setweight(to_tsvector('simple', coalesce(EXCLUDED.title, '')), 'A') ||
-                    setweight(to_tsvector('simple', coalesce(array_to_string(EXCLUDED.hashtags_ai, ' '), '')), 'B') ||
-                    setweight(to_tsvector('simple', coalesce(EXCLUDED.body_text, '')), 'C')
+    detailed_hashtags = EXCLUDED.detailed_hashtags,
+    updated_at = CURRENT_TIMESTAMP
+    -- search_vector = ... 라인 전체 제거 (트리거가 자동 업데이트)
 RETURNING id;
 """
 
@@ -359,7 +388,8 @@ def extract_field(item: Dict[str, Any], field_names: List[str], default: Any = "
     # 모든 후보 필드에 값이 없으면 기본값 반환
     return default
 
-def normalize_item(item: dict, base_url: Optional[str] = None) -> dict:
+# ⭐️ [수정 2] normalize_item: raw_text를 반환 딕셔너리에 추가
+def normalize_item(item: dict, base_url: Optional[str] = None, college_key: Optional[str] = None) -> dict:
     """Apify 크롤링 결과 item을 표준 형식으로 정규화"""
     # 제목 추출 (여러 필드명 후보 사용)
     title = clean_text(extract_field(item, ["title", "name", "subject", "headline", "meta.title", "og:title", "titleText", "h1", "h2"], default=""), max_length=500)
@@ -368,17 +398,19 @@ def normalize_item(item: dict, base_url: Optional[str] = None) -> dict:
     # HTML 본문 추출
     body_html = extract_field(item, ["html", "content_html", "body_html", "htmlContent", "content", "text"], default=None) # HTML은 그대로 유지 시도
     
-    # ⭐️ 2단계 수정 위치입니다 ⭐️
-    # 텍스트 본문 추출 ('text' 필드에지저분한 원본이 들어있다고 가정)
-    body_text_raw = extract_field(item, ["text", "content", "body", "body_text", "plainText"], default=None)
+    # 원본 'content'/'text' 필드 추출 (이것이 raw_text가 됨)
+    raw_text = extract_field(item, ["text", "content", "body", "body_text", "plainText"], default=None)
     
-    # 1단계에서 추가한 clean_body_text 함수로 원본 텍스트를 직접 정제
-    body_text = clean_body_text(body_text_raw)
+    # raw_text를 기반으로 body_text 정제
+    body_text = clean_body_text(raw_text, college_key=college_key)
 
-    # (비상 로직) 만약 body_text_raw에 내용이 없고 body_html에만 내용이 있는 경우,
+    # (비상 로직) 만약 raw_text에 내용이 없고 body_html에만 내용이 있는 경우,
     # body_html을 정제 시도
     if not body_text and body_html:
-         body_text = clean_body_text(body_html)
+         # 이 경우, 원본 텍스트가 body_html이므로 raw_text도 body_html로 설정
+         if not raw_text: 
+             raw_text = body_html
+         body_text = clean_body_text(body_html, college_key=college_key)
 
     # 발행일 추출 (여러 필드명 후보 사용 및 파싱)
     published_at = None
@@ -395,12 +427,13 @@ def normalize_item(item: dict, base_url: Optional[str] = None) -> dict:
                 else:
                      logger.debug(f"  ⚠️ Skipping date parse due to unlikely year: {parsed} from field '{field}'")
 
-    # 결과 딕셔너리 반환
+    # 결과 딕셔너리 반환 (raw_text 추가)
     result = {
         "title": title,
         "url": url,
         "body_html": body_html,
-        "body_text": body_text,
+        "raw_text": raw_text, # ⭐️ 원본 텍스트(content)
+        "body_text": body_text, # ⭐️ 정제된 텍스트
         "published_at": published_at, # 파싱된 datetime 객체 또는 None
     }
     return result
@@ -622,9 +655,9 @@ def run():
                 processed_hashes_in_run = set() # 현재 Run 내에서 중복 해시 방지
 
                 for item_index, rec in enumerate(items):
-                    # 아이템 정규화 시도
+                    # 아이템 정규화 시도 (ck 전달)
                     try:
-                        norm = normalize_item(rec, base_url=site)
+                        norm = normalize_item(rec, base_url=site, college_key=ck)
                     except Exception as norm_err:
                         logger.error(f"  ❌ Error normalizing item {item_index+1}: {norm_err}")
                         college_skipped += 1
@@ -760,14 +793,15 @@ def run():
                     else:
                         qualification_ai = raw_qualification_ai
 
-                    # DB 저장 시도 (try-except 블록 강화)
+                    # ⭐️ [수정] DB 저장 시도: 파라미터에서 search_vector 관련 제거
                     try:
                         cur.execute(UPSERT_SQL, {
                             "college_key": norm_item.get('college_key'), # college_key 확인
                             "title": norm_item.get("title"),
                             "url": norm_item.get("url"),
                             "body_html": norm_item.get("body_html"),
-                            "body_text": norm_item.get("body_text"),
+                            "body_text": norm_item.get("body_text"), # 정제된 텍스트
+                            "raw_text": norm_item.get("raw_text"), # ⭐️ 원본 텍스트
                             "published_at": norm_item.get("published_at"),
                             "source_site": norm_item.get('source_site'), # source_site 확인
                             "content_hash": item_hash,
@@ -776,6 +810,7 @@ def run():
                             "end_at_ai": end_at_ai,
                             "qualification_ai": Json(qualification_ai), # Json() 사용 (이제 qualification_ai는 dict)
                             "hashtags_ai": hashtags_ai, # 리스트 또는 빈 리스트
+                            "detailed_hashtags": None,
                         })
                         # cur.rowcount > 0 이면 실제로 INSERT 또는 UPDATE 발생
                         # logger.debug(f"Upsert executed for hash {item_hash}. Row count: {cur.rowcount}")
@@ -823,7 +858,7 @@ def run():
         # 그 외 예상치 못한 오류
         logger.exception(f"\n❌ An unexpected error occurred during the run: {e}") # 스택 트레이스 포함
         if conn:
-            conn.rollback() # 진행 중이던 트랜잭션 롤백
+            conn.rollback() # 진행 중이던 트랜잭N 롤백
     finally:
         # 항상 데이터베이스 연결 종료
         if conn:

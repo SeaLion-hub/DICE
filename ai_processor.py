@@ -649,3 +649,167 @@ if __name__ == "__main__":
     batch_results = classify_hashtags_from_title_batch(notices_info_batch)
     print("배치 분류 결과 (Dict[id, List[tag]]):")
     print(json.dumps(batch_results, indent=2, ensure_ascii=False))
+    # ai_processor.py 파일 맨 아래에 추가 (또는 기존 __main__ 블록 대체)
+
+# --- [신규] 3단계: 세부 해시태그 추출을 위한 전문 프롬프트 맵 ---
+# 모든 세부 프롬프트가 공유하는 기본 지시문 (JSON 반환 형식)
+SYSTEM_PROMPT_DETAIL_BASE = """
+너는 주어진 [공지 본문]과 [대분류]를 참고하여, 사용자가 관심 있을 만한 **구체적인 키워드**를 해시태그로 추출하는 AI다.
+
+[추출 규칙]
+1.  결과는 반드시 JSON 리스트 형식(예: `["#태그1", "#태그2"]`)으로만 반환한다.
+2.  추출할 태그가 없으면 빈 리스트 `[]`를 반환한다.
+3.  1~5개의 가장 중요한 세부 해시태그만 추출한다.
+4.  **[중요 규칙]** 아래 [대분류]별 [가이드라인]에 명시된 **[필수 추출 목록]**에서만 해시태그를 선택해야 한다.
+5.  **[예외 규칙]** [가이드라인]에 '(#주제)', '(#국가)', '(#기업명)', '(#직무)' 등과 같이 **괄호()로 허용된 예외**가 명시된 경우, 해당 예외에 속하는 새로운 키워드를 본문에서 직접 찾아 해시태그로 만들 수 있다.
+
+아래는 [대분류]별 세부 추출 가이드라인이다.
+"""
+
+# 각 대분류별로 '세부 추출 가이드라인'을 다르게 설정
+DETAILED_HASHTAG_PROMPT_MAP = {
+    "#취업": SYSTEM_PROMPT_DETAIL_BASE + """
+[대분류] #취업
+[필수 추출 목록]
+#채용, #공개채용, #임용, #인턴십, #현장실습, #강사, #비전임교원, #조교, #채용설명회, #설명회, #취업특강, #지원서, #양식
+[가이드라인]
+1.  [필수 추출 목록]에서 일치하는 태그를 모두 찾는다.
+2.  **[예외]** 목록에 없더라도, 본문에 명확한 **(#기업명)**(예: `#삼성전자`, `#카카오`)이 있다면 추출한다.
+3.  **[예외]** 목록에 없더라도, 본문에 명확한 **(#직무)**(예: `#개발`, `#마케팅`, `#연구원`)가 있다면 추출한다.
+""",
+    "#장학": SYSTEM_PROMPT_DETAIL_BASE + """
+[대분류] #장학
+[필수 추출 목록]
+#장학금, #장학생, #장학생선발, #블루버터플라이, #fellowship, #가계곤란, #needbased, #성적우수, #신입생, #생활비, #재단명
+[가이드라인]
+1.  오직 [필수 추출 목록]에 있는 단어만 해시태그로 추출한다.
+2.  (예외 없음)
+""",
+    "#행사": SYSTEM_PROMPT_DETAIL_BASE + """
+[대분류] #행사
+[필수 추출 목록]
+#특강, #워크숍, #세미나, #설명회, #포럼, #교육, #프로그램
+[가이드라인]
+1.  [필수 추출 목록]에서 일치하는 태그를 모두 찾는다.
+2.  **[예외]** 목록에 없더라도, 본문에 명확한 행사의 **(#주제)**(예: `#AI`, `#리더십`, `#창업`, `#데이터분석`)가 있다면 추출한다.
+""",
+    "#공모전/대회": SYSTEM_PROMPT_DETAIL_BASE + """
+[대분류] #공모전/대회
+[필수 추출 목록]
+#공모전, #경진대회, #숏폼, #영상, #아이디어, #논문, #학생설계전공, #마이크로전공
+[가이드라인]
+1.  오직 [필수 추출 목록]에 있는 단어만 해시태그로 추출한다.
+2.  (예외 없음)
+""",
+    "#국제교류": SYSTEM_PROMPT_DETAIL_BASE + """
+[대분류] #국제교류
+[필수 추출 목록]
+#교환학생, #파견, #선발, #campusasia, #글로벌, #단기, #단기교류, #하계, #동계, #어학연수
+[가이드라인]
+1.  [필수 추출 목록]에서 일치하는 태그를 모두 찾는다.
+2.  **[예외]** 목록에 없더라도, 본문에 명확한 **(#국가)**(예: `#일본`, `#미국`, `#중국`)가 있다면 추출한다.
+""",
+    "#학사": SYSTEM_PROMPT_DETAIL_BASE + """
+[대분류] #학사
+[필수 추출 목록]
+#소속변경, #캠퍼스내소속변경, #휴학, #복학, #수강신청, #졸업, #등록금, #교과목, #전공과목, #다전공
+[가이드라인]
+1.  오직 [필수 추출 목록]에 있는 단어만 해시태그로 추출한다.
+2.  (예외 없음)
+"""
+}
+
+# --- [신규] 3단계: 세부 해시태그 추출 함수 ---
+def extract_detailed_hashtags(body_text: str, main_category: str) -> List[str]:
+    """
+    주어진 본문과 대분류에 따라 [필수 추출 목록] + [예외 규칙]에 기반한
+    세부 해시태그를 추출합니다.
+    """
+    if not body_text or not main_category:
+        return []
+
+    # #일반 또는 맵에 없는 카테고리는 세부 추출 안 함
+    if main_category not in DETAILED_HASHTAG_PROMPT_MAP:
+        return []
+
+    system_prompt = DETAILED_HASHTAG_PROMPT_MAP[main_category]
+    
+    # 사용자 프롬프트 생성 (본문 + 대분류)
+    user_prompt = f"[대분류]\n{main_category}\n\n[공지 본문]\n{body_text}\n[/공지 본문]"
+
+    try:
+        # call_gemini_api는 이미 JSON 파싱 및 정리를 처리함
+        json_response = call_gemini_api(
+            system_prompt,
+            user_prompt,
+            is_json_output=True
+        )
+
+        if isinstance(json_response, list):
+            # 응답이 문자열 리스트인지 한 번 더 확인
+            valid_hashtags = [tag for tag in json_response if isinstance(tag, str) and tag.startswith("#")]
+            return valid_hashtags
+        else:
+            print(f"Error: Detailed hashtag response was not a list for category {main_category}. Got: {json_response}")
+            return []
+
+    except Exception as e:
+        print(f"Error during detailed hashtag extraction: {e}")
+        # 429 (Rate Limit) 오류는 재시도 로직을 위해 다시 raise (call_gemini_api가 처리)
+        if "429" in str(e): 
+            raise e
+        return []
+
+
+if __name__ == "__main__":
+    
+    # --- 기존 테스트 케이스들 ---
+    test_cases = [
+        # ... (기존 테스트 케이스 예시) ...
+        # 예시 1: #장학
+        {"title": "[Notice] 2025 Fall Semester Underwood Legacy Scholarship Notice", "body": "GPA of 3.5 or higher... Application Deadline: Oct 17", "expected_category": "#장학"},
+        # 예시 2: #국제교류
+        {"title": "[CAMPUS Asia] 2025년 하반기 태국 출라롱콘대 단기교류 파견학생 모집", "body": "지원 자격: 학부 2~7학기, TOEIC 850점... 마감 기한: ~10/10(금) 17시", "expected_category": "#국제교류"},
+    ]
+
+    print("===== 1/2단계: 분류 및 구조화 추출 테스트 =====")
+    for i, case in enumerate(test_cases[:2]): # 간단히 2개만 테스트
+        title = case["title"]
+        body = case["body"]
+        print(f"\n--- 테스트 {i+1}: {case['expected_category']} ---")
+        
+        # 1단계: 분류
+        classified_category = classify_notice_category(title, body)
+        print(f"분류된 카테고리: {classified_category}")
+        
+        # 2단계: 구조화
+        if classified_category:
+            extracted_json = extract_structured_info(title, body, classified_category)
+            print(f"추출된 JSON: {json.dumps(extracted_json, indent=2, ensure_ascii=False)}")
+    
+    
+    # --- [신규] 3단계: 세부 해시태그 추출 테스트 ---
+    print("\n\n===== 3단계: 세부 해시태그 추출 테스트 =====")
+    
+    # 테스트 1: #취업
+    test_body_job = "연세대학교 간호대학에서 2025-2학기 일반조교를 채용합니다. 삼성병원 출신 우대. (문의: yoonc411@yuhs.ac)"
+    tags_job = extract_detailed_hashtags(test_body_job, "#취업")
+    print(f"\n#취업 테스트 (본문: {test_body_job[:30]}...)")
+    print(f"-> 결과: {tags_job}") # 기대 예: [#조교, #채용, #삼성병원]
+
+    # 테스트 2: #국제교류
+    test_body_global = "[CAMPUS Asia사업] 2025년 하반기 일본 도호쿠대 단기교류 파견학생 모집. 영어로 의사소통 가능자."
+    tags_global = extract_detailed_hashtags(test_body_global, "#국제교류")
+    print(f"\n#국제교류 테스트 (본문: {test_body_global[:30]}...)")
+    print(f"-> 결과: {tags_global}") # 기대 예: [#단기교류, #파견, #campusasia, #일본]
+
+    # 테스트 3: #학사 (예외 규칙 없음)
+    test_body_academic = "2026학년도 1학기 캠퍼스내 소속변경 전형 안내. 3학기 이상 이수자 대상."
+    tags_academic = extract_detailed_hashtags(test_body_academic, "#학사")
+    print(f"\n#학사 테스트 (본문: {test_body_academic[:30]}...)")
+    print(f"-> 결과: {tags_academic}") # 기대 예: [#소속변경, #캠퍼스내소속변경]
+
+    # 테스트 4: #일반 (추출 안 함)
+    tags_general = extract_detailed_hashtags(test_body_job, "#일반")
+    print(f"\n#일반 테스트 (본문: {test_body_job[:30]}...)")
+    print(f"-> 결과: {tags_general}") # 기대: []

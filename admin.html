@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>DICE 관리자 - 세부 해시태그 추출</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2em; background-color: #f4f4f9; color: #333; }
+        h1 { color: #003876; border-bottom: 2px solid #003876; padding-bottom: 10px; }
+        table { width: 100%; border-collapse: collapse; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-top: 20px; }
+        th, td { padding: 12px 15px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+        th { background-color: #003876; color: white; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        a { color: #003876; text-decoration: none; word-break: break-all; }
+        a:hover { text-decoration: underline; }
+        button { background-color: #007bff; color: white; border: none; padding: 8px 12px; border-radius: 4px; cursor: pointer; font-size: 14px; min-width: 80px; }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        .result-span { 
+            display: block; 
+            margin-top: 8px; 
+            font-style: italic; 
+            color: #555; 
+            font-size: 0.9em; 
+            word-break: break-word;
+        }
+        /* 저장된 태그(성공) 스타일 */
+        .result-span.saved { color: #28a745; font-weight: bold; }
+        /* 오류 스타일 */
+        .result-span.error { color: #dc3545; font-weight: bold; }
+        #loading { font-weight: bold; color: #d9534f; }
+        td:nth-child(1) { width: 12%; }
+        td:nth-child(2) { width: 45%; }
+        td:nth-child(3) { width: 10%; }
+        td:nth-child(4) { width: 33%; }
+    </style>
+</head>
+<body>
+    <h1>DICE 관리자 - 세부 해시태그 추출 (및 저장)</h1>
+    <p id="loading">공지사항 목록 로딩 중...</p>
+    <table id="notices-table">
+        <thead>
+            <tr>
+                <th>단과대</th>
+                <th>제목 (링크)</th>
+                <th>대분류</th>
+                <th>세부 해시태그 (추출/저장)</th>
+            </tr>
+        </thead>
+        <tbody id="notices-body">
+            </tbody>
+    </table>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', loadNotices);
+
+        // 1. 공지사항 목록 로드 (수정됨)
+        async function loadNotices() {
+            try {
+                const response = await fetch('/admin/api/notices?limit=200'); 
+                if (!response.ok) throw new Error('Failed to fetch notices');
+                
+                const data = await response.json();
+                const tbody = document.getElementById('notices-body');
+                tbody.innerHTML = ''; 
+
+                if (data.items.length === 0) {
+                     document.getElementById('loading').textContent = '세부 추출이 필요한 공지가 없습니다. (#일반 제외)';
+                     return;
+                }
+
+                data.items.forEach(notice => {
+                    const tr = document.createElement('tr');
+                    
+                    const savedTags = notice.detailed_hashtags || [];
+                    const hasSavedTags = savedTags.length > 0;
+                    
+                    const buttonText = hasSavedTags ? '재추출' : '추출 실행';
+                    const buttonColor = hasSavedTags ? '#ffc107' : '#007bff'; // 재추출은 노란색
+                    
+                    let savedTagsHtml = '';
+                    if (hasSavedTags) {
+                        // (저장됨) 텍스트와 함께 <span> 생성
+                        savedTagsHtml = `<span class="result-span saved">(저장됨: ${escapeHTML(savedTags.join(', '))})</span>`;
+                    } else {
+                        // 빈 <span>을 생성 (자리 차지용)
+                        savedTagsHtml = `<span class="result-span"></span>`;
+                    }
+
+                    tr.innerHTML = `
+                        <td>${escapeHTML(notice.college_name)}</td>
+                        <td><a href="${escapeHTML(notice.url)}" target="_blank" title="${escapeHTML(notice.url)}">${escapeHTML(notice.title)}</a></td>
+                        <td>${escapeHTML(notice.category_ai)}</td>
+                        <td id="cell-${notice.id}">
+                            <button style="background-color: ${buttonColor};" onclick="extractTags('${notice.id}', '${notice.category_ai}', this)">
+                                ${buttonText}
+                            </button>
+                            ${savedTagsHtml} </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                document.getElementById('loading').textContent = `공지 ${data.items.length}개 로드 완료. (#일반 제외)`;
+
+            } catch (error) {
+                console.error('Error loading notices:', error);
+                document.getElementById('loading').textContent = '공지 로드 실패.';
+            }
+        }
+
+        // 2. 세부 해시태그 추출 및 저장 실행 (수정됨)
+        async function extractTags(noticeId, mainCategory, buttonEl) {
+            // 버튼이 속한 <td>에서 .result-span을 찾음
+            const cell = buttonEl.closest('td'); 
+            const resultSpan = cell.querySelector('.result-span'); 
+            
+            buttonEl.disabled = true;
+            buttonEl.textContent = '추출 중...';
+            
+            // [수정] 요청대로 기존 내용을 즉시 삭제하고 로딩 메시지로 변경
+            resultSpan.textContent = '(AI 추출 중...)';
+            resultSpan.className = 'result-span'; // 기본 스타일로 초기화
+
+            try {
+                const response = await fetch('/admin/api/extract-detailed-hashtags', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        notice_id: noticeId,
+                        main_category: mainCategory
+                    })
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || '추출 실패');
+                }
+
+                const data = await response.json();
+                
+                // [수정] 동일한 <span>에 새 결과를 덮어씀 (삭제 후 삽입)
+                if (data.detailed_hashtags && data.detailed_hashtags.length > 0) {
+                    resultSpan.textContent = `(저장됨: ${escapeHTML(data.detailed_hashtags.join(', '))})`;
+                    resultSpan.className = 'result-span saved'; // 성공 스타일
+                } else {
+                    resultSpan.textContent = '[추출 결과 없음 (저장됨)]';
+                    resultSpan.className = 'result-span';
+                }
+                
+                buttonEl.textContent = '재추출';
+                buttonEl.style.backgroundColor = '#28a745'; // 성공 시 초록색
+                buttonEl.disabled = false;
+
+            } catch (error) {
+                console.error('Error extracting tags:', error);
+                
+                // [수정] 동일한 <span>에 오류 메시지를 씀
+                resultSpan.textContent = `[오류: ${error.message}]`;
+                resultSpan.className = 'result-span error'; // 오류 스타일
+                
+                buttonEl.textContent = '추출 실패';
+                buttonEl.style.backgroundColor = '#dc3545'; // 실패 시 빨간색
+                buttonEl.disabled = false;
+            }
+        }
+
+        // (Helper) HTML 태그 이스케이프
+        function escapeHTML(str) {
+            if (str === null || str === undefined) return '';
+            return str.replace(/[&<>"']/g, function(m) {
+                return {
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                }[m];
+            });
+        }
+    </script>
+</body>
+</html>

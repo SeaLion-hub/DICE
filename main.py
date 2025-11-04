@@ -33,6 +33,7 @@ from comparison_logic import check_suitability
 
 # 인증 라우터 및 의존성 import
 from auth_routes import router as auth_router
+from admin_routes import router as admin_router
 from auth_deps import get_current_user
 from auth_security import decode_token
 
@@ -102,6 +103,7 @@ app.add_middleware(
 
 # 7) 인증 라우터 등록
 app.include_router(auth_router, tags=["auth"])
+app.include_router(admin_router, tags=["admin"])
 
 # --- (신규) 메타데이터 API 추가 ---
 @app.get("/meta/majors")
@@ -224,6 +226,7 @@ UPSERT_SQL = """
         end_at_ai = EXCLUDED.end_at_ai,
         qualification_ai = EXCLUDED.qualification_ai,
         hashtags_ai = EXCLUDED.hashtags_ai,
+        detailed_hashtags = EXCLUDED.detailed_hashtags,
         updated_at = CURRENT_TIMESTAMP,
         search_vector = setweight(to_tsvector('simple', coalesce(EXCLUDED.title, '')), 'A') ||
                         setweight(to_tsvector('simple', coalesce(array_to_string(EXCLUDED.hashtags_ai, ' '), '')), 'B') ||
