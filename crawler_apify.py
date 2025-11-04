@@ -125,7 +125,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json"})
 
-# AI 필드 포함된 UPSERT SQL (summary_raw 제거)
+# AI 필드 포함된 UPSERT SQL 
 UPSERT_SQL = """
 INSERT INTO notices (
     college_key, title, url, body_html, body_text,

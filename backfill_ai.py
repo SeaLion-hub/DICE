@@ -85,23 +85,6 @@ class BackfillStats:
     def add_skip(self):
         self.skipped += 1
 
-    def get_summary(self) -> str:
-        elapsed = time.time() - self.start_time
-        avg_time = sum(self.processing_times) / len(self.processing_times) if self.processing_times else 0
-
-        # 수정된 요약: Fallback 제거, Skipped 추가
-        return f"""
-✨ Backfill Complete
-────────────────────
-Total checked: {self.total}
-Success (Updated): {self.success}
-Failed (AI/DB Error): {self.failed}
-Skipped (No text): {self.skipped}
-Time elapsed: {elapsed:.1f}s
-Avg processing time (Success only): {avg_time:.2f}s per item
-Success rate (Updated / Checked): {(self.success/self.total*100 if self.total else 0):.1f}%
-"""
-
 
 def build_filters(args) -> tuple[str, list]:
     """Build SQL filter clause from arguments"""
@@ -230,7 +213,21 @@ def backfill_ai_fields(args):
         if conn:
             conn.close() # 커넥션 반환
 
-    print(stats.get_summary())
+        # 요약 정보 로깅
+        elapsed = time.time() - stats.start_time
+        avg_time = sum(stats.processing_times) / len(stats.processing_times) if stats.processing_times else 0
+        
+        logger.info(f"""
+✨ Backfill Complete
+────────────────────
+Total checked: {stats.total}
+Success (Updated): {stats.success}
+Failed (AI/DB Error): {stats.failed}
+Skipped (No text): {stats.skipped}
+Time elapsed: {elapsed:.1f}s
+Avg processing time (Success only): {avg_time:.2f}s per item
+Success rate (Updated / Checked): {(stats.success/stats.total*100 if stats.total else 0):.1f}%
+""")
 
 
 def main():

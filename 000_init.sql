@@ -31,14 +31,12 @@ BEFORE UPDATE ON colleges
 FOR EACH ROW
 EXECUTE FUNCTION set_updated_at();
 
--- 3.2 notices (summary_ai 컬럼 제거)
+-- 3.2 notices
 CREATE TABLE IF NOT EXISTS notices (
   id            UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   college_key   TEXT REFERENCES colleges(key) ON DELETE SET NULL,
   title         TEXT NOT NULL,
   url           TEXT NOT NULL,
-  summary_raw   TEXT,
-  -- summary_ai    TEXT,  -- 제거됨
   body_html     TEXT,
   body_text     TEXT,
   published_at  TIMESTAMPTZ,

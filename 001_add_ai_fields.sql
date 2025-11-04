@@ -64,36 +64,12 @@ BEGIN
     END IF;
 END $$;
 
--- Remove summary_ai column if it exists (Backward compatibility for removal)
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'notices' AND column_name = 'summary_ai'
-    ) THEN
-        ALTER TABLE notices DROP COLUMN summary_ai;
-    END IF;
-END $$;
-
--- (추가된 부분) Remove summary_raw column if it exists
-DO $$
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM information_schema.columns
-        WHERE table_name = 'notices' AND column_name = 'summary_raw'
-    ) THEN
-        ALTER TABLE notices DROP COLUMN summary_raw;
-    END IF;
-END $$;
-
-
 -- Indexes for AI fields
 CREATE INDEX IF NOT EXISTS idx_notices_category_ai ON notices (category_ai);
 CREATE INDEX IF NOT EXISTS idx_notices_end_at_ai ON notices (end_at_ai DESC);
 CREATE INDEX IF NOT EXISTS idx_notices_hashtags_ai_gin ON notices USING GIN (hashtags_ai); -- Ensure this index is appropriate here or in a later migration (like 006)
 
--- Statistics view updated (removed summary_ai fields if they were previously included)
--- This assumes the original view might have referenced summary_ai
+-- Statistics view updated
 CREATE OR REPLACE VIEW notice_stats AS
 SELECT
     COUNT(*) as total_notices,

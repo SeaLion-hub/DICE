@@ -196,7 +196,7 @@ def content_hash(college_key: str, title: str, url: str, published_at: Optional[
     content = f"{college_key}|{title}|{url}|{date_str}"
     return hashlib.sha256(content.encode()).hexdigest()
 
-# [수정] UPSERT SQL (summary_raw 제거, search_vector 사용)
+# [수정] UPSERT SQL (search_vector 사용)
 UPSERT_SQL = """
     INSERT INTO notices (
         college_key, title, url, body_html, body_text,
