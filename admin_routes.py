@@ -35,11 +35,12 @@ async def get_admin_dashboard():
     return FileResponse(ADMIN_HTML_PATH)
 
 
-# 2. 공지사항 목록 API (Admin용) - [수정됨: detailed_hashtags 조회]
+# 2. 공지사항 목록 API (Admin용) - [수정됨: body_text IS NOT NULL 조건 추가]
 @router.get("/api/notices")
 async def get_notices_for_admin(limit: int = 100, offset: int = 0):
     """관리자 페이지용 공지사항 목록 (단과대명, 제목, URL, 대분류, 세부태그)"""
-    # #일반이 아닌, 세부 추출이 의미 있는 공지사항만 조회
+    
+    # [수정] body_text가 NULL이 아니고 비어있지 않은 공지만 선택하도록 WHERE 조건 수정
     query = """
     SELECT 
         n.id,
@@ -47,10 +48,11 @@ async def get_notices_for_admin(limit: int = 100, offset: int = 0):
         n.title,
         n.url,
         n.category_ai,
-        n.detailed_hashtags  -- [수정] 기존에 저장된 세부 해시태그 조회
+        n.detailed_hashtags
     FROM notices n
     LEFT JOIN colleges c ON n.college_key = c.key
     WHERE n.category_ai IS NOT NULL AND n.category_ai != '#일반'
+      AND n.body_text IS NOT NULL AND n.body_text != ''  -- [수정] 본문 텍스트가 있는 공지만 필터링
     ORDER BY n.created_at DESC
     LIMIT %s OFFSET %s;
     """
@@ -65,7 +67,7 @@ async def get_notices_for_admin(limit: int = 100, offset: int = 0):
         raise HTTPException(status_code=500, detail="Database error")
 
 
-# 3. 세부 해시태그 추출 및 저장 API - [수정됨: DB 저장 로직 추가]
+# 3. 세부 해시태그 추출 및 저장 API
 @router.post("/api/extract-detailed-hashtags")
 async def api_extract_detailed_hashtags(payload: dict):
     """공지 ID와 대분류를 받아 세부 해시태그를 AI로 추출하고 DB에 저장"""
@@ -80,18 +82,20 @@ async def api_extract_detailed_hashtags(payload: dict):
         # 1. DB에서 body_text 가져오기 (커넥션 분리)
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT body_text FROM notices WHERE id = %s", (notice_id,))
+                cur.execute("SELECT title, body_text FROM notices WHERE id = %s", (notice_id,))
                 row = cur.fetchone()
         
+        # (이론상 /api/notices 에서 이미 필터링되었지만, 안전장치로 재확인)
         if not row or not row.get("body_text"):
             raise HTTPException(status_code=404, detail="Notice body not found or empty")
         
         body_text = row["body_text"]
+        title = row["title"]
 
         # 2. AI 함수 호출 (시간이 걸릴 수 있음)
-        detailed_hashtags = extract_detailed_hashtags(body_text, main_category)
+        detailed_hashtags = extract_detailed_hashtags(title, body_text, main_category)
         
-        # 3. [신규] AI 결과를 DB에 저장
+        # 3. AI 결과를 DB에 저장
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
