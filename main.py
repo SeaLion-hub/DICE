@@ -34,6 +34,7 @@ from comparison_logic import check_suitability
 # 인증 라우터 및 의존성 import
 from auth_routes import router as auth_router
 from admin_routes import router as admin_router
+from recommendation_routes import router as recommendation_router
 from auth_deps import get_current_user
 from auth_security import decode_token
 
@@ -104,7 +105,7 @@ app.add_middleware(
 # 7) 인증 라우터 등록
 app.include_router(auth_router, tags=["auth"])
 app.include_router(admin_router, tags=["admin"])
-
+app.include_router(recommendation_router)
 # --- (신규) 메타데이터 API ---
 @app.get("/meta/majors")
 def get_majors_list():
