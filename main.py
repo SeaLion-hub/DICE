@@ -461,6 +461,7 @@ def list_notices(
                 SELECT 
                     id, college_key, title, url,
                     category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
+                    detailed_hashtags, -- [추가] 세부 해시태그
                     published_at, created_at
                     {select_extra_sql}
                 FROM notices
@@ -537,6 +538,7 @@ def get_notice(notice_id: str):
             cur.execute("""
               SELECT id, college_key, title, url, body_html, body_text,
                      category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
+                     detailed_hashtags, -- [추가] 세부 해시태그
                      published_at, created_at, updated_at
               FROM notices WHERE id = %s
             """, [notice_id])
