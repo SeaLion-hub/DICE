@@ -1,4 +1,4 @@
-# main.py (프로젝트 루트 / DB풀 + 인증 + AI + FTS + majors API 통합 버전)
+# main.py (프로젝트 루트 / DB풀 + 인증 + AI + FTS + majors API 통합 버전, Redis 큐 enqueue 포함)
 import os
 import logging
 import hashlib
@@ -79,9 +79,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("dice-api")
 
 # 5) FastAPI 앱
-app = FastAPI(title="DICE API", version="0.2.0 (Schema-Aligned)", docs_url="/docs", redoc_url="/redoc")
+app = FastAPI(title="DICE API", version="0.2.1 (Schema-Aligned + Redis Enqueue)", docs_url="/docs", redoc_url="/redoc")
 
-# --- [수정] DB 풀 이벤트 핸들러 ---
+# --- DB 풀 이벤트 핸들러 ---
 @app.on_event("startup")
 async def startup_event():
     logger.info("Initializing database connection pool...")
@@ -105,7 +105,7 @@ app.add_middleware(
 app.include_router(auth_router, tags=["auth"])
 app.include_router(admin_router, tags=["admin"])
 
-# --- (신규) 메타데이터 API 추가 ---
+# --- (신규) 메타데이터 API ---
 @app.get("/meta/majors")
 def get_majors_list():
     """
@@ -117,7 +117,7 @@ def get_majors_list():
         for college_name, major_list in MAJORS_BY_COLLEGE.items()
     ]
     return {"items": formatted_list}
-# --- (신규) 메타데이터 API 추가 끝 ---
+# --- 메타데이터 API 끝 ---
 
 # 8) 캐시 시스템
 _cache = {}
@@ -167,21 +167,23 @@ def normalize_item(item: dict, base_url: str = None) -> dict:
         "body_text": item.get("body_text", "").strip() if item.get("body_text") else None,
         "published_at": None
     }
-    
+
     if normalized["url"] and not normalized["url"].startswith(("http://", "https://")):
         if base_url:
             normalized["url"] = base_url.rstrip("/") + "/" + normalized["url"].lstrip("/")
-    
+
     if item.get("published_at"):
         try:
             normalized["published_at"] = datetime.fromisoformat(item["published_at"].replace("Z", "+00:00"))
-        except: pass
+        except:
+            pass
     elif item.get("date"):
         try:
             d = dt.date.fromisoformat(item["date"])
             normalized["published_at"] = dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc)
-        except: pass
-    
+        except:
+            pass
+
     return normalized
 
 def validate_normalized_item(item: dict) -> bool:
@@ -198,7 +200,7 @@ def content_hash(college_key: str, title: str, url: str, published_at: Optional[
     content = f"{college_key}|{title}|{url}|{date_str}"
     return hashlib.sha256(content.encode()).hexdigest()
 
-# [수정] UPSERT SQL (search_vector 사용)
+# UPSERT SQL (search_vector 사용) — summary_ai 제거
 UPSERT_SQL = """
     INSERT INTO notices (
         college_key, title, url, body_html, body_text,
@@ -239,7 +241,9 @@ class ApifyResource(BaseModel):
     id: Optional[str] = None
     defaultDatasetId: Optional[str] = None
     status: Optional[str] = None
-    actorTaskId: Optional[str] = None # [수정] taskId 추가
+    actorTaskId: Optional[str] = None  # taskId 지원
+    startedAt: Optional[str] = None    # 추가 필드 지원
+    finishedAt: Optional[str] = None   # 추가 필드 지원
 
 class ApifyWebhookPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
@@ -251,13 +255,11 @@ class ApifyWebhookPayload(BaseModel):
 def health():
     base = {"env": ENV, "service": "dice-api"}
     try:
-        # [수정] DB 연결 풀 사용
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT 1 AS ok;")
-            
             tbl = cur.fetchone()
             if not tbl or tbl["ok"] != 1:
-                 raise Exception("DB query failed")
+                raise Exception("DB query failed")
 
             cur.execute("SELECT COUNT(*) AS c FROM information_schema.tables WHERE table_name = 'colleges';")
             tbl_check = cur.fetchone()
@@ -276,7 +278,6 @@ def health():
     except Exception as e:
         logger.error(f"Health check DB error: {e}")
         raise HTTPException(status_code=503, detail={"status": "db_unavailable", **base})
-
     return {"status": "ok", **base}
 
 @app.get("/notices")
@@ -301,15 +302,15 @@ def list_notices(
     [수정] FTS 컬럼명을 `search_vector`로, trgm 대상 컬럼을 `body_text`로 변경
     [수정] FTS/Websearch 모드에서 ILIKE (단어 내 부분검색) OR 조건 추가
     """
-    
+
     if rank is None:
         rank = "fts" if search_mode in ("fts", "websearch") else "off"
-    
+
     # 캐시 키 생성 (my=true는 캐시 안 함)
     cache_key = None
     if not no_cache and not my:
         cache_key_parts = [
-            f"notices:v3-hybrid", f"c={college or 'all'}", f"q={q or ''}", f"sm={search_mode}", # v3-hybrid 캐시 키 변경
+            f"notices:v3-hybrid", f"c={college or 'all'}", f"q={q or ''}", f"sm={search_mode}",
             f"op={op}", f"r={rank}", f"df={date_from or ''}", f"dt={date_to or ''}",
             f"s={sort}", f"l={limit}", f"o={offset}", f"cnt={count}"
         ]
@@ -318,28 +319,27 @@ def list_notices(
         if cached_response is not None:
             logger.info(f"Cache hit for notices query: {cache_key[:50]}...")
             return cached_response
-    
+
     user_keywords = None
     if my:
         try:
-            # [수정] auth_deps.py의 get_current_user를 직접 호출하는 대신 
-            # 헤더를 수동으로 파싱하고 DB에서 프로필을 조회합니다. (API 라우트 내에서 의존성 주입은 복잡함)
             auth = request.headers.get("Authorization", "")
             parts = auth.split()
             if len(parts) == 2 and parts[0].lower() == "bearer":
                 token = parts[1]
                 payload = decode_token(token)
                 user_id = payload.get("sub")
-                if not user_id: raise HTTPException(status_code=401, detail="Invalid token")
+                if not user_id:
+                    raise HTTPException(status_code=401, detail="Invalid token")
             else:
                 raise HTTPException(status_code=401, detail="Not authenticated")
-            
+
             with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT keywords FROM user_profiles WHERE user_id = %s", [user_id])
                 profile_row = cur.fetchone()
                 user_keywords = profile_row['keywords'] if profile_row else []
-            
-            if not user_keywords: # 키워드 없으면 빈 결과 반환
+
+            if not user_keywords:
                  return {"meta": {"returned": 0, "total_count": 0}, "items": []}
 
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, HTTPException) as e:
@@ -354,114 +354,109 @@ def list_notices(
     if q:
         q_raw = q.strip()
         if q_raw:
-            tokens = [t for t in re.split(r'\s+', q_raw) if len(t) >= 2] # 2글자 이상
+            tokens = [t for t in re.split(r'\s+', q_raw) if len(t) >= 2]  # 2글자 이상
 
     where_clauses = []
     order_clauses = []
-    params = {}
+    params: Dict[str, Any] = {}
     select_extra = []
-    
+
     if college and college != "all":
         where_clauses.append("college_key = %(college)s")
         params["college"] = college
-    
+
     if date_from:
-        try: params["date_from"] = datetime.fromisoformat(date_from)
-        except: raise HTTPException(status_code=400, detail="Invalid date_from format")
+        try:
+            params["date_from"] = datetime.fromisoformat(date_from)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid date_from format")
         where_clauses.append("published_at >= %(date_from)s")
-    
+
     if date_to:
-        try: params["date_to"] = datetime.fromisoformat(date_to) + dt.timedelta(days=1)
-        except: raise HTTPException(status_code=400, detail="Invalid date_to format")
+        try:
+            params["date_to"] = datetime.fromisoformat(date_to) + dt.timedelta(days=1)
+        except:
+            raise HTTPException(status_code=400, detail="Invalid date_to format")
         where_clauses.append("published_at < %(date_to)s")
-    
+
     if my and user_keywords:
         where_clauses.append("(hashtags_ai && %(user_keywords)s::text[])")
         params["user_keywords"] = user_keywords
-    
-    # [수정] 검색 로직 (FTS + ILIKE 하이브리드)
+
+    # 검색 로직 (FTS + ILIKE 하이브리드)
     if tokens:
-        # 1. ILIKE (Substring) conditions (used by 'like' and hybrid FTS)
+        # ILIKE (Substring)
         like_conditions = []
         for i, token in enumerate(tokens):
             param_name = f"like_token_{i}"
             params[param_name] = f"%{token}%"
             like_conditions.append(f"(title ILIKE %({param_name})s OR body_text ILIKE %({param_name})s)")
-        
         op_join_like = " AND " if op == "and" else " OR "
         like_clause = f"({op_join_like.join(like_conditions)})"
 
-        # 2. FTS (Prefix/Web) conditions
-        fts_clause = "FALSE" # Default if no FTS query
-        
+        # FTS
+        fts_clause = "FALSE"
         if search_mode in ("fts", "websearch"):
             if search_mode == "fts":
-                if op == "and": tsquery_str = " & ".join(tokens)
-                else: tsquery_str = " | ".join(tokens)
-                tsquery_str = re.sub(r'[^0-9A-Za-z가-힣\|\&\s]', '', tsquery_str) # 간단한 정제
+                if op == "and":
+                    tsquery_str = " & ".join(tokens)
+                else:
+                    tsquery_str = " | ".join(tokens)
+                tsquery_str = re.sub(r'[^0-9A-Za-z가-힣\|\&\s]', '', tsquery_str)
                 if tsquery_str:
                     params["tsquery"] = tsquery_str
-                    fts_clause = f"search_vector @@ to_tsquery('simple', %(tsquery)s)"
+                    fts_clause = "search_vector @@ to_tsquery('simple', %(tsquery)s)"
                     if rank == "fts":
-                        # 랭킹 점수 추가 (1 = 랭킹 정규화)
                         select_extra.append("ts_rank(search_vector, to_tsquery('simple', %(tsquery)s), 1) AS rank_score")
-            
             elif search_mode == "websearch":
                 if q_raw:
                     params["websearch_query"] = q_raw
                     try:
-                        fts_clause = f"search_vector @@ websearch_to_tsquery('simple', %(websearch_query)s)"
+                        fts_clause = "search_vector @@ websearch_to_tsquery('simple', %(websearch_query)s)"
                         if rank == "fts":
                             select_extra.append("ts_rank(search_vector, websearch_to_tsquery('simple', %(websearch_query)s), 1) AS rank_score")
-                    except psycopg2.Error as e: # websearch_to_tsquery 실패 시 (오래된 PG)
+                    except psycopg2.Error as e:
                         logger.warning(f"websearch_to_tsquery failed, falling back to plainto_tsquery: {e}")
                         params["fallback_query"] = q_raw
-                        fts_clause = f"search_vector @@ plainto_tsquery('simple', %(fallback_query)s)"
+                        fts_clause = "search_vector @@ plainto_tsquery('simple', %(fallback_query)s)"
                         if rank == "fts":
                             select_extra.append("ts_rank(search_vector, plainto_tsquery('simple', %(fallback_query)s), 1) AS rank_score")
 
-            # 3. [USER REQUEST] FTS와 ILIKE(부분검색)를 OR로 결합
+            # FTS와 ILIKE를 OR로 결합
             where_clauses.append(f"({fts_clause} OR {like_clause})")
-            
             if rank == "fts":
-                # FTS 랭킹이 켜져 있으면, ILIKE만 일치한 경우 rank_score가 0이 되므로
-                # FTS 랭킹순으로 정렬 후, 나머지는 최신순으로 정렬합니다.
                 order_clauses.append("rank_score DESC")
 
         elif search_mode in ("like", "trgm"):
-            # 'like' 또는 'trgm' 모드는 기존 로직(ILIKE만) 유지
             where_clauses.append(like_clause)
-            
             if rank == "trgm":
                 params["q_raw"] = q_raw
                 select_extra.append("GREATEST(similarity(title, %(q_raw)s), similarity(body_text, %(q_raw)s)) AS rank_score")
                 order_clauses.append("rank_score DESC")
-    
+
     # 기본 정렬
     if sort == "oldest":
         order_clauses.append("published_at ASC NULLS FIRST, created_at ASC")
     else:
-        # FTS 랭킹이 이미 order_clauses에 추가된 경우, 이 정렬은 2순위가 됩니다.
         order_clauses.append("published_at DESC NULLS LAST, created_at DESC")
-    
+
     # SQL 구성
     where_sql = " WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     order_sql = " ORDER BY " + ", ".join(order_clauses) if order_clauses else ""
     select_extra_sql = ", " + ", ".join(select_extra) if select_extra else ""
-    
+
     total_count = None
     try:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-            # COUNT 쿼리 (옵션)
+            # COUNT
             if count:
                 count_sql = f"SELECT COUNT(*) AS total FROM notices{where_sql}"
                 cur.execute(count_sql, params)
                 total_count = cur.fetchone()["total"]
-            
-            # SELECT 쿼리
+
+            # SELECT
             params["limit"] = min(limit, 100)
             params["offset"] = offset
-            
             sql = f"""
                 SELECT 
                     id, college_key, title, url,
@@ -473,15 +468,13 @@ def list_notices(
                 {order_sql}
                 LIMIT %(limit)s OFFSET %(offset)s
             """
-            
             cur.execute(sql, params)
             rows = cur.fetchall()
-
     except Exception as e:
         logger.error(f"DB error searching notices: {e}")
         raise HTTPException(status_code=500, detail="Database error executing search")
 
-    # 응답 구성
+    # 응답
     response = {
         "meta": {
             "search_mode": search_mode, "op": op, "rank": rank,
@@ -489,16 +482,15 @@ def list_notices(
         },
         "items": rows
     }
-    
     if count and total_count is not None:
         response["meta"]["total_count"] = total_count
-    
+
     # 캐시 저장
     if cache_key:
         cache_ttl = 60 if q else 30
         cache_set(cache_key, response, ttl=cache_ttl)
         logger.info(f"Cached notices response for {cache_ttl}s: {cache_key[:50]}...")
-    
+
     return response
 
 @app.get("/stats")
@@ -521,14 +513,14 @@ def stats():
 def list_colleges():
     cache_key = "colleges_list_v1"
     cached_data = cache_get(cache_key)
-    if cached_data: return cached_data
-    
+    if cached_data:
+        return cached_data
     try:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT key AS college_key, name, url, color, icon FROM colleges ORDER BY name")
             rows = cur.fetchall()
         result = {"items": rows}
-        cache_set(cache_key, result, ttl=3600) # 1시간 캐시
+        cache_set(cache_key, result, ttl=3600)
         return result
     except Exception as e:
         logger.error(f"DB error fetching colleges: {e}")
@@ -538,8 +530,8 @@ def list_colleges():
 def get_notice(notice_id: str):
     cache_key = f"notice_v1_{notice_id}"
     cached_data = cache_get(cache_key)
-    if cached_data: return cached_data
-
+    if cached_data:
+        return cached_data
     try:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("""
@@ -552,10 +544,8 @@ def get_notice(notice_id: str):
     except Exception as e:
         logger.error(f"DB error fetching notice {notice_id}: {e}")
         raise HTTPException(status_code=500, detail="Database error fetching notice")
-
     if not notice:
         raise HTTPException(status_code=404, detail="Notice not found")
-    
     cache_set(cache_key, notice)
     return notice
 
@@ -566,38 +556,42 @@ def apify_webhook_redis(
 ):
     """
     Apify webhook endpoint - Redis Queue version
+    token 검증 → dataset_id 추출 → Redis 큐에 job enqueue
     """
     token = request.headers.get("x-apify-token")
     if not APIFY_WEBHOOK_TOKEN or token != APIFY_WEBHOOK_TOKEN:
         logger.warning(f"[apify] Invalid webhook token attempt")
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Invalid token")
-    
+
     resource = payload.resource
-    
+
     logger.info(
         "[apify] received event=%s run=%s dataset=%s task=%s",
         payload.eventType,
         resource.id if resource else None,
         resource.defaultDatasetId if resource else None,
-        resource.actorTaskId if resource else None # taskId 로깅
+        resource.actorTaskId if resource else None
     )
-    
+
     if payload.eventType != "ACTOR.RUN.SUCCEEDED":
         return {"ok": True, "queued": False, "reason": "ignored eventType"}
-    
+
     dataset_id = resource.defaultDatasetId if resource else None
     if not dataset_id:
         raise HTTPException(status_code=400, detail="defaultDatasetId missing")
-    
-    # [수정] 작업 큐에 actorTaskId도 포함
+
+    # 작업 큐 페이로드
     job = {
         "dataset_id": dataset_id,
         "source": "apify",
         "run_id": resource.id if resource else None,
-        "actor_task_id": resource.actorTaskId if resource else None, # taskId 추가
+        "actor_task_id": resource.actorTaskId if resource else None,
+        "started_at": resource.startedAt if resource else None,
+        "finished_at": resource.finishedAt if resource else None,
         "created_at": datetime.utcnow().isoformat()
     }
-    
+
+    # Redis 연결 보장
     global redis_client
     if not redis_client:
         if not REDIS_URL:
@@ -610,3 +604,57 @@ def apify_webhook_redis(
         except Exception as e:
             logger.error(f"[apify] Redis connection failed: {e}")
             raise HTTPException(status_code=500, detail="enqueue failed")
+
+    # 실제 enqueue
+    try:
+        redis_client.rpush(QUEUE_NAME, json.dumps(job))
+        logger.info("[apify] enqueued dataset=%s run=%s queue=%s", dataset_id, job["run_id"], QUEUE_NAME)
+        return {"ok": True, "dataset_id": dataset_id, "queued": True}
+    except Exception as e:
+        logger.exception("[apify] Redis enqueue failed")
+        raise HTTPException(status_code=500, detail="enqueue failed")
+
+# 13) 실시간 자격검증 엔드포인트
+class UserProfile(BaseModel):
+    grade: int | None = None
+    major: str | None = None
+    gpa: float | None = None
+    lang: str | None = None
+
+@app.post("/notices/{notice_id}/verify-eligibility")
+def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
+    """사용자 프로필을 기반으로 공지 자격요건 검증"""
+    try:
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+              SELECT qualification_ai
+              FROM notices
+              WHERE id=%(id)s
+            """, {"id": notice_id})
+            row = cur.fetchone()
+    except Exception as e:
+        logger.error(f"Database error in verify_eligibility: {e}")
+        raise HTTPException(status_code=500, detail="Database error")
+
+    if not row:
+        raise HTTPException(status_code=404, detail="notice not found")
+
+    qa = row.get("qualification_ai")
+    if not qa:
+        return {"eligible": False, "reason": "해당 공지에 AI 자격요건 데이터가 없습니다."}
+
+    if isinstance(qa, str):
+        try:
+            qa = json.loads(qa)
+        except Exception:
+            qa = {}
+
+    try:
+        result = check_suitability(profile.model_dump(), qa)
+        return {
+            "eligible": bool(result.get("eligible")),
+            "reason": result.get("reason") or ""
+        }
+    except Exception as e:
+        logger.error(f"AI verification failed: {e}")
+        return {"eligible": False, "reason": "자격 검증 중 오류가 발생했습니다."}
