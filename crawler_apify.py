@@ -156,19 +156,19 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 SESSION = requests.Session()
 SESSION.headers.update({"Accept": "application/json"})
 
-# ⭐️ [수정] UPSERT SQL: search_vector 관련 로직 제거 및 오타 수정
+# ⭐️ [수정] UPSERT SQL: detailed_hashtags 컬럼 추가
 UPSERT_SQL = """
 INSERT INTO notices (
-    college_key, title, url, body_html, body_text, raw_text, -- raw_text 추가
+    college_key, title, url, body_html, body_text, raw_text,
     published_at, source_site, content_hash,
-    category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai
-    -- search_vector 컬럼 제거 (트리거가 자동 생성)
+    category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
+    detailed_hashtags -- [수정 1] INSERT 목록에 컬럼 추가
 ) VALUES (
     %(college_key)s, %(title)s, %(url)s,
-    %(body_html)s, %(body_text)s, %(raw_text)s, -- %(raw_text)s 추가
+    %(body_html)s, %(body_text)s, %(raw_text)s,
     %(published_at)s, %(source_site)s, %(content_hash)s,
-    %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s
-    -- search_vector 값 (setweight...) 제거
+    %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s,
+    %(detailed_hashtags)s -- [수정 2] VALUES 목록에 파라미터 추가
 )
 ON CONFLICT (content_hash)
 DO UPDATE SET
@@ -176,16 +176,15 @@ DO UPDATE SET
     url = EXCLUDED.url,
     body_html = EXCLUDED.body_html,
     body_text = EXCLUDED.body_text,
-    raw_text = EXCLUDED.raw_text, -- raw_text 업데이트 추가
+    raw_text = EXCLUDED.raw_text,
     published_at = EXCLUDED.published_at,
     category_ai = EXCLUDED.category_ai,
     start_at_ai = EXCLUDED.start_at_ai,
-    end_at_ai = EXCLUDED.end_at_ai, -- 'EXcluded' -> 'EXCLUDED' 오타 수정
+    end_at_ai = EXCLUDED.end_at_ai,
     qualification_ai = EXCLUDED.qualification_ai,
     hashtags_ai = EXCLUDED.hashtags_ai,
-    detailed_hashtags = EXCLUDED.detailed_hashtags,
+    detailed_hashtags = EXCLUDED.detailed_hashtags, -- [수정 3] 이 참조가 이제 유효함
     updated_at = CURRENT_TIMESTAMP
-    -- search_vector = ... 라인 전체 제거 (트리거가 자동 업데이트)
 RETURNING id;
 """
 
@@ -810,7 +809,7 @@ def run():
                             "end_at_ai": end_at_ai,
                             "qualification_ai": Json(qualification_ai), # Json() 사용 (이제 qualification_ai는 dict)
                             "hashtags_ai": hashtags_ai, # 리스트 또는 빈 리스트
-                            "detailed_hashtags": None,
+                            "detailed_hashtags": None, # [수정] 'None'으로 파라미터 전달
                         })
                         # cur.rowcount > 0 이면 실제로 INSERT 또는 UPDATE 발생
                         # logger.debug(f"Upsert executed for hash {item_hash}. Row count: {cur.rowcount}")
