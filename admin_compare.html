@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>DICE 관리자 - 지원자격 추출 및 적합도 테스트</title>
+    <style>
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; 
+            margin: 2em auto; 
+            background-color: #f4f4f9; 
+            color: #333;
+            max-width: 1600px;
+            padding: 0 1em;
+        }
+        h1 { color: #003876; border-bottom: 2px solid #003876; padding-bottom: 10px; }
+        h2 { margin-top: 30px; }
+        table { width: 100%; border-collapse: collapse; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-top: 20px; }
+        th, td { padding: 12px 15px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+        th { background-color: #003876; color: white; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        a { color: #003876; text-decoration: none; word-break: break-all; }
+        a:hover { text-decoration: underline; }
+        
+        button { 
+            background-color: #007bff; color: white; border: none; 
+            padding: 8px 12px; border-radius: 4px; cursor: pointer; 
+            font-size: 14px; min-width: 80px; margin-bottom: 5px;
+        }
+        button:hover { background-color: #0056b3; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        
+        /* [신규] 기능별 버튼 색상 */
+        button.extract-qual { background-color: #17a2b8; } /* 지원자격: 청록 */
+        button.extract-qual:hover { background-color: #117a8b; }
+        button.compare { background-color: #6f42c1; } /* 비교: 보라 */
+        button.compare:hover { background-color: #5a359a; }
+        
+        /* [신규] 결과 표시용 pre, span 스타일 */
+        pre {
+            background-color: #e9ecef;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            word-break: break-all;
+            white-space: pre-wrap;
+            margin-top: 8px;
+            max-height: 200px; /* 너무 길어지는 것 방지 */
+            overflow-y: auto;
+            color: #333;
+        }
+        .result-span { 
+            display: block; 
+            margin-top: 8px; 
+            font-size: 0.9em; 
+            word-break: break-word;
+        }
+        .result-span.loading { color: #fd7e14; }
+        .result-span.error { color: #dc3545; font-weight: bold; }
+        
+        /* [신규] 비교 결과 스타일 */
+        .result-span.eligible { color: #28a745; } /* ELIGIBLE: 초록 */
+        .result-span.borderline { color: #ffc107; } /* BORDERLINE: 노랑 */
+        .result-span.ineligible { color: #dc3545; } /* INELIGIBLE: 빨강 */
+        
+        #loading { font-weight: bold; color: #d9534f; }
+
+        /* [신규] 5열 테이블 너비 조정 */
+        td:nth-child(1) { width: 10%; } /* 단과대 */
+        td:nth-child(2) { width: 30%; } /* 제목 */
+        td:nth-child(3) { width: 8%; }  /* 대분류 */
+        td:nth-child(4) { width: 26%; } /* 지원자격 (JSON) */
+        td:nth-child(5) { width: 26%; } /* 적합도 비교 */
+    </style>
+</head>
+<body>
+    <h1>DICE 관리자 - 지원자격 추출 및 적합도 테스트</h1>
+    <h2><a href="/admin/dashboard_hashtags">⬅️ 세부 해시태그 관리 페이지로 이동</a></h2>
+    <p id="loading">공지사항 목록 로딩 중...</p>
+
+    <table id="notices-table">
+        <thead>
+            <tr>
+                <th>단과대</th>
+                <th>제목 (링크)</th>
+                <th>대분류</th>
+                <th>지원자격 (추출/저장)</th>
+                <th>적합도 비교 (테스트)</th>
+            </tr>
+        </thead>
+        <tbody id="notices-body">
+            </tbody>
+    </table>
+
+    <script>
+        // --- [신규] 테스트용 샘플 프로필 ---
+        const SAMPLE_USER_PROFILE = {
+            "id": "sample_user_01",
+            "major": "컴퓨터과학과",
+            "grade": 3, // 3학년 -> 5학기
+            "gpa": 3.8,
+            "gpa_scale": 4.5,
+            "income_bracket": 8, // 소득 8분위
+            "language_scores": {
+                "TOEIC": 850,
+                "OPIC": "IM3"
+            },
+            "keywords": ["#AI", "#데이터"],
+            "gender": "male",
+            "military_service": "completed" // 군필
+        };
+        // ---------------------------------
+
+        document.addEventListener('DOMContentLoaded', loadNotices);
+
+        // 1. 공지사항 목록 로드
+        async function loadNotices() {
+            try {
+                const response = await fetch('/admin/api/notices?limit=200'); 
+                if (!response.ok) throw new Error('Failed to fetch notices');
+                
+                const data = await response.json();
+                const tbody = document.getElementById('notices-body');
+                tbody.innerHTML = ''; 
+
+                if (data.items.length === 0) {
+                     document.getElementById('loading').textContent = '관련 공지가 없습니다. (#일반 제외)';
+                     return;
+                }
+
+                // [수정] 전역 저장소에 공지 데이터 원본(JSON) 저장 (비교 로직용)
+                window.noticeDataStore = {};
+                data.items.forEach(notice => {
+                    // [중요] notice.ai_extracted_json은 이제 객체이거나 null입니다.
+                    window.noticeDataStore[notice.id] = notice;
+                });
+
+                data.items.forEach(notice => {
+                    const tr = document.createElement('tr');
+                    
+                    // (지원자격 JSON)
+                    // [수정] ai_extracted_json은 이제 객체이거나 null입니다.
+                    const savedQual = notice.ai_extracted_json; 
+                    const hasSavedQual = savedQual && !savedQual.error;
+                    
+                    const qualButtonText = hasSavedQual ? '재추출' : '추출 실행';
+                    const qualButtonColor = hasSavedQual ? '#ffc107' : '#17a2b8';
+                    
+                    let savedQualHtml = '';
+                    if (hasSavedQual) {
+                        savedQualHtml = `<pre>${escapeHTML(JSON.stringify(savedQual, null, 2))}</pre>`;
+                    } else if (savedQual && savedQual.error) {
+                         savedQualHtml = `<pre style="color: red;">(저장된 오류: ${escapeHTML(JSON.stringify(savedQual, null, 2))})</pre>`;
+                    } else {
+                        savedQualHtml = `<pre>(추출된 내용 없음)</pre>`;
+                    }
+
+                    tr.innerHTML = `
+                        <td>${escapeHTML(notice.college_name)}</td>
+                        <td><a href="${escapeHTML(notice.url)}" target="_blank" title="${escapeHTML(notice.url)}">${escapeHTML(notice.title)}</a></td>
+                        <td>${escapeHTML(notice.category_ai)}</td>
+                        
+                        <td id="cell-qual-${notice.id}">
+                            <button class="extract-qual" style="background-color: ${qualButtonColor};" onclick="extractQualifications('${notice.id}', '${notice.category_ai}', this)">
+                                ${qualButtonText}
+                            </button>
+                            ${savedQualHtml}
+                        </td>
+                        
+                        <td id="cell-compare-${notice.id}">
+                            <button class="compare" onclick="compareSuitability('${notice.id}', this)">
+                                비교 (샘플 프로필)
+                            </button>
+                            <span class="result-span"></span>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                document.getElementById('loading').textContent = `공지 ${data.items.length}개 로드 완료. (#일반 제외)`;
+
+            } catch (error) {
+                console.error('Error loading notices:', error);
+                document.getElementById('loading').textContent = '공지 로드 실패.';
+            }
+        }
+
+        // 2. [신규] 지원자격(JSON) 추출
+        async function extractQualifications(noticeId, mainCategory, buttonEl) {
+            const cell = buttonEl.closest('td');
+            const preEl = cell.querySelector('pre');
+            
+            buttonEl.disabled = true;
+            buttonEl.textContent = '추출 중...';
+            preEl.textContent = '(AI 추출 중...)';
+            preEl.style.color = '#333';
+
+            try {
+                const response = await fetch('/admin/api/extract-qualifications', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        notice_id: noticeId,
+                        main_category: mainCategory
+                    })
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || '추출 실패');
+                }
+
+                // [수정] 응답 (data.ai_extracted_json)은 파싱된 dict입니다.
+                const data = await response.json(); 
+                
+                if (data.ai_extracted_json && !data.ai_extracted_json.error) {
+                    preEl.textContent = escapeHTML(JSON.stringify(data.ai_extracted_json, null, 2));
+                    // [중요] 원본 데이터 저장소(캐시)에 최신 dict를 업데이트합니다.
+                    if(window.noticeDataStore[noticeId]) {
+                        window.noticeDataStore[noticeId].ai_extracted_json = data.ai_extracted_json;
+                    }
+                } else {
+                    preEl.textContent = `[추출 결과 없음 또는 오류]:\n${escapeHTML(JSON.stringify(data.ai_extracted_json, null, 2))}`;
+                    preEl.style.color = 'red';
+                    // 오류가 발생해도 캐시를 업데이트합니다 (오류 상태를 저장)
+                    if(window.noticeDataStore[noticeId]) {
+                        window.noticeDataStore[noticeId].ai_extracted_json = data.ai_extracted_json || {"error": "Unknown extraction error"};
+                    }
+                }
+                
+                buttonEl.textContent = '재추출';
+                buttonEl.style.backgroundColor = '#28a745'; // 성공 시 초록색
+                buttonEl.disabled = false;
+
+            } catch (error) {
+                console.error('Error extracting qualifications:', error);
+                preEl.textContent = `[API 오류: ${error.message}]`;
+                preEl.style.color = 'red';
+                buttonEl.textContent = '추출 실패';
+                buttonEl.style.backgroundColor = '#dc3545'; // 실패 시 빨간색
+                buttonEl.disabled = false;
+            }
+        }
+
+        // 3. [신규] 적합도 비교 - [수정됨: notice_json 객체 전체 전송]
+        async function compareSuitability(noticeId, buttonEl) {
+            const cell = buttonEl.closest('td');
+            const resultSpan = cell.querySelector('.result-span');
+            
+            // [수정] DB 재조회 대신, 캐시된 최신 공지 데이터를 가져옴
+            const noticeData = window.noticeDataStore[noticeId];
+            
+            // [중요] 이 pre-check 로직은 이제 JS 캐시(ai_extracted_json 객체)를 정확히 반영
+            if (!noticeData || !noticeData.ai_extracted_json || (noticeData.ai_extracted_json && noticeData.ai_extracted_json.error)) {
+                resultSpan.textContent = '[오류: 먼저 지원자격을 성공적으로 추출해야 합니다.]';
+                resultSpan.className = 'result-span error';
+                return;
+            }
+
+            buttonEl.disabled = true;
+            buttonEl.textContent = '비교 중...';
+            resultSpan.textContent = '(comparison_logic.py 실행 중...)';
+            resultSpan.className = 'result-span loading';
+
+            try {
+                // --- [수정] API 경로에 /admin 추가 ---
+                const response = await fetch('/admin/api/compare-notice', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    
+                    // [수정] notice_id 대신, 캐시된 notice 객체 전체를 전송
+                    body: JSON.stringify({
+                        notice_json: noticeData, // noticeData 객체 (ai_extracted_json이 dict로 포함됨)
+                        user_profile: SAMPLE_USER_PROFILE
+                    })
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || '비교 실패');
+                }
+
+                const data = await response.json();
+                
+                // --- [수정] 결과 포맷팅 (3가지 목록 분리) ---
+                const eligibility = data.eligibility || 'ERROR';
+                const percentage = data.match_percentage || 0;
+
+                // [신규] 3가지 조건 목록을 가져옴
+                const results = data.criteria_results || {};
+                const passItems = results.pass || [];
+                const failItems = results.fail || [];
+                const verifyItems = results.verify || [];
+
+                // [신규] 각 목록을 <li> 태그로 변환하는 헬퍼
+                const toLi = (item) => `<li style="font-size: 0.9em; margin-top: 3px;">${escapeHTML(item)}</li>`;
+                const listStyle = `style="margin: 5px 0 10px 0; padding-left: 20px;"`;
+
+                let html = `<strong>[${eligibility}] ${percentage.toFixed(1)}%</strong>`;
+                
+                if (passItems.length > 0) {
+                    html += `
+                        <strong style="color: #28a745; display: block; margin-top: 8px;">✅ 만족 조건:</strong>
+                        <ul ${listStyle}>${passItems.map(toLi).join('')}</ul>
+                    `;
+                }
+                
+                if (failItems.length > 0) {
+                     html += `
+                        <strong style="color: #dc3545; display: block; margin-top: 8px;">❌ 미충족 조건:</strong>
+                        <ul ${listStyle}>${failItems.map(toLi).join('')}</ul>
+                    `;
+                }
+                
+                if (verifyItems.length > 0) {
+                     html += `
+                        <strong style="color: #fd7e14; display: block; margin-top: 8px;">⚠️ 확인 필요:</strong>
+                        <ul ${listStyle}>${verifyItems.map(toLi).join('')}</ul>
+                    `;
+                }
+                // --- [수정 완료] ---
+
+                resultSpan.innerHTML = html;
+                resultSpan.className = `result-span ${eligibility.toLowerCase()}`; // eligible, borderline, ineligible
+                
+                buttonEl.textContent = '비교 (샘플 프로필)';
+                buttonEl.disabled = false;
+
+            } catch (error) {
+                console.error('Error comparing suitability:', error);
+                resultSpan.textContent = `[API 오류: ${error.message}]`;
+                resultSpan.className = 'result-span error';
+                buttonEl.textContent = '비교 실패';
+                buttonEl.style.backgroundColor = '#dc3545';
+                buttonEl.disabled = false;
+            }
+        }
+
+        // (Helper) HTML 태그 이스케이프
+        function escapeHTML(str) {
+            if (str === null || str === undefined) return '';
+            if (typeof str === 'object') str = JSON.stringify(str, null, 2);
+            
+            return str.replace(/[&<>"']/g, function(m) {
+                return {
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                }[m];
+            });
+        }
+    </script>
+</body>
+</html>
