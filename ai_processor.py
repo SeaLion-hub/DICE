@@ -96,64 +96,101 @@ SYSTEM_PROMPT_CLASSIFY = """
 4. 2개 이상 해당되면, 가장 중요하다고 생각되는 1개만 선택하여 JSON 배열에 넣습니다.
 """
 
-# --- [유지] 2단계: 추출 프롬프트 (프로필용 - 기존 유지) ---
-PROMPT_SCHOLARSHIP = """
+# --- [수정] 2단계: 추출 프롬프트 매핑 (comparison_logic.py와 키 일치) ---
+
+# [신규] 모든 프롬프트에 공통으로 적용될 규칙
+QUALIFICATIONS_RULES = """
+[추출 규칙]
+- [comparison_logic.py]와 연동되므로, "qualifications" 내부의 키(key) 이름을 절대 변경하지 마라.
+- 해당하는 내용이 없으면 "N/A" 또는 null을 값으로 입력한다.
+- "gpa_min": 최소 학점 (예: "3.0", "N/A")
+- "grade_level": 대상 학년/학기 (예: "학부 재학생", "2~7학기 이수자", "N/A")
+- "income_status": 소득 요건 (예: "8분위 이하", "가계 곤란 학생", "N/A")
+- "department": 대상 학과/단과대학 (예: "생명시스템대학", "공과대학", "학과 무관")
+- "language_requirements_text": 모든 어학 요건을 하나의 문자열로 통합 (예: "OPIc IM 또는 토익스피킹 130점 이상", "N/A")
+- "military_service": 병역 요건 (예: "군필 또는 면제", "N/A")
+- "gender": 대상 성별 (예: "여학생", "N/A")
+- "other": 위 7개 항목으로 분류되지 않는 **기타 자격** (예: "2028년 1~2월 중 입사 가능자", "N/A")
+"""
+
+PROMPT_SCHOLARSHIP = f"""
 당신은 '장학금' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+{QUALIFICATIONS_RULES}
+
 [공지 텍스트]
-{notice_text}
+{{notice_text}}
 [/공지 텍스트]
+
 JSON 출력 (다른 설명 없이 JSON만):
 ```json
 {{
   "target_audience_raw": "[지원 자격 원본 텍스트 요약]",
   "qualifications": {{
-    "gpa_min": "[추출된 최소 학점 (예: '3.0')]",
-    "grade_level": "[대상 학년 (예: '1학년', '학부 재학생')]",
-    "income_status": "[소득 요건 (예: '가계 곤란 학생', '8분위 이하')]",
-    "department": "[대상 학과 (예: '상경대학')]",
-    "other": "[기타 자격 (예: '2026-1학기 파견 예정자')]"
+    "gpa_min": "[추출된 최소 학점]",
+    "grade_level": "[대상 학년]",
+    "income_status": "[소득 요건]",
+    "department": "[대상 학과/단과대학]",
+    "language_requirements_text": "[어학 요건]",
+    "military_service": "[병역 요건]",
+    "gender": "[성별 요건]",
+    "other": "[기타 자격]"
   }},
   "key_date_type": "[날짜 유형]",
   "key_date": "[핵심 날짜 (예: '10/19(일)')]"
 }}
 ```"""
 
-PROMPT_RECRUITMENT = """
+PROMPT_RECRUITMENT = f"""
 당신은 '채용 및 취업' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+{QUALIFICATIONS_RULES}
+
 [공지 텍스트]
-{notice_text}
+{{notice_text}}
 [/공지 텍스트]
+
 JSON 출력 (다른 설명 없이 JSON만):
 ```json
 {{
-  "target_audience_raw": "[지원 자격 원본 텍스트 요약 (예: 이공계 여성 학부생)]",
+  "target_audience_raw": "[지원 자격 원본 텍스트 요약]",
   "qualifications": {{
-    "degree": "[필요 학력 (예: '교육학 박사', '학부 재학생')]",
-    "military_service": "[병역 요건 (예: '군필 또는 면제')]",
-    "gender": "[대상 성별 (예: '여학생')]",
-    "language_requirements_text": "[하나로 묶인 어학 요건 텍스트 (예: 'TOEIC 800점 이상')]"
+    "gpa_min": "[추출된 최소 학점]",
+    "grade_level": "[대상 학년/학위 (예: '교육학 박사')]",
+    "income_status": "[소득 요건]",
+    "department": "[대상 학과/단과대학]",
+    "language_requirements_text": "[어학 요건]",
+    "military_service": "[병역 요건]",
+    "gender": "[대상 성별]",
+    "other": "[기타 자격]"
   }},
   "key_date_type": "[날짜 유형]",
   "key_date": "[핵심 날짜 (예: '10/10(금) 17시')]"
 }}
 ```"""
 
-PROMPT_INTERNATIONAL = """
+PROMPT_INTERNATIONAL = f"""
 당신은 '국제교류 프로그램' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+{QUALIFICATIONS_RULES}
+
 [공지 텍스트]
-{notice_text}
+{{notice_text}}
 [/공지 텍스트]
+
 JSON 출력 (다른 설명 없이 JSON만):
 ```json
 {{
-  "target_audience_raw": "[지원 자격 원본 텍스트 요약 (예: CAMPUS Asia 사업 참여 학과)]",
+  "target_audience_raw": "[지원 자격 원본 텍스트 요약]",
   "qualifications": {{
-    "gpa_min": "[추출된 최소 학점 (예: '3.0')]",
-    "grade_level": "[대상 학년 (예: '학부 2~7학기 이수자')]",
-    "language_requirements_text": "[하나로 묶인 어학 요건 텍스트 (예: 'TOEIC 850점 또는 TOEFL iBT 90점 이상')]"
+    "gpa_min": "[추출된 최소 학점]",
+    "grade_level": "[대상 학년]",
+    "income_status": "[소득 요건]",
+    "department": "[대상 학과/단과대학]",
+    "language_requirements_text": "[어학 요건]",
+    "military_service": "[병역 요건]",
+    "gender": "[성별 요건]",
+    "other": "[기타 자격]"
   }},
   "key_date_type": "모집 마감일",
   "key_date": "[모집 마감 일시 (예: '~10/10(금) 17시')]"
@@ -175,7 +212,7 @@ JSON 출력 (다른 설명 없이 JSON만):
 }}
 ```"""
 
-# --- [유지] 추출 프롬프트 매핑 (프로필용) ---
+# --- [수정] 추출 프롬프트 매핑 (프로필용) ---
 EXTRACTION_PROMPT_MAP = {
     "#장학": PROMPT_SCHOLARSHIP,
     "#취업": PROMPT_RECRUITMENT,
@@ -579,7 +616,7 @@ if __name__ == "__main__":
     test_body_scholar = "소득분위 8분위 이하. need based fellowship."
     tags_scholar = extract_detailed_hashtags(test_title_scholar, test_body_scholar, "#장학")
     print(f"\n#장학 변환 테스트 (제목: {test_title_scholar[:30]}...)")
-    print(f"-> 결과: {tags_scholar}") # 기대: [#가계곤란] (#블루버터플라이는 동적 예외라 제거됨)
+    print(f"-> 결과: {tags_scholar}") # 기대: [#가계곤란]
     
     # [규칙 테스트 4: #기타 반환] (#학사 목록에 없는 키워드)
     test_title_other = "OMR 채점 서비스 종료 안내"
@@ -593,4 +630,5 @@ if __name__ == "__main__":
     test_body_job = "연세대학교 간호대학에서 2025-2학기 일반조교를 채용합니다. 삼성병원 출신 우대."
     tags_job = extract_detailed_hashtags(test_title_job, test_body_job, "#취업")
     print(f"\n#취업 테스트 (제목: {test_title_job[:30]}...)")
-    print(f"-> 결과: {tags_job}") # 기대: [#조교, #채용] (#삼성전자, #개발은 동적 예외라 제거됨)
+    print(f"-> 결과: {tags_job}") # 기대: [#조교, #채용]
+

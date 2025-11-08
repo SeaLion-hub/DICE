@@ -109,6 +109,15 @@
             "military_service": "completed" // 군필
         };
         // ---------------------------------
+        
+        // --- [신규] 한글 번역 헬퍼 ---
+        const KOREAN_LABELS = {
+            'ELIGIBLE': '✅ 적합',
+            'BORDERLINE': '⚠️ 경계',
+            'INELIGIBLE': '❌ 부적합',
+            'ERROR': '오류'
+        };
+        // ---------------------------------
 
         document.addEventListener('DOMContentLoaded', loadNotices);
 
@@ -261,7 +270,7 @@
             resultSpan.className = 'result-span loading';
 
             try {
-                // --- [수정] API 경로에 /admin 추가 ---
+                // --- API 경로에 /admin 추가 (수정됨) ---
                 const response = await fetch('/admin/api/compare-notice', { 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -280,9 +289,10 @@
 
                 const data = await response.json();
                 
-                // --- [수정] 결과 포맷팅 (3가지 목록 분리) ---
+                // --- [수정] 결과 포맷팅 (한글화 및 퍼센트 제거) ---
                 const eligibility = data.eligibility || 'ERROR';
-                const percentage = data.match_percentage || 0;
+                // [수정] 한글 라벨 사용
+                const eligibility_korean = KOREAN_LABELS[eligibility] || eligibility; 
 
                 // [신규] 3가지 조건 목록을 가져옴
                 const results = data.criteria_results || {};
@@ -290,11 +300,12 @@
                 const failItems = results.fail || [];
                 const verifyItems = results.verify || [];
 
-                // [신규] 각 목록을 <li> 태그로 변환하는 헬퍼
+                // [수정] 이제 백엔드에서 한글 메시지를 주므로 escapeHTML만 사용
                 const toLi = (item) => `<li style="font-size: 0.9em; margin-top: 3px;">${escapeHTML(item)}</li>`;
                 const listStyle = `style="margin: 5px 0 10px 0; padding-left: 20px;"`;
 
-                let html = `<strong>[${eligibility}] ${percentage.toFixed(1)}%</strong>`;
+                // [수정] 한글 라벨(eligibility_korean) 사용 (퍼센트 없음)
+                let html = `<strong>[${eligibility_korean}]</strong>`; 
                 
                 if (passItems.length > 0) {
                     html += `

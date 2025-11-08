@@ -4,11 +4,12 @@
 # - 어학 AND/OR 복합 로직 감지 (VERIFY 처리)
 # - 어학 점수 표준화/정규화(숫자형·등급형 혼합)
 # - GPA 스케일 환산(4.3/4.5 스케일 혼재 대응)
-# - 전공 매칭 로직 수정 (유사도 검사 제거, 기본 FAIL)
+# - [수정] 전공 매칭 로직 수정 (유사도 검사 제거, 기본 FAIL)
 # - [수정] 애매한 요건(예: "성실한", "9학점") VERIFY 처리 (기본 PASS 제거)
 # - [수정] 점수 계산 로직 (pass_count, total_checks) 완전 제거
 # - [수정] 라벨 결정을 (FAIL / VERIFY 존재 여부)로만 판단 (key_date 포함)
 # - [수정] 모든 반환 메시지를 한글(KOREAN)로 변경
+# - [수정] 'N/A', '해당 없음' 값 PASS 처리
 # - 설명 가능성(reason_codes/reasons_human/missing_info) 강화
 # - 로깅/에러 내성
 
@@ -31,9 +32,6 @@ CRITERIA_WEIGHTS = {
     "preferred": 0.30,
     "optional": 0.20,
 }
-
-# [제거] 점수 계산이 없으므로 CUTOFFS 불필요
-# CUTOFFS = { ... }
 
 # GPA 스케일 기본값
 DEFAULT_GPA_SCALE = 4.5
@@ -88,19 +86,110 @@ LANG_LEVEL_MAX = {
 }
 
 # =========================
-# 2) 전공 매핑/유사도
+# 2) [수정] 전공 매핑 (연세대 기준 확장)
 # =========================
 
 DEPARTMENT_MAP = {
-    '경영학과': ['경영대학', '상경대학', '상경‧경영대학', '경영/경제 계열'],
-    '경제학부': ['경제대학', '상경대학', '상경‧경영대학', '경영/경제 계열'],
-    '응용통계학과': ['상경대학', '상경‧경영대학', '통계데이터사이언스학과', '통계학과'],
-    '컴퓨터과학과': ['공과대학', '첨단컴퓨팅학부', 'AI·ICT 관련 학과', 'IT 계열', '이공 계열', '인공지능융합대학'],
-    '인공지능학과': ['인공지능융합대학', '첨단컴퓨팅학부', 'AI·ICT 관련 학과', 'IT 계열', '이공 계열'],
-    # ... 필요 시 확장
+    # 문과대학
+    '국어국문학과': ['문과대학', '인문계열'],
+    '중어중문학과': ['문과대학', '인문계열'],
+    '영어영문학과': ['문과대학', '인문계열'],
+    '독어독문학과': ['문과대학', '인문계열'],
+    '불어불문학과': ['문과대학', '인문계열'],
+    '노어노문학과': ['문과대학', '인문계열'],
+    '사학과': ['문과대학', '인문계열', '사회계열'],
+    '철학과': ['문과대학', '인문계열'],
+    '문헌정보학과': ['문과대학', '인문계열', '사회계열'],
+    '심리학과': ['문과대학', '인문계열', '사회계열'],
+
+    # 상경대학/경영대학
+    '경제학부': ['상경대학', '상경‧경영대학', '사회계열'],
+    '응용통계학과': ['상경대학', '상경‧경영대학', '사회계열', '데이터사이언스'],
+    '경영학과': ['경영대학', '상경‧경영대학', '사회계열'],
+
+    # 이과대학
+    '수학과': ['이과대학', '이공계열', '자연계열'],
+    '물리학과': ['이과대학', '이공계열', '자연계열'],
+    '화학과': ['이과대학', '이공계열', '자연계열'],
+    '지구시스템과학과': ['이과대학', '이공계열', '자연계열'],
+    '천문우주학과': ['이과대학', '이공계열', '자연계열'],
+    '대기과학과': ['이과대학', '이공계열', '자연계열'],
+
+    # 공과대학
+    '화공생명공학부': ['공과대학', '이공계열'],
+    '전기전자공학부': ['공과대학', '이공계열', 'IT계열'],
+    '건축공학과': ['공과대학', '이공계열'],
+    '도시공학과': ['공과대학', '이공계열', '사회계열'],
+    '사회환경시스템공학부': ['공과대학', '이공계열'],
+    '기계공학부': ['공과대학', '이공계열'],
+    '신소재공학부': ['공과대학', '이공계열'],
+    '산업공학과': ['공과대학', '이공계열', 'IT계열'],
+    '컴퓨터과학과': ['공과대학', '인공지능융합대학', '이공계열', 'IT계열'],
+    '시스템반도체공학과': ['공과대학', '이공계열', 'IT계열'],
+
+    # 생명시스템대학 (사용자 예시)
+    '시스템생물학과': ['생명시스템대학', '이공계열', '자연계열'],
+    '생화학과': ['생명시스템대학', '이공계열', '자연계열'],
+    '생명공학과': ['생명시스템대학', '이공계열'],
+
+    # 인공지능융합대학
+    '인공지능학과': ['인공지능융합대학', '이공계열', 'IT계열'],
+    '데이터사이언스학과': ['응용통계학과', '인공지능융합대학', '이공계열', 'IT계열'], # 응통과 연관
+
+    # 신과대학
+    '신학과': ['신과대학', '인문계열'],
+
+    # 사회과학대학
+    '정치외교학과': ['사회과학대학', '사회계열'],
+    '행정학과': ['사회과학대학', '사회계열'],
+    '사회복지학과': ['사회과학대학', '사회계열'],
+    '사회학과': ['사회과학대학', '사회계열'],
+    '문화인류학과': ['사회과학대학', '사회계열'],
+    '언론홍보영상학부': ['사회과학대학', '사회계열'],
+
+    # 음악대학
+    '교회음악과': ['음악대학', '예체능계열'],
+    '성악과': ['음악대학', '예체능계열'],
+    '기악과': ['음악대학', '예체능계열'],
+    '작곡과': ['음악대학', '예체능계열'],
+
+    # 생활과학대학
+    '의류환경학과': ['생활과학대학', '자연계열', '사회계열'],
+    '식품영양학과': ['생활과학대학', '자연계열'],
+    '실내건축학과': ['생활과학대학', '예체능계열', '이공계열'],
+    '아동가족학과': ['생활과학대학', '사회계열'],
+    '통합디자인학과': ['생활과학대학', '예체능계열'],
+
+    # 교육과학대학
+    '교육학부': ['교육과학대학', '사회계열'],
+    '체육교육학과': ['교육과학대학', '예체능계열'],
+    '스포츠응용산업학과': ['교육과학대학', '예체능계열', '사회계열'],
+
+    # 의과대학
+    '의예과': ['의과대학', '의학계열'],
+    '의학과': ['의과대학', '의학계열'],
+
+    # 치과대학
+    '치의예과': ['치과대학', '의학계열'],
+    '치의학과': ['치과대학', '의학계열'],
+
+    # 간호대학
+    '간호학과': ['간호대학', '의학계열'],
+
+    # 약학대학
+    '약학과': ['약학대학', '의학계열'],
+
+    # 언더우드국제대학 (UIC)
+    '언더우드학부': ['언더우드국제대학', '인문계열', '사회계열'],
+    '융합인문사회계열': ['언더우드국제대학', '인문계열', '사회계열'],
+    '융합과학공학계열': ['언더우드국제대학', '이공계열', 'IT계열'],
+
+    # 글로벌인재대학
+    '글로벌인재학부': ['글로벌인재대학', '인문계열', '사회계열'],
 }
 
-# 비교 로직 수정을 위해 DEPARTMENT_MAP의 모든 값을 Set으로 미리 만듦
+
+# [신규] 비교 로직 2번 수정을 위해 DEPARTMENT_MAP의 모든 값을 Set으로 미리 만듦
 KNOWN_DEPT_KEYWORDS = set(k.lower() for k in DEPARTMENT_MAP.keys())
 KNOWN_COLLEGE_KEYWORDS = set(c.lower() for v in DEPARTMENT_MAP.values() for c in v)
 ALL_DEPT_KEYWORDS = KNOWN_DEPT_KEYWORDS.union(KNOWN_COLLEGE_KEYWORDS)
@@ -167,7 +256,7 @@ RE_GRADE_KEYWORDS = re.compile(r'(학년|학기|학부|대학원|재학생|휴�
 RE_INCOME_KEYWORDS = re.compile(r'(분위|수급자|가계곤란|경제사정)')
 # [신규] 복합 요건 감지용 (target_audience)
 RE_GPA_KEYWORDS = re.compile(r'(학점|gpa)', re.IGNORECASE)
-RE_DEPT_KEYWORDS = re.compile(r'(학과|전공|계열)')
+RE_DEPT_KEYWORDS = re.compile(r'(학과|전공|계열|대학)') # [FIX] "대학" 추가
 
 
 # 언어 요구 추출
@@ -205,9 +294,6 @@ def _parse_iso(dt_str: Optional[str]) -> Optional[datetime]:
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, x))
-
-# [제거] _temporal_weight 및 관련 함수 (불필요)
-# [제거] _jaccard_bonus 함수 (불필요)
 
 # =========================
 # 6) 프로필 정규화
@@ -294,8 +380,14 @@ def _infer_tag_and_conf(text_or_obj: Union[str, Dict[str, Any]], default_tag='re
 # =========================
 
 def _check_gpa(user_gpa: Optional[float], user_scale: float, req: Requirement) -> CheckResult:
+    # [신규] "N/A" 또는 "해당 없음"은 요건이 없는 것이므로 PASS 처리
+    txt_raw = req.text.lower().strip()
+    if txt_raw in ("n/a", "해당없음", "무관"):
+        return CheckResult('PASS', 'GPA_PASS_NONE', "학점 요건 무관 (충족)", req.tag=='required', req.confidence)
+
     if user_gpa is None:
         return CheckResult('VERIFY', 'GPA_MISSING', REASON_TEMPLATES['GPA_MISSING'], req.tag=='required', req.confidence)
+    
     req_scale = 4.5
     if '4.3' in req.text:
         req_scale = 4.3
@@ -316,6 +408,11 @@ def _check_gpa(user_gpa: Optional[float], user_scale: float, req: Requirement) -
     return CheckResult('PASS', 'GPA_PASS', "학점 요건 충족", req.tag=='required', req.confidence)
 
 def _check_grade_level(user_level: str, user_semester: int, req: Requirement) -> CheckResult:
+    # [신규] "N/A" 또는 "해당 없음"은 요건이 없는 것이므로 PASS 처리
+    t_raw = req.text.lower().strip()
+    if t_raw in ("n/a", "해당없음", "무관"):
+        return CheckResult('PASS', 'GRADE_PASS_NONE', "학년/학기 요건 무관 (충족)", req.tag=='required', req.confidence)
+
     if user_semester == 0:
         return CheckResult('VERIFY', 'GRADE_MISSING', REASON_TEMPLATES['GRADE_MISSING'], req.tag=='required', req.confidence)
     
@@ -374,6 +471,11 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
 
 
 def _check_department(user_major: str, req: Requirement) -> CheckResult:
+    # [신규] "N/A" 또는 "해당 없음"은 요건이 없는 것이므로 PASS 처리
+    txt_raw = req.text.lower().strip()
+    if txt_raw in ("n/a", "해당없음", "무관"):
+        return CheckResult('PASS', 'DEPT_PASS_NONE', "전공 요건 무관 (충족)", req.tag=='required', req.confidence)
+
     if not user_major:
         return CheckResult('VERIFY', 'MAJOR_MISSING', REASON_TEMPLATES['MAJOR_MISSING'], req.tag=='required', req.confidence)
     
@@ -382,11 +484,6 @@ def _check_department(user_major: str, req: Requirement) -> CheckResult:
     if RE_ANY_DEPT_ANYONE.search(txt):
         return CheckResult('PASS', 'DEPT_PASS_ANY', "전공 무관 (충족)", req.tag=='required', req.confidence)
     
-    # [FIX] 애매한 요건(예: "성실한") VERIFY 처리
-    known_dept_mentioned = any(k in txt for k in ALL_DEPT_KEYWORDS)
-    if not known_dept_mentioned:
-        return CheckResult('VERIFY', 'DEPT_VERIFY_AMBIGUOUS', f"전공 요건 확인 필요: {req.text}", req.tag=='required', req.confidence)
-
     # [FIX] 사용자의 전공명 + 매핑된 그룹
     groups = DEPARTMENT_MAP.get(user_major, []) + [user_major]
     
@@ -394,15 +491,25 @@ def _check_department(user_major: str, req: Requirement) -> CheckResult:
         if g.lower() in txt: 
             return CheckResult('PASS', 'DEPT_PASS', f"전공 일치 (충족: {g})", req.tag=='required', req.confidence)
     
+    # [FIX] 애매한 요건(예: "성실한") VERIFY 처리
+    # (학과, 대학, 전공, 계열) 키워드도 없고, 아는 키워드(공과대학 등)도 없으면
+    if not RE_DEPT_KEYWORDS.search(txt) and not any(k in txt for k in ALL_DEPT_KEYWORDS):
+        return CheckResult('VERIFY', 'DEPT_VERIFY_AMBIGUOUS', f"전공 요건 확인 필요: {req.text}", req.tag=='required', req.confidence)
+
     # [FIX] 일치하는 것이 없으면 무조건 FAIL
     return CheckResult('FAIL', 'DEPT_FAIL_MISMATCH', f"전공 미충족 (요구: {req.text} | 보유: {user_major})", req.tag=='required', req.confidence)
 
 
 def _check_income(user_income: Optional[int], req: Requirement) -> CheckResult:
+    # [수정] "N/A" 또는 "해당 없음"은 요건이 없는 것이므로 PASS 처리
+    txt_raw = req.text.replace(" ", "").lower()
+    if txt_raw in ("n/a", "해당없음", "무관"):
+        return CheckResult('PASS', 'INCOME_PASS_NONE', "소득 요건 무관 (충족)", req.tag=='required', req.confidence)
+
     if user_income is None:
         return CheckResult('VERIFY', 'INCOME_MISSING', REASON_TEMPLATES['INCOME_MISSING'], req.tag=='required', req.confidence)
 
-    txt = req.text.replace(" ", "")
+    txt = req.text.replace(" ", "") # 원본 txt 사용
 
     # [FIX] 애매한 요건(예: "경제사정") VERIFY 처리
     if not RE_INCOME_KEYWORDS.search(txt):
@@ -426,12 +533,15 @@ def _check_income(user_income: Optional[int], req: Requirement) -> CheckResult:
     return CheckResult('VERIFY', 'INCOME_VERIFY_AMBIGUOUS', f"소득 요건 확인 필요: {req.text}", req.tag=='required', req.confidence)
 
 def _check_simple_text(user_value: Optional[str], req: Requirement, field_name: str) -> CheckResult:
+    t = req.text.lower().strip() # requirement text
+    
+    # [수정] "N/A" 및 "무관" 키워드를 맨 앞에서 처리
+    if t in ("n/a", "해당없음", "무관", "없음", "제한없음"):
+        return CheckResult('PASS', f'{field_name.upper()}_PASS_NONE', f"{field_name} 요건 무관 (충족)", req.tag=='required', req.confidence)
+
     if not user_value:
         code = f'{field_name.upper()}_MISSING'
         return CheckResult('VERIFY', code, REASON_TEMPLATES.get(code, f"{field_name} 정보 없음"), req.tag=='required', req.confidence)
-    t = req.text.lower()
-    if re.search(r'무관|없음|제한없음', t):
-        return CheckResult('PASS', f'{field_name.upper()}_PASS_ANY', f"{field_name} 무관 (충족)", req.tag=='required', req.confidence)
     
     u = user_value.lower()
     if field_name == 'military_service' and (('군필' in t) or ('면제' in t)) and u == 'pending':
@@ -469,6 +579,12 @@ def _norm_required_value(test_key: str, val: str) -> Optional[float]:
 
 def _check_language(norm_user_scores: Dict[str, float], req: Requirement) -> CheckResult:
     txt = req.text
+    
+    # [신규] "N/A" 또는 "해당 없음"은 요건이 없는 것이므로 PASS 처리
+    txt_raw = req.text.lower().strip()
+    if txt_raw in ("n/a", "해당없음", "무관"):
+        return CheckResult('PASS', 'LANG_PASS_NONE', "어학 요건 무관 (충족)", req.tag=='required', req.confidence)
+
     requirements = RE_LANG_REQ.findall(txt)
     if not requirements:
         if "우대" in txt:
@@ -548,6 +664,7 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
             'language_requirements_text': lambda r: _check_language(norm.get('norm_lang_scores', {}), r),
             'military_service': lambda r: _check_simple_text(norm.get('military_service'), r, 'military_service'),
             'gender': lambda r: _check_simple_text(norm.get('gender'), r, 'gender'),
+            # 'other'는 check_map에 의도적으로 포함시키지 않음. (항상 VERIFY)
         }
         CHECKABLE_KEYS = set(check_map.keys())
 
@@ -557,13 +674,19 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
         quals_dict = notice_json.get("qualifications")
         if isinstance(quals_dict, dict):
             potential_reqs.update(quals_dict)
+            
+        # [수정] qualifications 밖의 키도 포함 (하위 호환성)
         for key in CHECKABLE_KEYS:
-            if key in notice_json and notice_json[key]:
+            if key not in potential_reqs and key in notice_json and notice_json[key]:
                 potential_reqs[key] = notice_json[key]
+        
+        # 'other'는 qualifications에만 있을 수 있음
+        if 'other' not in potential_reqs and quals_dict and quals_dict.get('other'):
+             potential_reqs['other'] = quals_dict.get('other')
 
 
         # 3) "정보성 공지" 판단
-        if not potential_reqs or not any(v not in [None, "N/A", ""] for v in potential_reqs.values()):
+        if not potential_reqs or not any(v not in [None, "N/A", "", "해당 없음"] for v in potential_reqs.values()):
             return {
                 "eligibility": "ELIGIBLE",
                 "suitable": True,
@@ -580,22 +703,24 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
         # 4) Requirement 객체 생성
         reqs: Dict[str, Requirement] = {}
         for k, v in potential_reqs.items():
+            if v is None: continue
             tag, conf, txt = _infer_tag_and_conf(v)
-            if k in ('gender', 'military_service') and not txt:
-                continue
+            if not txt: continue # 빈 문자열은 무시
+            
+            # [수정] AI가 추출한 "N/A" 또는 "해당 없음"은 비교할 필요 없음 (무조건 PASS)
+            if txt.strip().lower() in ("n/a", "해당없음", "무관"):
+                continue 
+            
             reqs[k] = Requirement(k, txt, tag, conf)
 
 
         # 5) 항목별 평가
         reasons: List[CheckResult] = []
         for key, req in reqs.items():
-            if not req.text or req.text == 'N/A':
-                continue
-            
             check_fn = check_map.get(key) 
             
             if not check_fn:
-                # (예: key_date, other)는 VERIFY
+                # (예: other)는 VERIFY
                 reasons.append(CheckResult('VERIFY', 'OTHER_VERIFY', f"기타 정보 확인 필요: {req.text}",
                                            req.tag=='optional', 0.0))
                 continue
@@ -606,7 +731,6 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
         # 6) [수정] 라벨 결정을 위한 확인 (점수 계산 완전 제거)
         
         # 6-1. '필수' 요건 중 '실패(FAIL)'가 있는지 확인
-        # [FIX] 'is_required' 체크 추가 (우대 조건 FAIL은 BORDERLINE일 수 있음)
         required_fail = any(r.status == 'FAIL' and r.is_required for r in reasons)
         
         # 6-2. '정보 누락(VERIFY)'이 있는지 확인 (OTHER_VERIFY 포함)
@@ -688,6 +812,6 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
             },
 
             "reason_codes": ["COMPARISON_ERROR"],
-            "reasons_human": ["적합도 비교 중 오류가 '발생했습니다. 직접 확인해주세요."],
+            "reasons_human": ["적합도 비교 중 오류가 발생했습니다. 직접 확인해주세요."],
             "missing_info": [],
         }
