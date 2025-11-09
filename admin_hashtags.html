@@ -6,6 +6,7 @@
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2em; background-color: #f4f4f9; color: #333; }
         h1 { color: #003876; border-bottom: 2px solid #003876; padding-bottom: 10px; }
+        h2 { margin-top: 30px; }
         table { width: 100%; border-collapse: collapse; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-top: 20px; }
         th, td { padding: 12px 15px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
         th { background-color: #003876; color: white; }
@@ -23,20 +24,22 @@
             font-size: 0.9em; 
             word-break: break-word;
         }
-        /* 저장된 태그(성공) 스타일 */
         .result-span.saved { color: #28a745; font-weight: bold; }
-        /* 오류 스타일 */
         .result-span.error { color: #dc3545; font-weight: bold; }
         #loading { font-weight: bold; color: #d9534f; }
-        td:nth-child(1) { width: 12%; }
-        td:nth-child(2) { width: 45%; }
-        td:nth-child(3) { width: 10%; }
-        td:nth-child(4) { width: 33%; }
+        
+        /* [수정] 4열 테이블에 맞게 너비 조정 */
+        td:nth-child(1) { width: 12%; } /* 단과대 */
+        td:nth-child(2) { width: 45%; } /* 제목 */
+        td:nth-child(3) { width: 10%; } /* 대분류 */
+        td:nth-child(4) { width: 33%; } /* 세부 해시태그 */
     </style>
 </head>
 <body>
-    <h1>DICE 관리자 - 세부 해시태그 추출 (및 저장)</h1>
+    <h1>DICE 관리자 - 세부 해시태그 추출</h1>
+    <h2><a href="/admin/dashboard_compare">➡️ 지원자격/적합도 테스트 페이지로 이동</a></h2>
     <p id="loading">공지사항 목록 로딩 중...</p>
+    
     <table id="notices-table">
         <thead>
             <tr>
@@ -53,9 +56,10 @@
     <script>
         document.addEventListener('DOMContentLoaded', loadNotices);
 
-        // 1. 공지사항 목록 로드 (수정됨)
+        // 1. 공지사항 목록 로드
         async function loadNotices() {
             try {
+                // [수정] 공통 API 엔드포인트 사용
                 const response = await fetch('/admin/api/notices?limit=200'); 
                 if (!response.ok) throw new Error('Failed to fetch notices');
                 
@@ -71,18 +75,16 @@
                 data.items.forEach(notice => {
                     const tr = document.createElement('tr');
                     
+                    // (세부 해시태그)
                     const savedTags = notice.detailed_hashtags || [];
                     const hasSavedTags = savedTags.length > 0;
-                    
                     const buttonText = hasSavedTags ? '재추출' : '추출 실행';
                     const buttonColor = hasSavedTags ? '#ffc107' : '#007bff'; // 재추출은 노란색
                     
                     let savedTagsHtml = '';
                     if (hasSavedTags) {
-                        // (저장됨) 텍스트와 함께 <span> 생성
                         savedTagsHtml = `<span class="result-span saved">(저장됨: ${escapeHTML(savedTags.join(', '))})</span>`;
                     } else {
-                        // 빈 <span>을 생성 (자리 차지용)
                         savedTagsHtml = `<span class="result-span"></span>`;
                     }
 
@@ -90,11 +92,12 @@
                         <td>${escapeHTML(notice.college_name)}</td>
                         <td><a href="${escapeHTML(notice.url)}" target="_blank" title="${escapeHTML(notice.url)}">${escapeHTML(notice.title)}</a></td>
                         <td>${escapeHTML(notice.category_ai)}</td>
-                        <td id="cell-${notice.id}">
+                        <td id="cell-tag-${notice.id}">
                             <button style="background-color: ${buttonColor};" onclick="extractTags('${notice.id}', '${notice.category_ai}', this)">
                                 ${buttonText}
                             </button>
-                            ${savedTagsHtml} </td>
+                            ${savedTagsHtml}
+                        </td>
                     `;
                     tbody.appendChild(tr);
                 });
@@ -106,18 +109,15 @@
             }
         }
 
-        // 2. 세부 해시태그 추출 및 저장 실행 (수정됨)
+        // 2. 세부 해시태그 추출 및 저장 실행
         async function extractTags(noticeId, mainCategory, buttonEl) {
-            // 버튼이 속한 <td>에서 .result-span을 찾음
             const cell = buttonEl.closest('td'); 
             const resultSpan = cell.querySelector('.result-span'); 
             
             buttonEl.disabled = true;
             buttonEl.textContent = '추출 중...';
-            
-            // [수정] 요청대로 기존 내용을 즉시 삭제하고 로딩 메시지로 변경
             resultSpan.textContent = '(AI 추출 중...)';
-            resultSpan.className = 'result-span'; // 기본 스타일로 초기화
+            resultSpan.className = 'result-span'; 
 
             try {
                 const response = await fetch('/admin/api/extract-detailed-hashtags', {
@@ -136,7 +136,6 @@
 
                 const data = await response.json();
                 
-                // [수정] 동일한 <span>에 새 결과를 덮어씀 (삭제 후 삽입)
                 if (data.detailed_hashtags && data.detailed_hashtags.length > 0) {
                     resultSpan.textContent = `(저장됨: ${escapeHTML(data.detailed_hashtags.join(', '))})`;
                     resultSpan.className = 'result-span saved'; // 성공 스타일
@@ -151,11 +150,8 @@
 
             } catch (error) {
                 console.error('Error extracting tags:', error);
-                
-                // [수정] 동일한 <span>에 오류 메시지를 씀
                 resultSpan.textContent = `[오류: ${error.message}]`;
                 resultSpan.className = 'result-span error'; // 오류 스타일
-                
                 buttonEl.textContent = '추출 실패';
                 buttonEl.style.backgroundColor = '#dc3545'; // 실패 시 빨간색
                 buttonEl.disabled = false;
@@ -165,6 +161,8 @@
         // (Helper) HTML 태그 이스케이프
         function escapeHTML(str) {
             if (str === null || str === undefined) return '';
+            if (typeof str === 'object') str = JSON.stringify(str, null, 2);
+            
             return str.replace(/[&<>"']/g, function(m) {
                 return {
                     '&': '&amp;',
