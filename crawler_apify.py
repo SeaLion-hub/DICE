@@ -20,7 +20,8 @@ import logging # 로깅 임포트 추가
 # AI processor import 수정 (배치 분류 함수 사용)
 from ai_processor import (
     classify_hashtags_from_title_batch,
-    clean_json_string # clean_json_string 임포트 추가 (ai_processor.py에 수정된 함수가 있다고 가정)
+    extract_structured_info,
+    extract_detailed_hashtags,
 )
 # _to_utc_ts 함수 import
 try:
@@ -142,6 +143,9 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 AI_IN_PIPELINE = os.getenv("AI_IN_PIPELINE", "true").lower() == "true"
 AI_SLEEP_SEC = float(os.getenv("AI_SLEEP_SEC", "1.0"))
 AI_BATCH_SIZE = int(os.getenv("AI_BATCH_SIZE", "10"))
+AI_STEP2_SLEEP_SEC = float(os.getenv("AI_STEP2_SLEEP_SEC", str(AI_SLEEP_SEC)))
+AI_STEP3_SLEEP_SEC = float(os.getenv("AI_STEP3_SLEEP_SEC", str(AI_SLEEP_SEC)))
+AI_MAX_RETRIES = int(os.getenv("AI_MAX_RETRIES", "2"))
 
 if not APIFY_TOKEN:
     raise RuntimeError("APIFY_TOKEN not set")
@@ -583,7 +587,12 @@ def fetch_dataset_items(dataset_id: str, timeout=300):
 
 
 # --- 메인 실행 함수 (run) ---
-def run():
+def run(
+    job_dataset_id: Optional[str] = None,
+    job_task_id: Optional[str] = None,
+    job_run_id: Optional[str] = None,
+    job_finished_at: Optional[str] = None,
+):
     total_upserted = 0
     total_skipped = 0
     total_ai_batches = 0 # AI 배치 호출 횟수
@@ -601,6 +610,11 @@ def run():
         # RealDictCursor 사용: 결과를 딕셔너리 형태로 받음
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             # colleges.py에 정의된 각 대학별로 처리
+            if job_dataset_id and not job_task_id:
+                logger.warning("  ⚠️ Queue job provided dataset_id without actor_task_id. Processing all colleges.")
+
+            matched_college = False
+
             for ck, meta in COLLEGES.items():
                 college_name = meta.get("name", "Unknown College")
                 task_id = meta.get("task_id")
@@ -611,27 +625,40 @@ def run():
                     logger.warning(f"Skipping college {college_name} ({ck}) due to missing task_id.")
                     continue
 
-                print(f"\n🔍 Processing college: {college_name} ({ck})")
-
-                # 가장 최근 성공한 Apify Run 정보 가져오기
-                run_data = get_latest_run_for_task(task_id)
-                if not run_data:
-                    # 최근 성공 Run이 없으면 건너뛰기
+                if job_task_id and task_id != job_task_id:
                     continue
 
-                run_id = run_data.get("id")
-                ds_id = run_data.get("defaultDatasetId")
-                finished_at_str = run_data.get("finishedAt", "unknown time")
+                print(f"\n🔍 Processing college: {college_name} ({ck})")
 
-                # Run 완료 시간 표시 (파싱 시도)
-                try:
-                     finished_at_dt = datetime.fromisoformat(finished_at_str.replace("Z", "+00:00"))
-                     finished_at_display = finished_at_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
-                except:
-                     finished_at_display = finished_at_str
+                run_id = None
+                ds_id = None
+                finished_at_display = "unknown"
+
+                if job_dataset_id and (not job_task_id or task_id == job_task_id):
+                    matched_college = True
+                    run_id = job_run_id
+                    ds_id = job_dataset_id
+                    finished_at_display = job_finished_at or "from queue"
+                else:
+                    # 가장 최근 성공한 Apify Run 정보 가져오기
+                    run_data = get_latest_run_for_task(task_id)
+                    if not run_data:
+                        # 최근 성공 Run이 없으면 건너뛰기
+                        continue
+
+                    run_id = run_data.get("id")
+                    ds_id = run_data.get("defaultDatasetId")
+                    finished_at_str = run_data.get("finishedAt", "unknown time")
+
+                    # Run 완료 시간 표시 (파싱 시도)
+                    try:
+                         finished_at_dt = datetime.fromisoformat(finished_at_str.replace("Z", "+00:00"))
+                         finished_at_display = finished_at_dt.strftime('%Y-%m-%d %H:%M:%S %Z')
+                    except:
+                         finished_at_display = finished_at_str
 
                 if not ds_id:
-                    logger.error(f"  ❌ No datasetId found for the latest successful run {run_id}")
+                    logger.error(f"  ❌ No datasetId available for task {task_id} / college {ck}")
                     continue
 
                 logger.info(f"  📅 Using data from run {run_id} (Finished: {finished_at_display})")
@@ -685,10 +712,13 @@ def run():
 
                         # AI 처리 대상 선별 (AI_IN_PIPELINE 활성화 및 제목 존재 시)
                         if AI_IN_PIPELINE and norm.get("title", "").strip():
+                            body_for_ai = norm.get("body_text") or norm.get("raw_text") or ""
+                            body_for_ai = clean_text(body_for_ai, max_length=1200)
                             items_to_process_ai.append({
                                 "id": h, # 해시값을 AI 결과 매핑용 ID로 사용
                                 "title": norm["title"],
-                                "college_name": college_name # 단과대 이름도 AI 컨텍스트로 제공
+                                "college_name": college_name, # 단과대 이름도 AI 컨텍스트로 제공
+                                "body": body_for_ai,
                             })
                     except Exception as hash_err:
                         logger.error(f"  ❌ Error generating hash for item {item_index+1} ('{norm.get('title', 'N/A')[:30]}...'): {hash_err}")
@@ -697,7 +727,7 @@ def run():
 
                 logger.info(f"  Preprocessing done. Valid items: {len(processed_items_data)}, AI targets: {len(items_to_process_ai)}")
 
-                # --- 2단계: AI 배치 처리 ---
+                # --- 2단계: 제목 기반 해시태그 배치 처리 ---
                 ai_results_map = {} # { "hash_id": ["#태그1", "#태그2"], ... } 형태로 결과 저장
                 if AI_IN_PIPELINE and items_to_process_ai:
                     logger.info(f"  Starting AI batch classification (Batch size: {AI_BATCH_SIZE})...")
@@ -717,7 +747,7 @@ def run():
 
                         # --- API 호출 (재시도 로직 포함) ---
                         retry_count = 0
-                        max_retries = 2 # 재시도 횟수 증가 (최대 2번)
+                        max_retries = AI_MAX_RETRIES # 재시도 횟수 (환경변수로 조정 가능)
                         batch_success = False
                         while retry_count <= max_retries:
                             try:
@@ -758,9 +788,157 @@ def run():
                                     ai_results_map[item_info['id']] = []
 
 
-                logger.info("  AI processing finished.")
+                logger.info("  AI Step 1 finished.")
 
-                # --- 3단계: DB 저장 루프 (오류 수정 및 로깅 강화) ---
+                # --- 3단계: AI 후처리 결과 매핑 준비 ---
+                category_map: Dict[str, Optional[str]] = {}
+                structured_info_map: Dict[str, Dict[str, Any]] = {}
+                detailed_hashtags_map: Dict[str, List[str]] = {}
+
+                for norm_item in processed_items_data:
+                    item_hash = norm_item.get("hash")
+                    if not item_hash:
+                        continue
+
+                    hashtags_ai_raw = ai_results_map.get(item_hash, [])
+                    if not isinstance(hashtags_ai_raw, list):
+                        logger.warning(
+                            f"  ⚠️ Hashtags for {item_hash} is not a list ({type(hashtags_ai_raw)}), forcing to []."
+                        )
+                        hashtags_ai_raw = []
+
+                    if hashtags_ai_raw == ["#일반"]:
+                        main_category = "#일반"
+                    elif hashtags_ai_raw:
+                        main_category = hashtags_ai_raw[0]
+                    else:
+                        main_category = None
+
+                    category_map[item_hash] = main_category
+                    structured_info_map[item_hash] = {}
+                    detailed_hashtags_map[item_hash] = []
+
+                # --- 4단계: 자격요건 추출 ---
+                if AI_IN_PIPELINE and processed_items_data:
+                    logger.info("  AI Step 2 (qualification extraction) starting...")
+                    step2_processed = 0
+
+                    for idx, norm_item in enumerate(processed_items_data):
+                        item_hash = norm_item.get("hash")
+                        if not item_hash:
+                            continue
+
+                        title_for_ai = norm_item.get("title") or ""
+                        body_for_ai = (
+                            norm_item.get("body_text")
+                            or norm_item.get("raw_text")
+                            or ""
+                        )
+
+                        if not (title_for_ai.strip() or body_for_ai.strip()):
+                            continue
+
+                        main_category = category_map.get(item_hash) or "#일반"
+
+                        attempt = 0
+                        extracted_info: Optional[Dict[str, Any]] = None
+                        while attempt <= AI_MAX_RETRIES:
+                            if attempt > 0:
+                                wait_time = max(AI_STEP2_SLEEP_SEC, (2 ** attempt) * AI_STEP2_SLEEP_SEC)
+                                logger.warning(
+                                    f"    ⚠️ Step 2 retry for item {item_hash[:8]}..., waiting {wait_time:.1f}s ({attempt}/{AI_MAX_RETRIES})"
+                                )
+                                if wait_time > 0:
+                                    time.sleep(wait_time)
+                            else:
+                                if idx > 0 and AI_STEP2_SLEEP_SEC > 0:
+                                    time.sleep(AI_STEP2_SLEEP_SEC)
+
+                            try:
+                                result = extract_structured_info(title_for_ai, body_for_ai, main_category)
+                                if isinstance(result, dict) and "error" not in result:
+                                    extracted_info = result
+                                else:
+                                    extracted_info = {}
+                                break
+                            except Exception as e:
+                                if "429" in str(e) or "rate limit" in str(e).lower():
+                                    attempt += 1
+                                    continue
+                                logger.error(
+                                    f"    ❌ Step 2 extraction failed for item {item_hash[:8]}...: {e}"
+                                )
+                                extracted_info = {}
+                                break
+
+                        if extracted_info is not None:
+                            structured_info_map[item_hash] = extracted_info
+                        step2_processed += 1
+
+                    logger.info(f"  AI Step 2 processed {step2_processed} items.")
+
+                # --- 5단계: 세부 해시태그 추출 ---
+                if AI_IN_PIPELINE and processed_items_data:
+                    logger.info("  AI Step 3 (detailed hashtags) starting...")
+                    step3_processed = 0
+
+                    for idx, norm_item in enumerate(processed_items_data):
+                        item_hash = norm_item.get("hash")
+                        if not item_hash:
+                            continue
+
+                        main_category = category_map.get(item_hash)
+                        if not main_category or main_category == "#일반":
+                            continue
+
+                        title_for_ai = norm_item.get("title") or ""
+                        body_for_ai = (
+                            norm_item.get("body_text")
+                            or norm_item.get("raw_text")
+                            or ""
+                        )
+
+                        if not (title_for_ai.strip() or body_for_ai.strip()):
+                            continue
+
+                        attempt = 0
+                        detailed_result: List[str] = []
+                        while attempt <= AI_MAX_RETRIES:
+                            if attempt > 0:
+                                wait_time = max(AI_STEP3_SLEEP_SEC, (2 ** attempt) * AI_STEP3_SLEEP_SEC)
+                                logger.warning(
+                                    f"    ⚠️ Step 3 retry for item {item_hash[:8]}..., waiting {wait_time:.1f}s ({attempt}/{AI_MAX_RETRIES})"
+                                )
+                                if wait_time > 0:
+                                    time.sleep(wait_time)
+                            else:
+                                if idx > 0 and AI_STEP3_SLEEP_SEC > 0:
+                                    time.sleep(AI_STEP3_SLEEP_SEC)
+
+                            try:
+                                detailed_result = extract_detailed_hashtags(
+                                    title_for_ai,
+                                    body_for_ai,
+                                    main_category,
+                                ) or []
+                                break
+                            except Exception as e:
+                                if "429" in str(e) or "rate limit" in str(e).lower():
+                                    attempt += 1
+                                    continue
+                                logger.error(
+                                    f"    ❌ Step 3 extraction failed for item {item_hash[:8]}...: {e}"
+                                )
+                                detailed_result = []
+                                break
+
+                        if detailed_result:
+                            detailed_hashtags_map[item_hash] = detailed_result
+                        step3_processed += 1
+
+                    logger.info(f"  AI Step 3 processed {step3_processed} items.")
+
+                # --- 6단계: DB 저장 루프 (오류 수정 및 로깅 강화) ---
                 logger.info("  Upserting data into database...")
                 for norm_item in processed_items_data:
                     item_hash = norm_item.get('hash')
@@ -772,25 +950,28 @@ def run():
 
                     # AI 결과 가져오기 (기본값 설정 강화)
                     hashtags_ai = ai_results_map.get(item_hash, []) # 기본값 빈 리스트
-                    # 결과가 리스트가 아니면 빈 리스트로 강제 변환
                     if not isinstance(hashtags_ai, list):
                         logger.warning(f"  ⚠️ Hashtags for {item_hash} is not a list ({type(hashtags_ai)}), forcing to []. AI Map: {ai_results_map.get(item_hash)}")
                         hashtags_ai = []
 
-                    # 카테고리 설정 (해시태그 리스트 기반)
-                    category_ai = hashtags_ai[0] if hashtags_ai and hashtags_ai != ["#일반"] else None # #일반 태그만 있으면 카테고리는 None
+                    main_category = category_map.get(item_hash)
 
-                    # 기타 AI 필드 (현재 로직에서는 None 또는 빈 dict)
+                    # 카테고리 설정 (해시태그 리스트 기반)
+                    category_ai = main_category if main_category and main_category != "#일반" else None
+
+                    # 일정 필드 (현재는 파싱 미적용)
                     start_at_ai = None
                     end_at_ai = None
-                    # qualification_ai 처리 (항상 dict 보장)
-                    # 현재 AI 배치 결과에는 qualification_ai가 없으므로 빈 dict 사용
-                    raw_qualification_ai = {} # <<-- 이 부분은 나중에 자격요건 추출 로직 추가 시 수정 필요
-                    if not isinstance(raw_qualification_ai, dict):
-                        logger.warning(f"  ⚠️ Qualification AI result for {item_hash} was not a dict (type: {type(raw_qualification_ai)}), using empty dict.")
+
+                    # 자격요건/세부태그 결과
+                    qualification_ai = structured_info_map.get(item_hash, {})
+                    if not isinstance(qualification_ai, dict):
                         qualification_ai = {}
-                    else:
-                        qualification_ai = raw_qualification_ai
+
+                    detailed_hashtags = detailed_hashtags_map.get(item_hash, [])
+                    if not isinstance(detailed_hashtags, list):
+                        detailed_hashtags = []
+                    detailed_hashtags_db = detailed_hashtags if detailed_hashtags else None
 
                     # ⭐️ [수정] DB 저장 시도: 파라미터에서 search_vector 관련 제거
                     try:
@@ -809,7 +990,7 @@ def run():
                             "end_at_ai": end_at_ai,
                             "qualification_ai": Json(qualification_ai), # Json() 사용 (이제 qualification_ai는 dict)
                             "hashtags_ai": hashtags_ai, # 리스트 또는 빈 리스트
-                            "detailed_hashtags": None, # [수정] 'None'으로 파라미터 전달
+                            "detailed_hashtags": detailed_hashtags_db,
                         })
                         # cur.rowcount > 0 이면 실제로 INSERT 또는 UPDATE 발생
                         # logger.debug(f"Upsert executed for hash {item_hash}. Row count: {cur.rowcount}")
@@ -838,6 +1019,13 @@ def run():
                 # 한 대학 처리 후 커밋 (오류 발생 시 롤백되었으므로 성공한 것만 커밋됨)
                 conn.commit()
                 logger.info(f"  ✅ Finished {college_name}: Upserted attempts={college_upserted}, Skipped={college_skipped}, AI Batches={ai_call_count_batch}")
+
+                # 큐 작업으로 실행된 경우, 대상 단과대 처리 후 종료
+                if job_task_id and task_id == job_task_id:
+                    break
+
+            if job_task_id and not matched_college:
+                logger.warning(f"  ⚠️ No college matched actor_task_id={job_task_id}.")
 
                 total_upserted += college_upserted
                 total_skipped += college_skipped

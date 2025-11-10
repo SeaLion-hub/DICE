@@ -39,8 +39,9 @@ model = genai.GenerativeModel(
 
 # --- [유지] 1단계: 제목+단과대 기반 배치 분류 프롬프트 (오류 수정을 위해 Few-shot 예시 추가) ---
 SYSTEM_PROMPT_CLASSIFY_TITLE_BATCH = """
-너는 연세대학교 공지사항의 단과대와 제목을 분석하여 가장 적합한 해시태그를 부여하는 AI 전문가다.
-주어진 여러 개의 [공지사항] 목록 (각각 ID, 단과대, 제목 포함)을 읽고, 각 공지사항에 대해 아래 [카테고리 목록] 중에서 가장 적합한 해시태그를 **모두** 선택하라.
+너는 연세대학교 공지사항의 단과대, 제목, 본문 요약을 분석하여 가장 적합한 해시태그를 부여하는 AI 전문가다.
+주어진 여러 개의 [공지사항] 목록 (각각 ID, 단과대, 제목, 본문 요약 포함)을 읽고, 각 공지사항에 대해 아래 [카테고리 목록] 중에서 가장 적합한 해시태그를 **모두** 선택하라.
+본문 요약이 제공되지 않는 경우에는 제목과 단과대만으로 판단한다.
 결과는 반드시 각 ID별로 해시태그 리스트를 포함하는 **단일 JSON 객체**로만 반환하라. (키: ID, 값: 해시태그 리스트)
 
 [카테고리 목록]
@@ -52,10 +53,10 @@ SYSTEM_PROMPT_CLASSIFY_TITLE_BATCH = """
 - #공모전/대회: 국내/외 공모전, 경진대회, 경시대회
 - #일반: 다른 특정 카테고리에 속하지 않는 모든 공지 (시설, 규정 안내, 서비스 종료, 설문조사 등)
 
-[입력 형식] (JSON 배열)
+[입력 형식] (JSON 배열, body는 최대 1200자 요약)
 [
-  {"id": "고유ID1", "college": "단과대명1", "title": "공지 제목1"},
-  {"id": "고유ID2", "college": "단과대명2", "title": "공지 제목2"},
+  {"id": "고유ID1", "college": "단과대명1", "title": "공지 제목1", "body": "본문 요약1"},
+  {"id": "고유ID2", "college": "단과대명2", "title": "공지 제목2", "body": null},
   ...
 ]
 
@@ -76,7 +77,7 @@ SYSTEM_PROMPT_CLASSIFY_TITLE_BATCH = """
 
 [중요 규칙]
 1.  오직 [카테고리 목록]에 있는 7개의 태그만 사용해야 한다. (예: '#교과목' 같은 태그 생성 금지)
-2.  제목만으로 판단이 애매하면 단과대 정보를 참고하되, [학습 예시]를 최우선으로 따른다.
+2.  제목만으로 판단이 애매하면 단과대 및 본문 요약(body)을 적극 활용하라.
 3.  명확한 카테고리가 없으면 무조건 '#일반'을 선택한다.
 4.  '#일반' 태그는 다른 태그와 절대 함께 사용할 수 없다. (결과는 `["#일반"]` 이어야 함)
 
@@ -420,10 +421,24 @@ def classify_hashtags_from_title_batch(notices_info: List[Dict[str, str]]) -> Di
     if not notices_info:
         return {}
 
-    input_data = [
-        {"id": info.get('id', ''), "college": info.get('college_name', ''), "title": info.get('title', '')}
-        for info in notices_info
-    ]
+    input_data = []
+    for info in notices_info:
+        body_snippet = info.get("body") or ""
+        if isinstance(body_snippet, str):
+            body_snippet = body_snippet.strip()
+            if len(body_snippet) > 1200:
+                body_snippet = body_snippet[:1200]
+        else:
+            body_snippet = ""
+
+        input_data.append(
+            {
+                "id": info.get("id", ""),
+                "college": info.get("college_name", ""),
+                "title": info.get("title", ""),
+                "body": body_snippet or None,
+            }
+        )
     user_prompt_json = json.dumps(input_data, ensure_ascii=False, indent=2)
 
     results = {}
