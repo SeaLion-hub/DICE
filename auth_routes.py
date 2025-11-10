@@ -52,6 +52,9 @@ PROFILE_SCHEMA_PATCH_SQL = [
 
 _profile_schema_verified = False
 
+_KEYWORD_WHITELIST_VALUES = tuple(dict.fromkeys(ALLOWED_PROFILE_KEYWORDS))
+_KEYWORD_WHITELIST_LITERAL = ", ".join(f"'{kw}'" for kw in _KEYWORD_WHITELIST_VALUES)
+
 
 def _filter_allowed_keywords(keywords: Iterable[str]) -> List[str]:
     unique: List[str] = []
@@ -74,6 +77,19 @@ def ensure_user_profile_schema(conn) -> None:
         with conn.cursor() as cur:
             for statement in PROFILE_SCHEMA_PATCH_SQL:
                 cur.execute(statement)
+            if _KEYWORD_WHITELIST_LITERAL:
+                cur.execute(
+                    "ALTER TABLE user_profiles DROP CONSTRAINT IF EXISTS chk_user_profiles_keywords_whitelist;"
+                )
+                cur.execute(
+                    f"""
+                    ALTER TABLE user_profiles
+                        ADD CONSTRAINT chk_user_profiles_keywords_whitelist
+                        CHECK (
+                            keywords <@ ARRAY[{_KEYWORD_WHITELIST_LITERAL}]::text[]
+                        );
+                    """
+                )
         conn.commit()
         _profile_schema_verified = True
     except Exception as schema_err:

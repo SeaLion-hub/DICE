@@ -149,6 +149,43 @@ def _parse_freetext_datetime(text: Optional[str], title: str) -> Optional[dateti
         return None
 
 
+def _normalize_structured_datetime(value: Any) -> Optional[datetime.datetime]:
+    """
+    AI가 반환한 구조화 데이터에서 날짜 필드를 안전하게 UTC datetime으로 변환한다.
+    - 문자열 "[null]", "null" 등은 None으로 간주
+    - 리스트/튜플이 들어오면 첫 번째 유효한 값을 사용
+    - naive datetime은 KST 기준으로 해석 후 UTC로 변환
+    """
+    if value is None:
+        return None
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            candidate = _normalize_structured_datetime(item)
+            if candidate:
+                return candidate
+        return None
+
+    if isinstance(value, datetime.datetime):
+        if value.tzinfo is None or value.tzinfo.utcoffset(value) is None:
+            return value.replace(tzinfo=KST).astimezone(timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped == "":
+            return None
+        lowered = stripped.lower()
+        if lowered in {"null", "[null]", "none"}:
+            return None
+        parsed = _parse_iso_datetime(stripped)
+        if parsed:
+            return parsed
+        return None
+
+    return None
+
+
 def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title: str) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime]]:
     if not isinstance(structured_info, dict):
         return (None, None)
@@ -203,5 +240,12 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
         structured_info.get("key_date") or structured_info.get("keyDate"),
         structured_info.get("key_date_iso") or structured_info.get("keyDateIso"),
     )
+
+    start_at = _normalize_structured_datetime(start_at)
+    end_at = _normalize_structured_datetime(end_at)
+
+    if start_at and end_at and end_at < start_at:
+        # 종료 시간이 시작 시간보다 이전인 경우, 불확실한 값으로 판단하여 종료 시간을 폐기
+        end_at = None
 
     return (start_at, end_at)
