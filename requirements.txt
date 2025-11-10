@@ -1,0 +1,21 @@
+fastapi
+uvicorn[standard]
+python-dotenv
+psycopg2-binary
+requests
+beautifulsoup4
+
+# AI & Google Dependencies
+google-generativeai
+packaging  # <-- 누락되었던 의존성 (오류 수정)
+
+# Pydantic (for schemas)
+pydantic>=2.5,<3.0
+
+# Auth & Security
+bcrypt
+PyJWT
+email-validator
+
+# Redis (for queue)
+redis>=5.0.0
