@@ -677,9 +677,49 @@ def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
 
     try:
         result = check_suitability(profile.model_dump(), qa)
+
+        eligibility = result.get("eligibility")
+        reasons_human = result.get("reasons_human") or []
+        if isinstance(reasons_human, str):
+            reasons_human = [reasons_human]
+        if not isinstance(reasons_human, list):
+            reasons_human = []
+
+        criteria = result.get("criteria_results") or {}
+        if not isinstance(criteria, dict):
+            criteria = {}
+
+        missing_info = result.get("missing_info") or []
+        if isinstance(missing_info, str):
+            missing_info = [missing_info]
+        if not isinstance(missing_info, list):
+            missing_info = []
+
+        reason_codes = result.get("reason_codes") or []
+        if isinstance(reason_codes, str):
+            reason_codes = [reason_codes]
+        if not isinstance(reason_codes, list):
+            reason_codes = []
+
+        # Maintain backward compatibility fields
+        eligible_bool = bool(eligibility == "ELIGIBLE")
+        primary_reason = ""
+        if reasons_human:
+            primary_reason = reasons_human[0]
+        elif isinstance(result.get("reason"), str):
+            primary_reason = result["reason"]
+
         return {
-            "eligible": bool(result.get("eligible")),
-            "reason": result.get("reason") or ""
+            "notice_id": notice_id,
+            "noticeId": notice_id,
+            "eligibility": eligibility,
+            "suitable": result.get("suitable"),
+            "criteria_results": criteria,
+            "reason_codes": reason_codes,
+            "reasons_human": reasons_human,
+            "missing_info": missing_info,
+            "eligible": eligible_bool,
+            "reason": primary_reason,
         }
     except Exception as e:
         logger.error(f"AI verification failed: {e}")
