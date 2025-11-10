@@ -676,13 +676,25 @@ def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
             qa = json.loads(qa)
         except Exception:
             qa = {}
-
+    # ... (main.py)
     try:
+        # check_suitability가 반환하는 상세 객체를
         result = check_suitability(profile.model_dump(), qa)
-        return {
-            "eligible": bool(result.get("eligible")),
-            "reason": result.get("reason") or ""
-        }
+        # [수정] 가공하지 않고 그대로 반환합니다.
+        return result
+    
     except Exception as e:
-        logger.error(f"AI verification failed: {e}")
-        return {"eligible": False, "reason": "자격 검증 중 오류가 발생했습니다."}
+        logger.error(f"AI verification failed: {e}", exc_info=True)
+        # [수정] 오류 발생 시에도 프론트엔드가 기대하는 상세 형식으로 반환합니다.
+        return {
+            "eligibility": "BORDERLINE",
+            "suitable": True,
+            "criteria_results": {
+                "pass": [],
+                "fail": [],
+                "verify": ["자격 검증 중 오류가 발생했습니다."]
+            },
+            "reason_codes": ["VERIFICATION_ERROR"],
+            "reasons_human": ["자격 검증 중 서버 오류가 발생했습니다. (관리자 문의)"],
+            "missing_info": [],
+        }
