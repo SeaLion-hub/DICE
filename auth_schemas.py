@@ -40,6 +40,9 @@ _ALLOWED_KEYWORDS = [
     '#교환학생', '#파견', '#campusasia', '#글로벌', '#단기', '#하계', '#동계', '#어학연수', '#해외봉사', '#일본', '#미국'
 ]
 
+# 외부 모듈에서 재사용할 수 있도록 공개 상수로 노출
+ALLOWED_PROFILE_KEYWORDS = tuple(_ALLOWED_KEYWORDS)
+
 # DB ENUM과 맞춘 리터럴 타입
 GenderType = Literal['male', 'female', 'prefer_not_to_say']
 MilitaryServiceType = Literal['completed', 'pending', 'exempt', 'n/a']
@@ -169,7 +172,7 @@ class UserProfileRequest(BaseModel):
                 continue
             if not kw.startswith("#"):
                 raise ValueError(f"키워드는 '#'로 시작해야 합니다: '{kw}'")
-            if kw not in _ALLOWED_KEYWORDS:
+            if kw not in ALLOWED_PROFILE_KEYWORDS:
                 raise ValueError(f"허용되지 않은 키워드: '{kw}'")
             if kw not in unique:
                 unique.append(kw)

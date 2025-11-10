@@ -617,6 +617,8 @@ def run(
             matched_college = False
 
             for ck, meta in COLLEGES.items():
+
+            
                 college_name = meta.get("name", "Unknown College")
                 task_id = meta.get("task_id")
                 site = meta.get("url") # 대학별 기본 URL

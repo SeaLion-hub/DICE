@@ -1,7 +1,8 @@
 # auth_routes.py
 import logging
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, List
 
+import psycopg2
 from psycopg2.extras import RealDictCursor, Json  # Json 추가
 from psycopg2 import errors as pg_errors
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -13,10 +14,71 @@ from auth_schemas import (
     UserMeResponse,
     UserProfileRequest,
     UserProfileResponse,
+    ALLOWED_PROFILE_KEYWORDS,
 )
 from auth_security import hash_password, verify_password, create_access_token
 from auth_deps import get_current_user
 from db_pool import get_conn
+
+PROFILE_SCHEMA_PATCH_SQL = [
+    """
+    CREATE TABLE IF NOT EXISTS user_profiles (
+        user_id UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        gender TEXT,
+        age INT,
+        major TEXT,
+        college TEXT,
+        grade INT,
+        keywords TEXT[] DEFAULT ARRAY[]::text[],
+        military_service TEXT,
+        income_bracket INT,
+        gpa NUMERIC(3,2),
+        language_scores JSONB DEFAULT '{}'::jsonb,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    """,
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS college TEXT;",
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS keywords TEXT[] DEFAULT ARRAY[]::text[];",
+    "ALTER TABLE user_profiles ALTER COLUMN keywords SET DEFAULT ARRAY[]::text[];",
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS military_service TEXT;",
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS income_bracket INT;",
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS gpa NUMERIC(3,2);",
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS language_scores JSONB DEFAULT '{}'::jsonb;",
+    "ALTER TABLE user_profiles ALTER COLUMN language_scores SET DEFAULT '{}'::jsonb;",
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();",
+    "ALTER TABLE user_profiles ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();",
+]
+
+_profile_schema_verified = False
+
+
+def _filter_allowed_keywords(keywords: Iterable[str]) -> List[str]:
+    unique: List[str] = []
+    allowed = set(ALLOWED_PROFILE_KEYWORDS)
+    for kw in keywords:
+        if not kw:
+            continue
+        if kw not in allowed:
+            continue
+        if kw not in unique:
+            unique.append(kw)
+    return unique
+
+
+def ensure_user_profile_schema(conn) -> None:
+    global _profile_schema_verified
+    if _profile_schema_verified:
+        return
+    try:
+        with conn.cursor() as cur:
+            for statement in PROFILE_SCHEMA_PATCH_SQL:
+                cur.execute(statement)
+        conn.commit()
+        _profile_schema_verified = True
+    except Exception as schema_err:
+        logger.error(f"Failed to verify user_profiles schema: {schema_err}")
+        conn.rollback()
 
 
 # ============================================================================
@@ -56,6 +118,7 @@ async def register(req: RegisterRequest):
 
     try:
         with get_conn() as conn:
+            ensure_user_profile_schema(conn)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. 중복 체크 (레이스 컨디션 가능성 있음)
                 cur.execute(
@@ -120,6 +183,7 @@ async def login(req: LoginRequest):
 
     try:
         with get_conn() as conn:
+            ensure_user_profile_schema(conn)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 # 1. 사용자 조회
                 cur.execute(
@@ -187,6 +251,7 @@ async def get_profile(current_user: dict = Depends(get_current_user)):
 
     try:
         with get_conn() as conn:
+            ensure_user_profile_schema(conn)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(
                     """
@@ -260,7 +325,12 @@ async def update_profile(
     user_id = str(current_user["id"])
 
     # 정규화
-    keywords = req.keywords or []
+    keywords = _filter_allowed_keywords(req.keywords or [])
+    if not keywords:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="키워드를 최소 1개 이상 선택해주세요.",
+        )
     lang_scores_json = Json(req.language_scores or {})  # JSONB 안전 저장
 
     try:
@@ -274,6 +344,35 @@ async def update_profile(
                 exists = cur.fetchone()
 
                 if exists:
+                    cur.execute(
+                        """
+                        SELECT
+                            gender,
+                            age,
+                            major,
+                            college,
+                            grade,
+                            keywords,
+                            military_service,
+                            income_bracket,
+                            gpa,
+                            language_scores
+                        FROM user_profiles
+                        WHERE user_id = %s
+                        """,
+                        (user_id,),
+                    )
+                    current_profile = cur.fetchone() or {}
+
+                    merged_keywords = req.keywords if req.keywords else (current_profile.get("keywords") or [])
+                    merged_keywords = _filter_allowed_keywords(merged_keywords)
+                    if not merged_keywords:
+                        raise HTTPException(
+                            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            detail="키워드를 최소 1개 이상 선택해주세요.",
+                        )
+                    merged_lang_scores = req.language_scores if req.language_scores is not None else current_profile.get("language_scores")
+
                     # 2-A. 업데이트 (9개 필드 모두 반영)
                     cur.execute(
                         """
@@ -302,11 +401,11 @@ async def update_profile(
                             req.major,
                             req.college,
                             req.grade,
-                            keywords,
+                            merged_keywords,
                             req.military_service,
                             req.income_bracket,
                             req.gpa,
-                            lang_scores_json,
+                            Json(merged_lang_scores or {}),
                             user_id,
                         )
                     )
@@ -369,6 +468,14 @@ async def update_profile(
         )
     except HTTPException:
         raise
+    except psycopg2.Error as db_err:
+        conn.rollback()
+        detail = getattr(getattr(db_err, "diag", None), "message_detail", None) or str(db_err)
+        logger.error(f"Profile update failed: {db_err}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=detail or "Database error"
+        )
     except Exception as e:
         logger.error(f"Database error in update_profile: {e}")
         raise HTTPException(
