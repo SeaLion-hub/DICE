@@ -23,6 +23,7 @@ import logging
 
 # Import AI processor (수정됨: extract_notice_info 대신 분류/추출 함수 임포트)
 from ai_processor import classify_notice_category, extract_structured_info
+from calendar_utils import extract_ai_time_window
 # extract_hashtags_from_title 는 더 이상 사용하지 않음
 
 from dotenv import load_dotenv
@@ -112,7 +113,7 @@ def backfill_ai_fields(args):
 
     conn = None # finally 블록에서 사용하기 위해 외부 선언
     try:
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, client_encoding='utf8')
         conn.autocommit = False # 명시적 커밋/롤백 사용
 
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -155,13 +156,12 @@ def backfill_ai_fields(args):
                     # 2단계: 구조화된 정보 추출
                     structured_info = extract_structured_info(title=title, body=body, category=category_ai)
 
-                    # 결과에서 필드 추출 (main.py 로직 참고)
-                    # start_at_ai, end_at_ai 는 현재 structured_info 에서 직접 파싱하지 않음 (None으로 설정)
-                    # 필요 시 calendar_utils 등을 활용한 파싱 로직 추가 가능
-                    start_at_ai = None
-                    end_at_ai = None
-                    # qualification_ai 는 JSON 또는 빈 딕셔너리
-                    qualification_ai = structured_info if isinstance(structured_info, dict) and "error" not in structured_info else {}
+                    if isinstance(structured_info, dict) and "error" not in structured_info:
+                        start_at_ai, end_at_ai = extract_ai_time_window(structured_info, title)
+                        qualification_ai = structured_info
+                    else:
+                        start_at_ai, end_at_ai = None, None
+                        qualification_ai = {}
                     # hashtags_ai 는 category_ai 기반 리스트 (main.py 와 동일하게)
                     hashtags_ai = [category_ai] if category_ai and category_ai != "#일반" else None # #일반은 해시태그로 넣지 않음
 

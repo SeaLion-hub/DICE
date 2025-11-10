@@ -62,7 +62,8 @@ def init_pool(minconn: int = 1, maxconn: int = 10) -> SimpleConnectionPool:
             'port': parsed.port or 5432,
             'dbname': parsed.path.lstrip('/'),
             'user': unquote(parsed.username) if parsed.username else None,
-            'password': unquote(parsed.password) if parsed.password else None
+            'password': unquote(parsed.password) if parsed.password else None,
+            'client_encoding': 'utf8'
         }
         
         # Remove None values

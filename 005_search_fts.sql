@@ -37,15 +37,22 @@ BEGIN
     ELSE college_synonyms := '';
   END CASE;
 
-  -- 2. Assign weights: Title 'A', Hashtags 'B', Body 'C', College 'D'
+  -- 2. Assign weights: Title 'A', Hashtags 'B', Detailed Hashtags 'B', Body 'C', College 'D'
   NEW.search_vector :=
     setweight(to_tsvector('simple', coalesce(NEW.title, '')), 'A') ||
-    setweight(to_tsvector('simple',
-      CASE
-        WHEN NEW.hashtags_ai IS NOT NULL THEN array_to_string(NEW.hashtags_ai, ' ')
-        ELSE ''
-      END
-    ), 'B') ||
+    setweight(
+      to_tsvector(
+        'simple',
+        array_to_string(
+          array_cat(
+            COALESCE(NEW.hashtags_ai, ARRAY[]::text[]),
+            COALESCE(NEW.detailed_hashtags, ARRAY[]::text[])
+          ),
+          ' '
+        )
+      ),
+      'B'
+    ) ||
     setweight(to_tsvector('simple', coalesce(NEW.body_text, '')), 'C') ||
     setweight(to_tsvector('simple', coalesce(college_synonyms, '')), 'D'); -- Added Weight D
   RETURN NEW;
@@ -55,7 +62,7 @@ $$ LANGUAGE plpgsql;
 -- 3. Create trigger to automatically update search_vector on insert or update
 DROP TRIGGER IF EXISTS trg_update_search_vector ON notices;
 CREATE TRIGGER trg_update_search_vector
-BEFORE INSERT OR UPDATE OF title, hashtags_ai, body_text, college_key ON notices
+BEFORE INSERT OR UPDATE OF title, hashtags_ai, detailed_hashtags, body_text, college_key ON notices
 FOR EACH ROW EXECUTE FUNCTION update_search_vector();
 
 -- 4. Create GIN index for high-performance search
@@ -67,12 +74,19 @@ ON notices USING GIN(search_vector);
 UPDATE notices n
 SET search_vector =
   setweight(to_tsvector('simple', coalesce(n.title, '')), 'A') ||
-  setweight(to_tsvector('simple',
-    CASE
-      WHEN n.hashtags_ai IS NOT NULL THEN array_to_string(n.hashtags_ai, ' ')
-      ELSE ''
-    END
-  ), 'B') ||
+  setweight(
+    to_tsvector(
+      'simple',
+      array_to_string(
+        array_cat(
+          COALESCE(n.hashtags_ai, ARRAY[]::text[]),
+          COALESCE(n.detailed_hashtags, ARRAY[]::text[])
+        ),
+        ' '
+      )
+    ),
+    'B'
+  ) ||
   setweight(to_tsvector('simple', coalesce(n.body_text, '')), 'C') ||
   setweight(to_tsvector('simple', coalesce(c_syn.synonyms, '')), 'D') -- Added Weight D
 FROM (

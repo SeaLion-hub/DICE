@@ -23,6 +23,7 @@ from ai_processor import (
     extract_structured_info,
     extract_detailed_hashtags,
 )
+from calendar_utils import extract_ai_time_window
 # _to_utc_ts 함수 import
 try:
     from main import _to_utc_ts
@@ -604,7 +605,7 @@ def run(
     conn = None
     try:
         # 데이터베이스 연결
-        conn = psycopg2.connect(DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL, client_encoding='utf8')
         conn.autocommit = False # 트랜잭션 관리를 위해 autocommit 비활성화
 
         # RealDictCursor 사용: 결과를 딕셔너리 형태로 받음
@@ -959,14 +960,18 @@ def run(
                     # 카테고리 설정 (해시태그 리스트 기반)
                     category_ai = main_category if main_category and main_category != "#일반" else None
 
-                    # 일정 필드 (현재는 파싱 미적용)
-                    start_at_ai = None
-                    end_at_ai = None
+                    structured_payload = structured_info_map.get(item_hash, {})
+                    if not isinstance(structured_payload, dict):
+                        structured_payload = {}
+
+                    # 일정 필드
+                    start_at_ai, end_at_ai = extract_ai_time_window(
+                        structured_payload,
+                        norm_item.get("title") or ""
+                    )
 
                     # 자격요건/세부태그 결과
-                    qualification_ai = structured_info_map.get(item_hash, {})
-                    if not isinstance(qualification_ai, dict):
-                        qualification_ai = {}
+                    qualification_ai = structured_payload
 
                     detailed_hashtags = detailed_hashtags_map.get(item_hash, [])
                     if not isinstance(detailed_hashtags, list):

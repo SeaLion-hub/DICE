@@ -1,5 +1,23 @@
 import re
 import datetime
+from datetime import datetime as dt_datetime, timezone, timedelta
+from typing import Any, Dict, Optional, Tuple
+
+KST = timezone(timedelta(hours=9))
+START_KEYWORDS = ["시작", "start", "개시", "개강", "오픈", "open", "모집 시작", "접수 시작"]
+END_KEYWORDS = [
+    "마감",
+    "deadline",
+    "종료",
+    "until",
+    "마감일",
+    "마감기한",
+    "접수 마감",
+    "마지막",
+    "due",
+    "마감 시한",
+]
+
 
 def normalize_datetime_for_calendar(key_date_text: str, notice_title: str) -> dict | None:
     """
@@ -100,3 +118,90 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str) -> di
         # 2월 30일 등 잘못된 날짜 파싱 시
         print(f"Error creating datetime for text '{key_date_text}': {e}")
         return None
+
+
+def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime.datetime]:
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        parsed = dt_datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=KST)
+        return parsed.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _parse_freetext_datetime(text: Optional[str], title: str) -> Optional[datetime.datetime]:
+    if not text or not isinstance(text, str):
+        return None
+    calendar_event = normalize_datetime_for_calendar(text, title)
+    if not calendar_event:
+        return None
+    start_time = calendar_event.get("start_time")
+    if not start_time:
+        return None
+    try:
+        naive = dt_datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
+        aware = naive.replace(tzinfo=KST)
+        return aware.astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title: str) -> Tuple[Optional[datetime.datetime], Optional[datetime.datetime]]:
+    if not isinstance(structured_info, dict):
+        return (None, None)
+
+    start_at = None
+    end_at = None
+
+    def classify_and_assign(type_label: Optional[str], date_text: Optional[str], iso_value: Optional[str] = None):
+        nonlocal start_at, end_at
+        candidate = _parse_iso_datetime(iso_value) or _parse_freetext_datetime(date_text, notice_title)
+        if not candidate:
+            return
+
+        label = (type_label or "").lower()
+        text_lower = (date_text or "").lower()
+
+        is_end = any(keyword in label for keyword in END_KEYWORDS) or any(keyword in text_lower for keyword in END_KEYWORDS)
+        is_start = any(keyword in label for keyword in START_KEYWORDS) or any(keyword in text_lower for keyword in START_KEYWORDS)
+
+        if is_end and not is_start:
+            if end_at is None or candidate > end_at:
+                end_at = candidate
+            return
+
+        if is_start and not is_end:
+            if start_at is None or candidate < start_at:
+                start_at = candidate
+            return
+
+        if start_at is None:
+            start_at = candidate
+        elif end_at is None or candidate > end_at:
+            end_at = candidate
+
+    key_dates = []
+    if isinstance(structured_info.get("key_dates"), list):
+        key_dates.extend(structured_info["key_dates"])
+    if isinstance(structured_info.get("keyDates"), list):
+        key_dates.extend(structured_info["keyDates"])
+
+    for entry in key_dates:
+        if not isinstance(entry, dict):
+            continue
+        classify_and_assign(
+            entry.get("key_date_type") or entry.get("type") or entry.get("label") or entry.get("type_label"),
+            entry.get("key_date") or entry.get("value") or entry.get("text"),
+            entry.get("iso") or entry.get("key_date_iso"),
+        )
+
+    classify_and_assign(
+        structured_info.get("key_date_type") or structured_info.get("keyDateType"),
+        structured_info.get("key_date") or structured_info.get("keyDate"),
+        structured_info.get("key_date_iso") or structured_info.get("keyDateIso"),
+    )
+
+    return (start_at, end_at)

@@ -205,15 +205,27 @@ UPSERT_SQL = """
     INSERT INTO notices (
         college_key, title, url, body_html, body_text,
         published_at, source_site, content_hash,
-        category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
+        category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai, detailed_hashtags,
         search_vector
     ) VALUES (
         %(college_key)s, %(title)s, %(url)s,
         %(body_html)s, %(body_text)s, %(published_at)s,
         %(source_site)s, %(content_hash)s,
-        %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s,
+        %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s, %(detailed_hashtags)s,
         setweight(to_tsvector('simple', coalesce(%(title)s, '')), 'A') ||
-        setweight(to_tsvector('simple', coalesce(array_to_string(%(hashtags_ai)s, ' '), '')), 'B') ||
+        setweight(
+            to_tsvector(
+                'simple',
+                array_to_string(
+                    array_cat(
+                        COALESCE(%(hashtags_ai)s, ARRAY[]::text[]),
+                        COALESCE(%(detailed_hashtags)s, ARRAY[]::text[])
+                    ),
+                    ' '
+                )
+            ),
+            'B'
+        ) ||
         setweight(to_tsvector('simple', coalesce(%(body_text)s, '')), 'C')
     )
     ON CONFLICT (content_hash)
@@ -231,7 +243,19 @@ UPSERT_SQL = """
         detailed_hashtags = EXCLUDED.detailed_hashtags,
         updated_at = CURRENT_TIMESTAMP,
         search_vector = setweight(to_tsvector('simple', coalesce(EXCLUDED.title, '')), 'A') ||
-                        setweight(to_tsvector('simple', coalesce(array_to_string(EXCLUDED.hashtags_ai, ' '), '')), 'B') ||
+                        setweight(
+                            to_tsvector(
+                                'simple',
+                                array_to_string(
+                                    array_cat(
+                                        COALESCE(EXCLUDED.hashtags_ai, ARRAY[]::text[]),
+                                        COALESCE(EXCLUDED.detailed_hashtags, ARRAY[]::text[])
+                                    ),
+                                    ' '
+                                )
+                            ),
+                            'B'
+                        ) ||
                         setweight(to_tsvector('simple', coalesce(EXCLUDED.body_text, '')), 'C')
 """
 
