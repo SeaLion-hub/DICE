@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>DICE 관리자 - 본문 수정</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 2em auto; background-color: #f4f4f9; color: #333; max-width: 1200px; }
+        h1 { color: #003876; border-bottom: 2px solid #003876; padding-bottom: 10px; }
+        h2 { margin-top: 30px; }
+        a { color: #003876; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        
+        /* 목록 뷰 */
+        #list-view { display: none; }
+        table { width: 100%; border-collapse: collapse; background-color: #fff; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-top: 20px; }
+        th, td { padding: 12px 15px; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+        th { background-color: #003876; color: white; }
+        tr:nth-child(even) { background-color: #f9f9f9; }
+        td:first-child { width: 10%; }
+        td:nth-child(2) { width: 75%; }
+        td:nth-child(3) { width: 15%; text-align: center; }
+        
+        /* 편집 뷰 */
+        #edit-view { display: none; }
+        #body-editor {
+            width: 98%;
+            height: 60vh; /* 화면 높이의 60% */
+            margin-top: 15px;
+            padding: 10px;
+            font-size: 14px;
+            line-height: 1.6;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        button { 
+            background-color: #28a745; color: white; border: none; 
+            padding: 10px 15px; border-radius: 4px; cursor: pointer; 
+            font-size: 16px; margin-top: 10px;
+        }
+        button:hover { background-color: #218838; }
+        button:disabled { background-color: #ccc; }
+        
+        #save-status { margin-left: 15px; font-weight: bold; }
+        #save-status.success { color: #28a745; }
+        #save-status.error { color: #dc3545; }
+        
+        .action-links a {
+            display: inline-block;
+            margin-right: 20px;
+            font-size: 1.1em;
+            background-color: #007bff;
+            color: white;
+            padding: 8px 12px;
+            border-radius: 4px;
+        }
+         .action-links a.back-link { background-color: #6c757d; }
+         
+        #loading { font-weight: bold; color: #d9534f; }
+    </style>
+</head>
+<body>
+    <h1>DICE 관리자 - 공지사항 본문(body_text) 수정</h1>
+    <p id="loading">로딩 중...</p>
+
+    <div id="list-view">
+        <h2><a href="/admin/dashboard_compare">➡️ 지원자격/적합도 테스트 페이지로 이동</a></h2>
+        <h2><a href="/admin/dashboard_hashtags">➡️ 세부 해시태그 관리 페이지로 이동</a></h2>
+        
+        <table id="notices-table">
+            <thead>
+                <tr>
+                    <th>ID</th>
+                    <th>제목 (클릭하여 수정)</th>
+                    <th>원본 링크</th>
+                </tr>
+            </thead>
+            <tbody id="notices-body">
+            </tbody>
+        </table>
+    </div>
+    
+    <div id="edit-view">
+        <div class="action-links">
+            <a href="/admin/dashboard_body" class="back-link">⬅️ 목록으로 돌아가기</a>
+            <a id="edit-url" href="#" target="_blank">🌐 원본 URL 열기</a>
+        </div>
+        
+        <h2 id="edit-title"></h2>
+        
+        <textarea id="body-editor" placeholder="본문 내용 로딩 중..."></textarea>
+        
+        <button id="save-button" onclick="saveBodyText()">저장</button>
+        <span id="save-status"></span>
+    </div>
+
+    <script>
+        let currentNoticeId = null;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const urlParams = new URLSearchParams(window.location.search);
+            currentNoticeId = urlParams.get('id'); // (UUID 문자열)
+
+            if (currentNoticeId) {
+                loadEditView(currentNoticeId);
+            } else {
+                loadListView();
+            }
+        });
+
+        // 1. 목록 뷰 로드
+        async function loadListView() {
+            // ... (변경 없음) ...
+            document.getElementById('list-view').style.display = 'block';
+            const loadingEl = document.getElementById('loading');
+            loadingEl.textContent = '최신 공지 1000개 로딩 중...';
+            
+            try {
+                const response = await fetch('/admin/api/notices?limit=1000&sort_by=recent');
+                if (!response.ok) throw new Error('Failed to fetch notices');
+                
+                const data = await response.json();
+                const tbody = document.getElementById('notices-body');
+                tbody.innerHTML = ''; 
+
+                data.items.forEach(notice => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${notice.id}</td>
+                        <td>
+                            <a href="/admin/dashboard_body?id=${notice.id}" title="ID: ${notice.id} 수정">
+                                ${escapeHTML(notice.title)}
+                            </a>
+                        </td>
+                        <td>
+                            <a href="${escapeHTML(notice.url)}" target="_blank">열기</a>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+                loadingEl.textContent = `공지 ${data.items.length}개 로드 완료.`;
+
+            } catch (error) {
+                console.error('Error loading notices:', error);
+                loadingEl.textContent = '공지 로드 실패.';
+            }
+        }
+
+        // 2. 편집 뷰 로드
+        async function loadEditView(noticeId) {
+            // ... (변경 없음) ...
+            document.getElementById('edit-view').style.display = 'block';
+            const loadingEl = document.getElementById('loading');
+            loadingEl.textContent = `공지 ID: ${noticeId} 본문 로딩 중...`;
+            
+            try {
+                const response = await fetch(`/admin/api/notice-detail/${noticeId}`);
+                if (!response.ok) throw new Error('Failed to fetch notice detail');
+                
+                const data = await response.json();
+                
+                document.getElementById('edit-title').textContent = data.title || '제목 없음';
+                document.getElementById('edit-url').href = data.url || '#';
+                // (백엔드에서 data.body_text를 ''로 처리해 주므로 || ''가 없어도 되지만, 안전을 위해 유지)
+                document.getElementById('body-editor').value = data.body_text || '';
+                
+                loadingEl.style.display = 'none';
+
+            } catch (error) {
+                console.error('Error loading notice detail:', error);
+                loadingEl.textContent = '공지 상세 정보 로드 실패.';
+                document.getElementById('body-editor').value = `오류: ${error.message}`;
+            }
+        }
+        
+        // 3. 본문 저장
+        async function saveBodyText() {
+            if (!currentNoticeId) return;
+            
+            const button = document.getElementById('save-button');
+            const statusEl = document.getElementById('save-status');
+            const newBodyText = document.getElementById('body-editor').value;
+            
+            button.disabled = true;
+            statusEl.textContent = '저장 중...';
+            statusEl.className = 'save-status';
+
+            try {
+                const response = await fetch('/admin/api/update-body', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        // [수정] parseInt() 제거. UUID 문자열을 그대로 전송합니다.
+                        notice_id: currentNoticeId, 
+                        body_text: newBodyText
+                    })
+                });
+                
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || '저장 실패');
+                }
+
+                const data = await response.json();
+                
+                if (data.status === 'success') {
+                    statusEl.textContent = '✅ 성공적으로 저장되었습니다!';
+                    statusEl.className = 'save-status success';
+                } else {
+                    throw new Error('저장 응답이 올바르지 않습니다.');
+                }
+                
+            } catch (error) {
+                console.error('Error saving body text:', error);
+                statusEl.textContent = `❌ 오류: ${error.message}`;
+                statusEl.className = 'save-status error';
+            } finally {
+                button.disabled = false;
+                // 3초 후에 메시지 지우기
+                setTimeout(() => { statusEl.textContent = ''; }, 3000);
+            }
+        }
+
+        // (Helper) HTML 태그 이스케이프
+        function escapeHTML(str) {
+            // ... (변경 없음) ...
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>"']/g, function(m) {
+                return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m];
+            });
+        }
+    </script>
+</body>
+</html>

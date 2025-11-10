@@ -388,6 +388,26 @@ async def update_profile(
                             detail="키워드를 최소 1개 이상 선택해주세요.",
                         )
                     merged_lang_scores = req.language_scores if req.language_scores is not None else current_profile.get("language_scores")
+                    merged_military_service = (
+                        req.military_service
+                        if req.military_service is not None
+                        else current_profile.get("military_service")
+                    )
+                    merged_income_bracket = (
+                        req.income_bracket
+                        if req.income_bracket is not None
+                        else current_profile.get("income_bracket")
+                    )
+                    merged_gpa = (
+                        req.gpa
+                        if req.gpa is not None
+                        else current_profile.get("gpa")
+                    )
+                    merged_college = (
+                        req.college
+                        if req.college is not None
+                        else current_profile.get("college")
+                    )
 
                     # 2-A. 업데이트 (9개 필드 모두 반영)
                     cur.execute(
@@ -415,12 +435,12 @@ async def update_profile(
                             req.gender,
                             req.age,
                             req.major,
-                            req.college,
+                            merged_college,
                             req.grade,
                             merged_keywords,
-                            req.military_service,
-                            req.income_bracket,
-                            req.gpa,
+                            merged_military_service,
+                            merged_income_bracket,
+                            merged_gpa,
                             Json(merged_lang_scores or {}),
                             user_id,
                         )
