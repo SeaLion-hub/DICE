@@ -320,6 +320,7 @@ def list_notices(
     my: bool = Query(False, description="내 키워드와 일치하는 공지만 보기 (인증 필요)"),
     count: bool = Query(True, description="전체 카운트 포함 여부 (false로 설정 시 성능 향상)"),
     no_cache: bool = Query(False, description="캐시 무시 (디버그용)"),
+    hashtags: List[str] = Query(default_factory=list, description="필터링할 해시태그(대분류/세부 키워드) 목록"),
 ):
     """
     공지사항 목록 조회 - 고급 검색 기능 포함
@@ -332,11 +333,28 @@ def list_notices(
 
     # 캐시 키 생성 (my=true는 캐시 안 함)
     cache_key = None
+    processed_hashtags: List[str] = []
+    for raw in hashtags:
+        if not isinstance(raw, str):
+            continue
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        processed_hashtags.append(cleaned)
+        stripped = cleaned.lstrip("#")
+        if stripped and stripped != cleaned:
+            processed_hashtags.append(stripped)
+        if not cleaned.startswith("#") and stripped:
+            processed_hashtags.append(f"#{stripped}")
+
+    hashtags = list(dict.fromkeys(processed_hashtags))
+
     if not no_cache and not my:
         cache_key_parts = [
             f"notices:v3-hybrid", f"c={college or 'all'}", f"q={q or ''}", f"sm={search_mode}",
             f"op={op}", f"r={rank}", f"df={date_from or ''}", f"dt={date_to or ''}",
-            f"s={sort}", f"l={limit}", f"o={offset}", f"cnt={count}"
+            f"s={sort}", f"l={limit}", f"o={offset}", f"cnt={count}",
+            f"hashtags={','.join(sorted(hashtags)) or 'none'}"
         ]
         cache_key = ":".join(cache_key_parts)
         cached_response = cache_get(cache_key)
@@ -388,6 +406,13 @@ def list_notices(
     if college and college != "all":
         where_clauses.append("college_key = %(college)s")
         params["college"] = college
+
+    if hashtags:
+        params["filter_hashtags"] = hashtags
+        where_clauses.append(
+            "((coalesce(hashtags_ai, ARRAY[]::text[]) && %(filter_hashtags)s::text[]) "
+            "OR (coalesce(detailed_hashtags, ARRAY[]::text[]) && %(filter_hashtags)s::text[]))"
+        )
 
     if date_from:
         try:
