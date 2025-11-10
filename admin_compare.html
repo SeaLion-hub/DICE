@@ -74,7 +74,8 @@
 </head>
 <body>
     <h1>DICE 관리자 - 지원자격 추출 및 적합도 테스트</h1>
-    <h2><a href="/admin/dashboard_hashtags">⬅️ 세부 해시태그 관리 페이지로 이동</a></h2>
+    <h2><a href="/admin/dashboard_hashtags">⬅️ 세부 해시태그 관리 페이지으로 이동</a></h2>
+    <h2><a href="/admin/dashboard_body">➡️ 본문 수정 페이지로 이동</a></h2>
     <p id="loading">공지사항 목록 로딩 중...</p>
 
     <table id="notices-table">
@@ -124,7 +125,8 @@
         // 1. 공지사항 목록 로드
         async function loadNotices() {
             try {
-                const response = await fetch('/admin/api/notices?limit=200'); 
+                // [수정] limit=200 -> limit=1000 로 변경 (최신순으로 1000개 로드)
+                const response = await fetch('/admin/api/notices?limit=1000&sort_by=recent');
                 if (!response.ok) throw new Error('Failed to fetch notices');
                 
                 const data = await response.json();
@@ -132,7 +134,8 @@
                 tbody.innerHTML = ''; 
 
                 if (data.items.length === 0) {
-                     document.getElementById('loading').textContent = '관련 공지가 없습니다. (#일반 제외)';
+                     // [수정] 문구 변경
+                     document.getElementById('loading').textContent = '최근 공지가 없습니다. (#일반 제외)';
                      return;
                 }
 

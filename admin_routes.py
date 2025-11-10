@@ -1,27 +1,27 @@
 # admin_routes.py
 import logging
-import json # [중요] JSON 문자열 변환을 위해 임포트
-from fastapi import APIRouter, HTTPException, status, Depends
+import json 
+from fastapi import APIRouter, HTTPException, status, Depends, Query 
 from fastapi.responses import FileResponse
 from psycopg2.extras import RealDictCursor
 from db_pool import get_conn
-import os # FileResponse 경로용
+from uuid import UUID
+import os 
+from pydantic import BaseModel # [신규] API 요청 본문을 위한 임포트
 
 # [수정] 3가지 AI/로직 함수 모두 임포트
 try:
     from ai_processor import extract_detailed_hashtags, extract_structured_info
     from comparison_logic import check_suitability
 except ImportError:
-    # 임시방편 (실제로는 각 .py 파일에 있어야 함)
-    def extract_detailed_hashtags(title: str, body_text: str, main_category: str) -> list[str]:
-        logging.warning("Using mock extract_detailed_hashtags function!")
-        if main_category == "#취업": return ["#임시_채용", "#임시_조교"]
+    # ... (기존 mock 함수들) ...
+    logging.warning("Using mock extract_detailed_hashtags function!")
+    def extract_detailed_hashtags(title: str, body_text: str, main_categories: list[str]) -> list[str]:
+        if "#취업" in main_categories: return ["#임시_채용", "#임시_조교"]
         return ["#임시태그"]
-
     def extract_structured_info(title: str, body: str, category: str) -> dict:
         logging.warning("Using mock extract_structured_info function!")
         return {"error": "mock function", "qualifications": {"gpa_min": "3.0"}}
-    
     def check_suitability(user_profile: dict, notice_json: dict) -> dict:
          logging.warning("Using mock check_suitability function!")
          return {"eligibility": "BORDERLINE", "match_percentage": 50.0}
@@ -30,13 +30,14 @@ except ImportError:
 logger = logging.getLogger("dice-api.admin")
 router = APIRouter(prefix="/admin", tags=["admin"])
 
-# [수정] 2개의 HTML 파일 경로 설정
+# [수정] 3개의 HTML 파일 경로 설정
 current_dir = os.path.dirname(os.path.abspath(__file__))
 ADMIN_HASHTAG_HTML_PATH = os.path.join(current_dir, "admin_hashtags.html")
 ADMIN_COMPARE_HTML_PATH = os.path.join(current_dir, "admin_compare.html")
+ADMIN_BODY_HTML_PATH = os.path.join(current_dir, "admin_body.html") # [신규] 본문 수정 HTML
 
 
-# 1. [신규] 세부 해시태그 관리자 페이지 서빙
+# 1. 세부 해시태그 관리자 페이지
 @router.get("/dashboard_hashtags", response_class=FileResponse)
 async def get_admin_hashtag_dashboard():
     """관리자용 세부 해시태그 추출 대시보드 HTML을 반환합니다."""
@@ -45,7 +46,7 @@ async def get_admin_hashtag_dashboard():
         raise HTTPException(status_code=404, detail="Admin dashboard (hashtags) HTML not found.")
     return FileResponse(ADMIN_HASHTAG_HTML_PATH)
 
-# 2. [신규] 지원자격/비교 관리자 페이지 서빙
+# 2. 지원자격/비교 관리자 페이지
 @router.get("/dashboard_compare", response_class=FileResponse)
 async def get_admin_compare_dashboard():
     """관리자용 지원자격 추출 및 비교 테스트 대시보드 HTML을 반환합니다."""
@@ -54,13 +55,42 @@ async def get_admin_compare_dashboard():
         raise HTTPException(status_code=404, detail="Admin dashboard (compare) HTML not found.")
     return FileResponse(ADMIN_COMPARE_HTML_PATH)
 
+# 3. [신규] 본문 수정 관리자 페이지
+@router.get("/dashboard_body", response_class=FileResponse)
+async def get_admin_body_dashboard():
+    """관리자용 공지사항 본문(body_text) 수정 대시보드 HTML을 반환합니다."""
+    if not os.path.exists(ADMIN_BODY_HTML_PATH):
+        logger.error(f"Admin HTML file not found at: {ADMIN_BODY_HTML_PATH}")
+        raise HTTPException(status_code=404, detail="Admin dashboard (body) HTML not found.")
+    return FileResponse(ADMIN_BODY_HTML_PATH)
 
-# 3. 공지사항 목록 API - [수정됨: JSON 문자열을 dict로 파싱]
+
+# 4. 공지사항 목록 API (기존)
 @router.get("/api/notices")
-async def get_notices_for_admin(limit: int = 100, offset: int = 0):
-    """관리자 페이지용 공지사항 목록 (AI 추출 및 비교에 필요한 모든 필드 포함)"""
+async def get_notices_for_admin(
+    limit: int = 100, 
+    offset: int = 0,
+    sort_by: str = Query("recent", description="Sort order: 'missing_tags', 'missing_quals', 'recent'")
+):
+    # ... (기존 /api/notices 로직과 동일) ...
+    order_sql = ""
+    filter_sql = "" 
+    limit_sql = "LIMIT %s OFFSET %s" 
+    params = [] 
+
+    if sort_by == "missing_tags":
+        filter_sql = "AND (n.detailed_hashtags IS NULL OR cardinality(n.detailed_hashtags) = 0)"
+        order_sql = "ORDER BY n.created_at DESC"
+        limit_sql = "" 
+        
+    elif sort_by == "missing_quals":
+        order_sql = "ORDER BY (n.qualification_ai IS NULL OR n.qualification_ai IN ('', '{}', 'null', '[]')) DESC, n.created_at DESC"
     
-    query = """
+    else: # Default "recent"
+        order_sql = "ORDER BY n.created_at DESC"
+
+    # [수정] 쿼리에 {filter_sql}, {limit_sql} 변수 사용
+    query = f"""
     SELECT 
         n.id,
         COALESCE(c.name, 'N/A') as college_name,
@@ -68,27 +98,30 @@ async def get_notices_for_admin(limit: int = 100, offset: int = 0):
         n.url,
         n.category_ai,
         n.detailed_hashtags,
-        n.qualification_ai as ai_extracted_json, -- (이것은 DB에서 TEXT/VARCHAR일 수 있음)
+        n.qualification_ai as ai_extracted_json,
         n.hashtags_ai,
         n.created_at,
         n.start_at_ai,
         n.end_at_ai
+        -- [참고] 이 목록 API는 용량 문제로 body_text를 가져오지 않습니다.
     FROM notices n
     LEFT JOIN colleges c ON n.college_key = c.key
-    WHERE n.category_ai IS NOT NULL AND n.category_ai != '#일반'
-      AND n.body_text IS NOT NULL AND n.body_text != ''
-    ORDER BY n.created_at DESC
-    LIMIT %s OFFSET %s;
+    WHERE n.hashtags_ai != ARRAY['#일반']
+    {filter_sql} 
+    {order_sql}
+    {limit_sql};
     """
+    
+    if limit_sql:
+        params.extend([limit, offset])
+
     try:
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(query, (limit, offset))
+                cur.execute(query, tuple(params)) 
                 notices = cur.fetchall()
         
-        # [수정] DB에서 가져온 데이터를 프론트엔드로 보내기 전 처리
         for notice in notices:
-            # 1. 날짜 변환
             if notice.get('created_at'):
                 notice['created_at'] = notice['created_at'].isoformat()
             if notice.get('start_at_ai'):
@@ -96,41 +129,94 @@ async def get_notices_for_admin(limit: int = 100, offset: int = 0):
             if notice.get('end_at_ai'):
                 notice['end_at_ai'] = notice['end_at_ai'].isoformat()
             
-            # 2. [FIX] JSON 문자열을 dict(JSON 객체)로 파싱
             qual_data = notice.get('ai_extracted_json')
             if qual_data and isinstance(qual_data, str):
                 try:
                     notice['ai_extracted_json'] = json.loads(qual_data)
                 except json.JSONDecodeError:
-                    # 만약 DB에 저장된 문자열이 깨진 JSON이라면 오류 객체를 보냄
                     notice['ai_extracted_json'] = {"error": "Failed to parse saved JSON string"}
             elif not qual_data:
-                notice['ai_extracted_json'] = None # 명시적으로 null
-            # (이미 dict/jsonb 타입이면 그대로 둠)
-
+                notice['ai_extracted_json'] = None 
+            
         return {"items": notices}
     except Exception as e:
         logger.error(f"Admin API Error fetching notices: {e}")
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
 
-# 4. 세부 해시태그 추출 API (변경 없음)
+# 5. [수정] 공지사항 상세 API (본문 수정용)
+@router.get("/api/notice-detail/{notice_id}")
+async def get_notice_detail_for_admin(notice_id: UUID): # (FastAPI는 UUID로 검증)
+    """(본문 수정용) 단일 공지사항의 전체 본문(body_text)을 가져옵니다."""
+    query = "SELECT id, title, url, body_text FROM notices WHERE id = %s"
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # [수정] DB 드라이버에 전달 시 str()로 변환
+                cur.execute(query, (str(notice_id),))
+                notice = cur.fetchone()
+        if not notice:
+            raise HTTPException(status_code=404, detail="Notice not found")
+        
+        if notice['body_text'] is None:
+            notice['body_text'] = ''
+            
+        return notice
+    except Exception as e:
+        logger.error(f"Admin API Error fetching notice detail {notice_id}: {e}", exc_info=False) # exc_info=False로 변경 (로그 단순화)
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+
+
+# 6. [수정] 본문 업데이트 API
+class BodyUpdateRequest(BaseModel):
+    notice_id: UUID # (FastAPI는 UUID로 검증)
+    body_text: str
+
+@router.post("/api/update-body")
+async def api_update_body_text(payload: BodyUpdateRequest):
+    """(본문 수정용) 공지사항의 body_text를 수동으로 업데이트합니다."""
+    query = "UPDATE notices SET body_text = %s, updated_at = now() WHERE id = %s"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                # [수정] DB 드라이버에 전달 시 str()로 변환
+                cur.execute(query, (payload.body_text, str(payload.notice_id)))
+                conn.commit()
+        
+        if cur.rowcount == 0:
+             raise HTTPException(status_code=404, detail="Notice not found or no changes made")
+        
+        logger.info(f"Admin: Successfully updated body_text for notice {payload.notice_id}")
+        return {"status": "success", "notice_id": str(payload.notice_id)} # 응답도 str로
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Admin API Error updating body_text for {payload.notice_id}: {e}", exc_info=False) # exc_info=False로 변경
+        raise HTTPException(status_code=500, detail=f"Database error: {e}")
+# --- (이하 기존 API: 7. 해시태그, 8. 지원자격, 9. 비교 API) ---
+
+# 7. 세부 해시태그 추출 API
 @router.post("/api/extract-detailed-hashtags")
 async def api_extract_detailed_hashtags(payload: dict):
+    # ... (기존 코드) ...
     notice_id = payload.get("notice_id")
-    main_category = payload.get("main_category")
-    if not notice_id or not main_category:
-        raise HTTPException(status_code=400, detail="notice_id and main_category required")
+    main_categories = payload.get("main_categories") 
+    if not notice_id or not main_categories or not isinstance(main_categories, list):
+        raise HTTPException(status_code=400, detail="notice_id and main_categories (as a list) required")
+    # ... (기존 로직) ...
     try:
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT title, body_text FROM notices WHERE id = %s", (notice_id,))
                 row = cur.fetchone()
-        if not row or not row.get("body_text"):
-            raise HTTPException(status_code=404, detail="Notice body not found or empty")
-        body_text = row["body_text"]
-        title = row["title"]
-        detailed_hashtags = extract_detailed_hashtags(title, body_text, main_category)
+        if not row:
+            raise HTTPException(status_code=404, detail="Notice not found")
+        body_text = row.get("body_text") or ""
+        title = row.get("title") or ""
+        if not title and not body_text:
+             raise HTTPException(status_code=404, detail="Notice title and body are both empty")
+        detailed_hashtags = extract_detailed_hashtags(title, body_text, main_categories)
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -147,95 +233,63 @@ async def api_extract_detailed_hashtags(payload: dict):
         raise HTTPException(status_code=500, detail=f"AI processing error: {e}")
 
 
-# 5. 지원자격(JSON) 추출 API - [수정됨: dict를 JSON 문자열로 변환하여 저장]
+# 8. 지원자격(JSON) 추출 API
 @router.post("/api/extract-qualifications")
 async def api_extract_qualifications(payload: dict):
-    """(기능 2) 구조화된 지원자격(JSON)을 AI로 추출하고 DB(TEXT)에 저장"""
+    # ... (기존 코드) ...
     notice_id = payload.get("notice_id")
-    main_category = payload.get("main_category")
-
+    main_category = payload.get("main_category") 
     if not notice_id or not main_category:
         raise HTTPException(status_code=400, detail="notice_id and main_category required")
-
+    # ... (기존 로직) ...
     try:
-        # 1. DB에서 body_text 가져오기
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT title, body_text FROM notices WHERE id = %s", (notice_id,))
                 row = cur.fetchone()
-        
-        if not row or not row.get("body_text"):
-            raise HTTPException(status_code=404, detail="Notice body not found or empty")
-        
-        body_text = row["body_text"]
-        title = row["title"]
-
-        # 2. AI 함수 호출 (결과는 dict)
+        if not row:
+            raise HTTPException(status_code=404, detail="Notice not found")
+        body_text = row.get("body_text") or ""
+        title = row.get("title") or ""
+        if not title and not body_text:
+             raise HTTPException(status_code=404, detail="Notice title and body are both empty")
         qual_json_dict = extract_structured_info(title, body_text, main_category)
-        
-        # 3. AI 결과를 DB에 저장
         with get_conn() as conn:
             with conn.cursor() as cur:
-                
-                # [FIX] dict -> JSON 문자열(string)로 변환
-                # (ensure_ascii=False로 한글 깨짐 방지)
                 qual_json_string = json.dumps(qual_json_dict, ensure_ascii=False)
-                
                 cur.execute(
                     """
                     UPDATE notices 
                     SET qualification_ai = %s, updated_at = now() 
                     WHERE id = %s
                     """,
-                    (qual_json_string, notice_id) # [FIX] 문자열을 전달
+                    (qual_json_string, notice_id) 
                 )
                 conn.commit()
-
         logger.info(f"Admin: Successfully extracted and saved structured qualifications for notice {notice_id}")
-        
-        # [중요] 프론트엔드 호환성을 위해 응답은 dict(JSON 객체) 원본을 반환
         return {"notice_id": notice_id, "ai_extracted_json": qual_json_dict}
-
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"AI extraction (structured) API error for {notice_id}: {e}", exc_info=True)
-        # exc_info=True를 추가하면 "can't adapt type 'dict'" 같은 상세 오류가 로그에 남습니다.
         raise HTTPException(status_code=500, detail=f"AI processing error: {e}")
 
-
-# 6. [신규] 적합도 비교 API - [수정됨: DB 재조회 대신 클라이언트 데이터 사용]
+# 9. 적합도 비교 API
 @router.post("/api/compare-notice")
 async def api_compare_notice(payload: dict):
-    """(기능 3) 클라이언트가 보낸 notice_json과 가상 프로필을 받아 비교 로직 실행"""
-    
-    # [수정] notice_id 대신 notice_json 객체를 받음
+    # ... (기존 코드) ...
     notice_json_from_client = payload.get("notice_json")
     user_profile = payload.get("user_profile")
-
     if not notice_json_from_client or not user_profile:
         raise HTTPException(status_code=400, detail="notice_json and user_profile required")
-
+    # ... (기존 로직) ...
     try:
-        # [수정] DB를 다시 조회하는 대신, 클라이언트가 보낸 데이터를 신뢰
-        
-        # [데이터 정제]
         notice_payload_for_comparison = dict(notice_json_from_client)
-        
-        # 클라이언트가 보낸 데이터에는 'ai_extracted_json' 키에
-        # 이미 파싱된 dict가 들어있음
         ai_data_dict = notice_json_from_client.get('ai_extracted_json') 
-
-        # 파싱된 dict의 키들('qualifications' 등)을 최상위로 병합
         if ai_data_dict and isinstance(ai_data_dict, dict):
             notice_payload_for_comparison.update(ai_data_dict)
-        
-        # comparison_logic은 'qualifications', 'end_at_ai' 등을 모두 포함한
-        # notice_payload_for_comparison 딕셔너리를 입력받음
         comparison_result = check_suitability(user_profile, notice_payload_for_comparison)
-        
         return comparison_result
-
     except HTTPException:
         raise
     except Exception as e:

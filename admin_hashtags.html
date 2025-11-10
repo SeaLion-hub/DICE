@@ -38,6 +38,7 @@
 <body>
     <h1>DICE 관리자 - 세부 해시태그 추출</h1>
     <h2><a href="/admin/dashboard_compare">➡️ 지원자격/적합도 테스트 페이지로 이동</a></h2>
+    <h2><a href="/admin/dashboard_body">➡️ 본문 수정 페이지로 이동</a></h2>
     <p id="loading">공지사항 목록 로딩 중...</p>
     
     <table id="notices-table">
@@ -59,8 +60,8 @@
         // 1. 공지사항 목록 로드
         async function loadNotices() {
             try {
-                // [수정] 공통 API 엔드포인트 사용
-                const response = await fetch('/admin/api/notices?limit=200'); 
+                // [수정] limit=1000 유지
+                const response = await fetch('/admin/api/notices?limit=1000&sort_by=missing_tags'); 
                 if (!response.ok) throw new Error('Failed to fetch notices');
                 
                 const data = await response.json();
@@ -87,13 +88,24 @@
                     } else {
                         savedTagsHtml = `<span class="result-span"></span>`;
                     }
+                    
+                    // [수정] 대분류(hashtags_ai)가 배열(List)이므로 join으로 표시
+                    const mainCategoriesList = notice.hashtags_ai || [];
+                    const mainCategoriesDisplay = mainCategoriesList.join(', ');
+                    
+                    // [수정] 버튼에 data- 속성으로 'main_categories' 리스트(JSON 문자열)를 저장
+                    const mainCategoriesData = escapeHTML(JSON.stringify(mainCategoriesList));
 
                     tr.innerHTML = `
                         <td>${escapeHTML(notice.college_name)}</td>
                         <td><a href="${escapeHTML(notice.url)}" target="_blank" title="${escapeHTML(notice.url)}">${escapeHTML(notice.title)}</a></td>
-                        <td>${escapeHTML(notice.category_ai)}</td>
+                        
+                        <td>${escapeHTML(mainCategoriesDisplay)}</td>
+                        
                         <td id="cell-tag-${notice.id}">
-                            <button style="background-color: ${buttonColor};" onclick="extractTags('${notice.id}', '${notice.category_ai}', this)">
+                            <button style="background-color: ${buttonColor};" 
+                                    data-hashtags-ai="${mainCategoriesData}" 
+                                    onclick="extractTags('${notice.id}', this)">
                                 ${buttonText}
                             </button>
                             ${savedTagsHtml}
@@ -109,23 +121,39 @@
             }
         }
 
-        // 2. 세부 해시태그 추출 및 저장 실행
-        async function extractTags(noticeId, mainCategory, buttonEl) {
+        // 2. [수정] 세부 해시태그 추출 및 저장 실행 (mainCategories 리스트 전달)
+        async function extractTags(noticeId, buttonEl) {
             const cell = buttonEl.closest('td'); 
             const resultSpan = cell.querySelector('.result-span'); 
             
+            // [수정] 버튼의 data- 속성에서 mainCategories 리스트(JSON)를 파싱
+            let mainCategories;
+            try {
+                mainCategories = JSON.parse(buttonEl.dataset.hashtagsAi || '[]');
+            } catch (e) {
+                mainCategories = [];
+            }
+
+            // [신규] mainCategories가 비어있으면 실행 중지
+            if (!mainCategories || mainCategories.length === 0) {
+                resultSpan.textContent = '[오류: 대분류(hashtags_ai)가 비어있어 추출할 수 없습니다.]';
+                resultSpan.className = 'result-span error';
+                return;
+            }
+            
             buttonEl.disabled = true;
             buttonEl.textContent = '추출 중...';
-            resultSpan.textContent = '(AI 추출 중...)';
+            resultSpan.textContent = `(AI 추출 중... ${mainCategories.join(', ')})`;
             resultSpan.className = 'result-span'; 
 
             try {
                 const response = await fetch('/admin/api/extract-detailed-hashtags', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    // [수정] main_category -> main_categories (리스트 전달)
                     body: JSON.stringify({
                         notice_id: noticeId,
-                        main_category: mainCategory
+                        main_categories: mainCategories 
                     })
                 });
 
@@ -161,9 +189,21 @@
         // (Helper) HTML 태그 이스케이프
         function escapeHTML(str) {
             if (str === null || str === undefined) return '';
-            if (typeof str === 'object') str = JSON.stringify(str, null, 2);
+            // [수정] JSON.stringify는 여기서 하면 안 됨. (데이터 속성용 문자열화는 위에서 이미 처리)
+            if (typeof str === 'object') {
+                 // 이스케이프 함수는 문자열만 처리해야 함.
+                 // JSON.stringify(str, null, 2)
+                 // mainCategoriesData를 만들 때 이미 JSON.stringify를 사용했으므로
+                 // 이 함수는 순수 문자열만 받는다고 가정.
+                 // 만약 객체가 들어오면 안전하게 문자열로 변환
+                 try {
+                     str = JSON.stringify(str);
+                 } catch (e) {
+                     str = String(str);
+                 }
+            }
             
-            return str.replace(/[&<>"']/g, function(m) {
+            return String(str).replace(/[&<>"']/g, function(m) {
                 return {
                     '&': '&amp;',
                     '<': '&lt;',
