@@ -404,8 +404,10 @@ def list_notices(
         where_clauses.append("published_at < %(date_to)s")
 
     if my and user_keywords:
-        where_clauses.append("(hashtags_ai && %(user_keywords)s::text[])")
-        params["user_keywords"] = user_keywords
+        if my and user_keywords:
+        # [수정] 사용자의 keywords를 공지의 detailed_hashtags와 비교
+            where_clauses.append("(detailed_hashtags && %(user_keywords)s::text[])") 
+            params["user_keywords"] = user_keywords
 
     # 검색 로직 (FTS + ILIKE 하이브리드)
     if tokens:
