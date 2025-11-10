@@ -667,20 +667,32 @@ def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
     if not row:
         raise HTTPException(status_code=404, detail="notice not found")
 
-    qa = row.get("qualification_ai")
-    if not qa:
-        return {"eligible": False, "reason": "해당 공지에 AI 자격요건 데이터가 없습니다."}
+    qa = row.get("qualification_ai") # qa는 None, str, 또는 dict일 수 있습니다.
 
+    # [수정] 
+    # 'if not qa:' 블록을 제거하고, qa의 타입을 확인하여
+    # check_suitability에 항상 dict를 전달하도록 보장합니다.
+    
+    notice_data_for_check = {} # 기본값 = 빈 딕셔너리 (정보성 공지 처리용)
+    
     if isinstance(qa, str):
         try:
-            qa = json.loads(qa)
+            # 문자열일 경우 JSON 파싱 시도
+            parsed_json = json.loads(qa)
+            if isinstance(parsed_json, dict):
+                notice_data_for_check = parsed_json
         except Exception:
-            qa = {}
-    # ... (main.py)
+            pass # 파싱 실패 시 빈 딕셔너리 유지
+    elif isinstance(qa, dict):
+        # 이미 딕셔너리인 경우 그대로 사용
+        notice_data_for_check = qa
+    # qa가 None인 경우, notice_data_for_check는 기본값 {} 를 유지합니다.
+
     try:
-        # check_suitability가 반환하는 상세 객체를
-        result = check_suitability(profile.model_dump(), qa)
-        # [수정] 가공하지 않고 그대로 반환합니다.
+        # [수정] 가공된 notice_data_for_check를 전달합니다.
+        # qa가 None이었으면 빈 딕셔너리 {}가 전달되어
+        # comparison_logic.py의 "정보성 공지" 로직이 실행됩니다.
+        result = check_suitability(profile.model_dump(), notice_data_for_check)
         return result
     
     except Exception as e:
