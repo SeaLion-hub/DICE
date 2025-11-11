@@ -117,15 +117,15 @@ DEPARTMENT_MAP = {
 
     # 공과대학
     '화공생명공학부': ['공과대학', '이공계열'],
-    '전기전자공학부': ['공과대학', '이공계열', 'IT계열'],
+    '전기전자공학부': ['공과대학', '이공계열', 'IT계열', 'ICT 분야'], 
     '건축공학과': ['공과대학', '이공계열'],
     '도시공학과': ['공과대학', '이공계열', '사회계열'],
     '사회환경시스템공학부': ['공과대학', '이공계열'],
     '기계공학부': ['공과대학', '이공계열'],
     '신소재공학부': ['공과대학', '이공계열'],
-    '산업공학과': ['공과대학', '이공계열', 'IT계열'],
-    '컴퓨터과학과': ['공과대학', '인공지능융합대학', '이공계열', 'IT계열'],
-    '시스템반도체공학과': ['공과대학', '이공계열', 'IT계열'],
+    '산업공학과': ['공과대학', '이공계열', 'IT계열', 'ICT 분야'], 
+    '컴퓨터과학과': ['공과대학', '인공지능융합대학', '이공계열', 'IT계열', 'ICT 분야'], 
+    '시스템반도체공학과': ['공과대학', '이공계열', 'IT계열', 'ICT 분야'], 
 
     # 생명시스템대학 (사용자 예시)
     '시스템생물학과': ['생명시스템대학', '이공계열', '자연계열'],
@@ -133,8 +133,8 @@ DEPARTMENT_MAP = {
     '생명공학과': ['생명시스템대학', '이공계열'],
 
     # 인공지능융합대학
-    '인공지능학과': ['인공지능융합대학', '이공계열', 'IT계열'],
-    '데이터사이언스학과': ['응용통계학과', '인공지능융합대학', '이공계열', 'IT계열'], # 응통과 연관
+    '인공지능학과': ['인공지능융합대학', '이공계열', 'IT계열', 'ICT 분야'], 
+    '데이터사이언스학과': ['응용통계학과', '인공지능융합대학', '이공계열', 'IT계열', 'ICT 분야'], # 응통과 연관
 
     # 신과대학
     '신학과': ['신과대학', '인문계열'],
@@ -182,7 +182,7 @@ DEPARTMENT_MAP = {
     # 언더우드국제대학 (UIC)
     '언더우드학부': ['언더우드국제대학', '인문계열', '사회계열'],
     '융합인문사회계열': ['언더우드국제대학', '인문계열', '사회계열'],
-    '융합과학공학계열': ['언더우드국제대학', '이공계열', 'IT계열'],
+    '융합과학공학계열': ['언더우드국제대학', '이공계열', 'IT계열', 'ICT 분야'], 
 
     # 글로벌인재대학
     '글로벌인재학부': ['글로벌인재대학', '인문계열', '사회계열'],
@@ -420,7 +420,8 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
     
     # [FIX] 애매한 요건(예: "성실한") VERIFY 처리
     if not RE_GRADE_KEYWORDS.search(t):
-        return CheckResult('VERIFY', 'GRADE_VERIFY_AMBIGUOUS', f"학년 요건 확인 필요: {req.text}", req.tag=='required', req.confidence)
+        # [수정 요청] 학년/학기 키워드가 없는 애매한 요건은 '복합 요건'으로 처리
+        return CheckResult('VERIFY', 'GRADE_VERIFY_COMPLEX', f"복합 요건 확인 필요: {req.text}", req.tag=='required', req.confidence)
 
     # [FIX] 복합 요건(예: "9학점 이수자") VERIFY 처리
     if RE_GPA_KEYWORDS.search(t) or RE_DEPT_KEYWORDS.search(t):
@@ -686,7 +687,9 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
 
 
         # 3) "정보성 공지" 판단
-        if not potential_reqs or not any(v not in [None, "N/A", "", "해당 없음"] for v in potential_reqs.values()):
+        # [수정됨] "정보 없음"도 '요건 없음'으로 간주
+        empty_values = [None, "N/A", "", "해당 없음", "정보 없음"]
+        if not potential_reqs or not any(v not in empty_values for v in potential_reqs.values()):
             return {
                 "eligibility": "ELIGIBLE",
                 "suitable": True,
@@ -707,8 +710,9 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
             tag, conf, txt = _infer_tag_and_conf(v)
             if not txt: continue # 빈 문자열은 무시
             
-            # [수정] AI가 추출한 "N/A" 또는 "해당 없음"은 비교할 필요 없음 (무조건 PASS)
-            if txt.strip().lower() in ("n/a", "해당없음", "무관"):
+            # [수정] AI가 추출한 "N/A", "해당 없음", "정보 없음"은 비교할 필요 없음
+            txt_lower = txt.strip().lower()
+            if txt_lower in ("n/a", "해당없음", "무관", "정보 없음"): # [수정됨] "정보 없음" 추가
                 continue 
             
             reqs[k] = Requirement(k, txt, tag, conf)

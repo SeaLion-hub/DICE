@@ -101,15 +101,16 @@
             currentNoticeId = urlParams.get('id'); // (UUID 문자열)
 
             if (currentNoticeId) {
+                // ID가 있으면 "편집 뷰" 로드
                 loadEditView(currentNoticeId);
             } else {
+                // ID가 없으면 "목록 뷰" 로드
                 loadListView();
             }
         });
 
         // 1. 목록 뷰 로드
         async function loadListView() {
-            // ... (변경 없음) ...
             document.getElementById('list-view').style.display = 'block';
             const loadingEl = document.getElementById('loading');
             loadingEl.textContent = '최신 공지 1000개 로딩 중...';
@@ -147,12 +148,12 @@
 
         // 2. 편집 뷰 로드
         async function loadEditView(noticeId) {
-            // ... (변경 없음) ...
             document.getElementById('edit-view').style.display = 'block';
             const loadingEl = document.getElementById('loading');
             loadingEl.textContent = `공지 ID: ${noticeId} 본문 로딩 중...`;
             
             try {
+                // 백엔드에서 본문 텍스트를 요청
                 const response = await fetch(`/admin/api/notice-detail/${noticeId}`);
                 if (!response.ok) throw new Error('Failed to fetch notice detail');
                 
@@ -160,7 +161,6 @@
                 
                 document.getElementById('edit-title').textContent = data.title || '제목 없음';
                 document.getElementById('edit-url').href = data.url || '#';
-                // (백엔드에서 data.body_text를 ''로 처리해 주므로 || ''가 없어도 되지만, 안전을 위해 유지)
                 document.getElementById('body-editor').value = data.body_text || '';
                 
                 loadingEl.style.display = 'none';
@@ -185,11 +185,11 @@
             statusEl.className = 'save-status';
 
             try {
+                // 백엔드에 수정된 본문을 전송
                 const response = await fetch('/admin/api/update-body', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        // [수정] parseInt() 제거. UUID 문자열을 그대로 전송합니다.
                         notice_id: currentNoticeId, 
                         body_text: newBodyText
                     })
@@ -215,14 +215,12 @@
                 statusEl.className = 'save-status error';
             } finally {
                 button.disabled = false;
-                // 3초 후에 메시지 지우기
                 setTimeout(() => { statusEl.textContent = ''; }, 3000);
             }
         }
 
         // (Helper) HTML 태그 이스케이프
         function escapeHTML(str) {
-            // ... (변경 없음) ...
             if (str === null || str === undefined) return '';
             return String(str).replace(/[&<>"']/g, function(m) {
                 return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m];

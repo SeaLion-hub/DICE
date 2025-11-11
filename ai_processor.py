@@ -1,4 +1,4 @@
-# ai_processor.py (배치 분류 기능 추가)
+# ai_processor.py (배치 분류 기능 추가 + 디버깅 추가)
 import google.generativeai as genai
 import os
 import re
@@ -30,7 +30,7 @@ safety_settings = [
 ]
 
 model = genai.GenerativeModel(
-    model_name=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),
+    model_name=os.getenv("GEMINI_MODEL", "gemini-1.5-flash"), 
     generation_config=generation_config,
     safety_settings=safety_settings,
 )
@@ -97,9 +97,8 @@ SYSTEM_PROMPT_CLASSIFY = """
 4. 2개 이상 해당되면, 가장 중요하다고 생각되는 1개만 선택하여 JSON 배열에 넣습니다.
 """
 
-# --- [수정] 2단계: 추출 프롬프트 매핑 (comparison_logic.py와 키 일치) ---
+# --- [유지] 2단계: 추출 프롬프트 매핑 (comparison_logic.py와 키 일치) ---
 
-# [신규] 모든 프롬프트에 공통으로 적용될 규칙
 QUALIFICATIONS_RULES = """
 [추출 규칙]
 - [comparison_logic.py]와 연동되므로, "qualifications" 내부의 키(key) 이름을 절대 변경하지 마라.
@@ -198,6 +197,62 @@ JSON 출력 (다른 설명 없이 JSON만):
 }}
 ```"""
 
+PROMPT_ACADEMIC = f"""
+당신은 '학사(수강, 졸업, 휴복학 등)' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
+주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+{QUALIFICATIONS_RULES}
+
+[공지 텍스트]
+{{notice_text}}
+[/공지 텍스트]
+
+JSON 출력 (다른 설명 없이 JSON만):
+```json
+{{
+  "target_audience_raw": "[지원 자격 원본 텍스트 요약 (예: '치과대학 휴복학 신청자')]",
+  "qualifications": {{
+    "gpa_min": "[추출된 최소 학점 (없으면 N/A)]",
+    "grade_level": "[대상 학년/학위 (예: '신입생', '졸업예정자', '치과대학 학생')]",
+    "income_status": "[소득 요건 (없으면 N/A)]",
+    "department": "[대상 학과/단과대학 (예: '치과대학', '학과 무관')]",
+    "language_requirements_text": "[어학 요건 (없으면 N/A)]",
+    "military_service": "[병역 요건 (없으면 N/A)]",
+    "gender": "[성별 요건 (없으면 N/A)]",
+    "other": "[기타 자격 (예: '미납도서 없는 자')]"
+  }},
+  "key_date_type": "[날짜 유형 (예: '복학신청 마감일')]",
+  "key_date": "[핵심 날짜 (예: '10/10(금) 17시')]"
+}}
+```"""
+
+PROMPT_EVENT_CONTEST = f"""
+당신은 '행사 또는 공모전' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건(참여 대상)을 추출하는 AI입니다.
+주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
+{QUALIFICATIONS_RULES}
+
+[공지 텍스트]
+{{notice_text}}
+[/공지 텍스트]
+
+JSON 출력 (다른 설명 없이 JSON만):
+```json
+{{
+  "target_audience_raw": "[참여 대상 원본 텍스트 요약 (예: '공과대학 학부생')]",
+  "qualifications": {{
+    "gpa_min": "[추출된 최소 학점 (없으면 N/A)]",
+    "grade_level": "[대상 학년/학위 (예: '학부생', '대학원생')]",
+    "income_status": "[소득 요건 (없으면 N/A)]",
+    "department": "[대상 학과/단과대학 (예: '공과대학', '학과 무관')]",
+    "language_requirements_text": "[어학 요건 (없으면 N/A)]",
+    "military_service": "[병역 요건 (없으면 N/A)]",
+    "gender": "[성별 요건 (없으면 N/A)]",
+    "other": "[기타 자격 (없으면 N/A)]"
+  }},
+  "key_date_type": "[날짜 유형 (예: '신청 마감일', '행사 일시')]",
+  "key_date": "[핵심 날짜 (예: '10/31(금) 17시')]"
+}}
+```"""
+
 PROMPT_SIMPLE_DEFAULT = """
 당신은 '{category_name}' 공지사항에서 '대상'과 '핵심 날짜'를 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 정보를 추출하세요.
@@ -213,24 +268,19 @@ JSON 출력 (다른 설명 없이 JSON만):
 }}
 ```"""
 
-# --- [수정] 추출 프롬프트 매핑 (프로필용) ---
 EXTRACTION_PROMPT_MAP = {
     "#장학": PROMPT_SCHOLARSHIP,
     "#취업": PROMPT_RECRUITMENT,
     "#국제교류": PROMPT_INTERNATIONAL,
-    "#학사": PROMPT_SIMPLE_DEFAULT,
-    "#행사": PROMPT_SIMPLE_DEFAULT,
-    "#공모전/대회": PROMPT_SIMPLE_DEFAULT,
+    "#학사": PROMPT_ACADEMIC,
+    "#행사": PROMPT_EVENT_CONTEST,
+    "#공모전/대회": PROMPT_EVENT_CONTEST,
     "#일반": PROMPT_SIMPLE_DEFAULT,
 }
-# --- 허용된 카테고리 목록 (검증용) ---
 ALLOWED_CATEGORIES = list(EXTRACTION_PROMPT_MAP.keys())
 
 
-# --- [수정] 3단계: 세부 해시태그 추출을 위한 전문 프롬프트 (사용자 제공 버전) ---
-
-# [수정] 모든 세부 프롬프트가 공유하는 기본 지시문 (JSON 반환 형식)
-# (제목과 본문을 모두 분석하도록 복원)
+# --- [유지] 3단계: 세부 해시태그 추출을 위한 전문 프롬프트 ---
 SYSTEM_PROMPT_DETAIL_BASE = """
 너는 주어진 [공지 제목]과 [공지 본문], 그리고 [대분류]를 참고하여, 사용자가 관심 있을 만한 **구체적인 키워드**를 해시태그로 추출하는 AI다.
 
@@ -245,8 +295,6 @@ SYSTEM_PROMPT_DETAIL_BASE = """
 아래는 [대분류]별 세부 추출 가이드라인이다.
 """
 
-# [수정] 각 대분류별로 '세부 추출 가이드라인'을 다르게 설정
-# (동적 키워드 예외는 제거, 문맥 예외는 유지)
 DETAILED_HASHTAG_PROMPT_MAP = {
     "#학사": SYSTEM_PROMPT_DETAIL_BASE + """
 [대분류] #학사
@@ -301,7 +349,7 @@ DETAILED_HASHTAG_PROMPT_MAP = {
 }
 
 
-# --- [공통 함수] API 호출 및 JSON 정리 ---
+# --- [수정] API 호출 및 JSON 정리 (디버깅 추가) ---
 def call_gemini_api(system_prompt, user_prompt, is_json_output=False):
     """
     Helper function to call the Gemini API.
@@ -319,6 +367,9 @@ def call_gemini_api(system_prompt, user_prompt, is_json_output=False):
                 if cleaned_response_text:
                     return json.loads(cleaned_response_text)
                 else:
+                    # [디버깅 추가] JSON 정리에 실패하면 원본 텍스트를 출력
+                    print(f"DEBUG: clean_json_string returned None. Raw API response was:\n---\n{response.text}\n---")
+                    # 기존 오류 메시지는 유지
                     print(f"Error: clean_json_string returned None for response: {response.text}")
                     return None
             except json.JSONDecodeError as e:
@@ -332,7 +383,7 @@ def call_gemini_api(system_prompt, user_prompt, is_json_output=False):
 
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
-        if "429" in str(e):
+        if "429" in str(e): 
             raise e
         return None
 
@@ -447,7 +498,7 @@ def classify_hashtags_from_title_batch(notices_info: List[Dict[str, str]]) -> Di
 
     try:
         batch_response = call_gemini_api(
-            SYSTEM_PROMPT_CLASSIFY_TITLE_BATCH, # [수정] 강화된 프롬프트 사용
+            SYSTEM_PROMPT_CLASSIFY_TITLE_BATCH, 
             user_prompt_json,
             is_json_output=True
         )
@@ -476,7 +527,7 @@ def classify_hashtags_from_title_batch(notices_info: List[Dict[str, str]]) -> Di
 
     except Exception as e:
         print(f"Error during batch classification API call: {e}")
-        if "429" in str(e):
+        if "429" in str(e): 
             raise e
 
     return results
@@ -519,7 +570,7 @@ def extract_structured_info(title: str, body: str, category: str) -> Dict[str, A
     except Exception as e:
         print(f"Error during extraction for '{title[:30]}...': {e}")
         ai_extracted_json = {"error": f"An unexpected error occurred during extraction: {e}"}
-        if "429" in str(e):
+        if "429" in str(e): 
             raise e
 
     return ai_extracted_json if ai_extracted_json else {"error": "Extraction failed"}
@@ -534,29 +585,26 @@ def extract_detailed_hashtags(title: str, body_text: str, main_category: str) ->
     """
     if not main_category:
         return []
-    if not body_text: # 본문이 비어있어도 제목으로 분석해야 하므로 body_text를 빈 문자열로 설정
+    if not body_text: 
         body_text = ""
-    if not title: # 제목이 비어있어도 본문으로 분석해야 하므로 title을 빈 문자열로 설정
+    if not title: 
         title = ""
 
-    # #일반 또는 맵에 없는 카테고리는 세부 추출 안 함 (빈 리스트 반환)
     if main_category not in DETAILED_HASHTAG_PROMPT_MAP:
         print(f"Skipping detailed extraction for '{main_category}' as it has no defined prompt.")
         return []
 
     system_prompt = DETAILED_HASHTAG_PROMPT_MAP[main_category]
     
-    # [유지] 사용자 프롬프트에 제목(title)과 본문(body_text)을 모두 포함
     user_prompt = (
         f"[대분류]\n{main_category}\n\n"
         f"[공지 제목]\n{title}\n\n"
         f"[공지 본문]\n{body_text}\n[/공지 본문]"
     )
     
-    valid_hashtags = [] # 추출된 태그를 담을 리스트
+    valid_hashtags = [] 
 
     try:
-        # call_gemini_api는 이미 JSON 파싱 및 정리를 처리함
         json_response = call_gemini_api(
             system_prompt,
             user_prompt,
@@ -564,37 +612,28 @@ def extract_detailed_hashtags(title: str, body_text: str, main_category: str) ->
         )
 
         if isinstance(json_response, list):
-            # 응답이 문자열 리스트인지 한 번 더 확인
             valid_hashtags = [tag for tag in json_response if isinstance(tag, str) and tag.startswith("#")]
         else:
             print(f"Error: Detailed hashtag response was not a list for category {main_category}. Got: {json_response}")
-            # valid_hashtags는 여전히 빈 리스트 []
 
     except Exception as e:
         print(f"Error during detailed hashtag extraction: {e}")
         if "429" in str(e): 
             raise e
-        # valid_hashtags는 여전히 빈 리스트 []
 
-    # --- [신규 규칙 적용] ---
-    # main_category는 '#일반'이 아님이 보장됨 (위에서 return [] 처리됨)
-    # 따라서, 처리 가능한 카테고리임에도 불구하고 세부 태그가 없다면 #기타 반환
     if not valid_hashtags:
         return ["#기타"]
     else:
-        # 중복 제거 후 반환
         return list(dict.fromkeys(valid_hashtags))
 
 
-# --- [수정] __main__ 테스트 블록 (모든 기능 테스트) ---
+# --- [유지] __main__ 테스트 블록 (모든 기능 테스트) ---
 if __name__ == "__main__":
     
     # --- 1단계: 제목 기반 배치 분류 테스트 (Few-shot으로 강화된 프롬프트) ---
     print("\n===== 1단계: 제목 기반 배치 분류 테스트 (강화 프롬프트) =====")
     notices_info_batch = [
-        # [버그 수정 테스트 1] (교직과정 -> #학사)
         {"id": "music_1", "title": "2026학년도 교직과정 이수예정자 추가 선발 전형 안내", "college_name": "음악대학"},
-        # [버그 수정 테스트 2] (OMR 채점 -> #일반)
         {"id": "social_1", "title": "[학생용] 객관식 OMR 채점 서비스 종료 및 대체 채점 (Bubble Sheet) 안내", "college_name": "사회과학대학"},
         {"id": "n1", "title": "K-NIBRT 취업 특강 및 채용 세미나", "college_name": "약학대학"},
         {"id": "n3", "title": "학사포탈 졸업자가진단 점검 시 참고사항", "college_name": "사회과학대학"},
@@ -607,43 +646,53 @@ if __name__ == "__main__":
     batch_results = classify_hashtags_from_title_batch(notices_info_batch)
     print("배치 분류 결과 (Dict[id, List[tag]]):")
     print(json.dumps(batch_results, indent=2, ensure_ascii=False))
+    
+    
+    # --- 2단계: 구조화된 정보 추출 테스트 (#학사) ---
+    print("\n\n===== 2단계: 구조화된 정보 추출 테스트 (#학사) =====")
+    test_title_academic = "[학부] 2025-2학기 치과대학 휴학·복학 안내"
+    test_body_academic = """
+    2025-2학기 휴학 및 복학신청자는 아래 일정 및 내용을 참고하시기 바라며, 기한 내 휴학/복학원서를 제출해 주시기 바랍니다.
+    2025-1학기 복학신청
+    복학신청 기간: 2025. 7. 14.(월) ~ 8. 11.(월) 까지
+    ... (중략) ...
+    ※ 관련 문의 : 치과대학 사무팀 학생파트 (TEL. 02-2228-3028)
+    """
+    extracted_info = extract_structured_info(test_title_academic, test_body_academic, "#학사")
+    print(f"\n#학사 추출 테스트 (제목: {test_title_academic[:30]}...)")
+    print("-> 추출된 JSON:")
+    print(json.dumps(extracted_info, indent=2, ensure_ascii=False))
 
 
     # --- 3단계: 세부 해시태그 추출 테스트 ---
     print("\n\n===== 3단계: 세부 해시태그 추출 테스트 =====")
     
-    # [테스트 1] (제목에서 #논문 추출 - 제목 분석 ON)
     test_title_contest = "2025 지역사회건강조사 결과 활용 학술논문 공모전"
     test_body_contest = "관리자 2025 06 30 조회수 873"
     tags_contest = extract_detailed_hashtags(test_title_contest, test_body_contest, "#공모전/대회")
     print(f"\n#공모전/대회 테스트 (제목: {test_title_contest[:30]}...)")
-    print(f"-> 결과: {tags_contest}") # 기대: [#논문, #공모전]
+    print(f"-> 결과: {tags_contest}") 
     
-    # [규칙 테스트 2: #학사 예외] (#휴학, #신입생 제외)
-    test_title_academic = "2026학년도 교직과정 이수예정자 추가 선발"
-    test_body_academic = "교직과정 안내. 지원자격: 휴학생 가능, 신입생 제외"
-    tags_academic = extract_detailed_hashtags(test_title_academic, test_body_academic, "#학사")
-    print(f"\n#학사 예외 테스트 (제목: {test_title_academic[:30]}...)")
-    print(f"-> 결과: {tags_academic}") # 기대: [#교직과정] (not #휴학, #신입생)
+    test_title_academic_detail = "2026학년도 교직과정 이수예정자 추가 선발"
+    test_body_academic_detail = "교직과정 안내. 지원자격: 휴학생 가능, 신입생 제외"
+    tags_academic = extract_detailed_hashtags(test_title_academic_detail, test_body_academic_detail, "#학사")
+    print(f"\n#학사 예외 테스트 (제목: {test_title_academic_detail[:30]}...)")
+    print(f"-> 결과: {tags_academic}") 
     
-    # [규칙 테스트 3: #장학 변환] (needbased -> #가계곤란)
     test_title_scholar = "2025-2학기 가계 곤란 장학금 (Need-based) 및 블루버터플라이 시행"
     test_body_scholar = "소득분위 8분위 이하. need based fellowship."
     tags_scholar = extract_detailed_hashtags(test_title_scholar, test_body_scholar, "#장학")
     print(f"\n#장학 변환 테스트 (제목: {test_title_scholar[:30]}...)")
-    print(f"-> 결과: {tags_scholar}") # 기대: [#가계곤란]
+    print(f"-> 결과: {tags_scholar}") 
     
-    # [규칙 테스트 4: #기타 반환] (#학사 목록에 없는 키워드)
     test_title_other = "OMR 채점 서비스 종료 안내"
     test_body_other = "Bubble Sheet 서비스로 대체됩니다."
     tags_other = extract_detailed_hashtags(test_title_other, test_body_other, "#학사")
     print(f"\n#기타 반환 테스트 (제목: {test_title_other[:30]}...)")
-    print(f"-> 결과: {tags_other}") # 기대: [#기타]
+    print(f"-> 결과: {tags_other}") 
     
-    # [규칙 테스트 5: #취업] (제목 분석 ON, 동적 예외 OFF)
     test_title_job = "2025-2학기 일반조교 및 삼성전자 개발 직무 채용"
     test_body_job = "연세대학교 간호대학에서 2025-2학기 일반조교를 채용합니다. 삼성병원 출신 우대."
     tags_job = extract_detailed_hashtags(test_title_job, test_body_job, "#취업")
     print(f"\n#취업 테스트 (제목: {test_title_job[:30]}...)")
-    print(f"-> 결과: {tags_job}") # 기대: [#조교, #채용]
-
+    print(f"-> 결과: {tags_job}")
