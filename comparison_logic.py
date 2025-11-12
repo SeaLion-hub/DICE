@@ -244,7 +244,8 @@ REASON_TEMPLATES = {
 # 4) 정규식(사전 컴파일)
 # =========================
 RE_GPA_NUM = re.compile(r'(\d(?:\.\d{1,2})?)')
-RE_GRADE_RANGE = re.compile(r'(\d)[\s~.~-]+(\d)\s*학기')
+# [수정됨] (?!<\d) 추가: "2025-2학기"가 "5~2학기"로 오탐지되는 것을 방지
+RE_GRADE_RANGE = re.compile(r'(?<!\d)(\d)[\s~.~-]+(\d)\s*학기')
 RE_GRADE_ABOVE = re.compile(r'(\d)\s*학년\s*이상')
 RE_ANY_DEPT_ANYONE = re.compile(r'전\s*(계열|학과)|모든\s*학과|누구나|학과\s*무관')
 RE_OR = re.compile(r'\b(또는|or|OR)\b')
@@ -418,6 +419,10 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
     
     t = req.text.replace(" ", "").lower()
     
+    # [수정됨] '졸업' 관련 요건은 복합 요건으로 VERIFY 처리
+    if '졸업' in t: # "졸업", "졸업예정자", "졸업가능자" 등
+        return CheckResult('VERIFY', 'GRADE_VERIFY_COMPLEX', f"복합 요건 확인 필요 (졸업): {req.text}", req.tag=='required', req.confidence)
+
     # [FIX] 애매한 요건(예: "성실한") VERIFY 처리
     if not RE_GRADE_KEYWORDS.search(t):
         # [수정 요청] 학년/학기 키워드가 없는 애매한 요건은 '복합 요건'으로 처리
@@ -450,20 +455,28 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
         if not (is_2nd or is_3rd):
              pass_all = False
              fail_reasons.append(f"학년 미충족 (요구: 2-3학년 | 현재: {user_semester}학기)")
-    rt = t
+    
+    rt = req.text 
     m = RE_GRADE_RANGE.search(rt)
     if m:
-        min_sem, max_sem = int(m.group(1)), int(m.group(2))
-        if not (min_sem <= user_semester <= max_sem):
-             pass_all = False
-             fail_reasons.append(f"학기 미충족 (요구: {min_sem}~{max_sem}학기 | 현재: {user_semester}학기)")
+        try:
+            min_sem, max_sem = int(m.group(1)), int(m.group(2))
+            if not (min_sem <= user_semester <= max_sem):
+                 pass_all = False
+                 fail_reasons.append(f"학기 미충족 (요구: {min_sem}~{max_sem}학기 | 현재: {user_semester}학기)")
+        except Exception:
+             pass 
+                 
     m2 = RE_GRADE_ABOVE.search(rt)
     if m2:
-        min_grade = int(m2.group(1))
-        min_sem_req = (min_grade - 1) * 2 + 1
-        if user_semester < min_sem_req:
-             pass_all = False
-             fail_reasons.append(f"학년 미충족 (요구: {min_grade}학년 이상 | 현재: {user_semester}학기)")
+        try:
+            min_grade = int(m2.group(1))
+            min_sem_req = (min_grade - 1) * 2 + 1
+            if user_semester < min_sem_req:
+                 pass_all = False
+                 fail_reasons.append(f"학년 미충족 (요구: {min_grade}학년 이상 | 현재: {user_semester}학기)")
+        except Exception:
+            pass
 
     if pass_all:
         return CheckResult('PASS', 'GRADE_PASS', "학년/학기 요건 충족", req.tag=='required', req.confidence)
@@ -551,7 +564,7 @@ def _check_simple_text(user_value: Optional[str], req: Requirement, field_name: 
         return CheckResult('FAIL', 'GENDER_FAIL', "성별 요건 불일치(여성 대상)", req.tag=='required', req.confidence)
     
     # [FIX] 애매한 텍스트는 VERIFY
-    if field_name == 'military_service' and not ('군필' in t or '면제' in t):
+    if field_name == 'military_service' and not ('군필' in t or '면제' in t or '군휴학생' in t): # [수정] '군휴학생'도 통과
          return CheckResult('VERIFY', 'MILITARY_VERIFY_AMBIGUOUS', f"병역 요건 확인 필요: {req.text}", req.tag=='required', req.confidence)
     if field_name == 'gender' and not ('여성' in t or '남성' in t):
          return CheckResult('VERIFY', 'GENDER_VERIFY_AMBIGUOUS', f"성별 요건 확인 필요: {req.text}", req.tag=='required', req.confidence)
@@ -687,7 +700,6 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
 
 
         # 3) "정보성 공지" 판단
-        # [수정됨] "정보 없음"도 '요건 없음'으로 간주
         empty_values = [None, "N/A", "", "해당 없음", "정보 없음"]
         if not potential_reqs or not any(v not in empty_values for v in potential_reqs.values()):
             return {
@@ -710,9 +722,8 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
             tag, conf, txt = _infer_tag_and_conf(v)
             if not txt: continue # 빈 문자열은 무시
             
-            # [수정] AI가 추출한 "N/A", "해당 없음", "정보 없음"은 비교할 필요 없음
             txt_lower = txt.strip().lower()
-            if txt_lower in ("n/a", "해당없음", "무관", "정보 없음"): # [수정됨] "정보 없음" 추가
+            if txt_lower in ("n/a", "해당없음", "무관", "정보 없음"): 
                 continue 
             
             reqs[k] = Requirement(k, txt, tag, conf)
@@ -763,13 +774,12 @@ def check_suitability(user_profile: Dict[str, Any], notice_json: Dict[str, Any])
         human_msgs_set = set() # (reasons_human 생성용)
 
         for r in reasons:
-            # [수정] msg가 없으면 REASON_TEMPLATES에서 한글 찾기
             msg = r.message
             if not msg:
                 msg = REASON_TEMPLATES.get(r.reason_code, r.reason_code)
             
             if r.status == 'PASS':
-                pass_conditions.append(msg) # [수정] 이제 msg가 항상 한글임
+                pass_conditions.append(msg) 
 
             elif r.status == 'FAIL':
                 fail_conditions.append(msg)
