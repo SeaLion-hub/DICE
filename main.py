@@ -202,61 +202,48 @@ def content_hash(college_key: str, title: str, url: str, published_at: Optional[
 
 # UPSERT SQL (search_vector 사용) — summary_ai 제거
 UPSERT_SQL = """
-    INSERT INTO notices (
-        college_key, title, url, body_html, body_text,
-        published_at, source_site, content_hash,
-        category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai, detailed_hashtags,
-        search_vector
-    ) VALUES (
-        %(college_key)s, %(title)s, %(url)s,
-        %(body_html)s, %(body_text)s, %(published_at)s,
-        %(source_site)s, %(content_hash)s,
-        %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s, %(detailed_hashtags)s,
-        setweight(to_tsvector('simple', coalesce(%(title)s, '')), 'A') ||
-        setweight(
-            to_tsvector(
-                'simple',
-                array_to_string(
-                    array_cat(
-                        COALESCE(%(hashtags_ai)s, ARRAY[]::text[]),
-                        COALESCE(%(detailed_hashtags)s, ARRAY[]::text[])
-                    ),
-                    ' '
-                )
-            ),
-            'B'
-        ) ||
-        setweight(to_tsvector('simple', coalesce(%(body_text)s, '')), 'C')
-    )
-    ON CONFLICT (content_hash)
-    DO UPDATE SET
-        title = EXCLUDED.title,
-        url = EXCLUDED.url,
-        body_html = EXCLUDED.body_html,
-        body_text = EXCLUDED.body_text,
-        published_at = EXCLUDED.published_at,
-        category_ai = EXCLUDED.category_ai,
-        start_at_ai = EXCLUDED.start_at_ai,
-        end_at_ai = EXCLUDED.end_at_ai,
-        qualification_ai = EXCLUDED.qualification_ai,
-        hashtags_ai = EXCLUDED.hashtags_ai,
-        detailed_hashtags = EXCLUDED.detailed_hashtags,
-        updated_at = CURRENT_TIMESTAMP,
-        search_vector = setweight(to_tsvector('simple', coalesce(EXCLUDED.title, '')), 'A') ||
-                        setweight(
-                            to_tsvector(
-                                'simple',
-                                array_to_string(
-                                    array_cat(
-                                        COALESCE(EXCLUDED.hashtags_ai, ARRAY[]::text[]),
-                                        COALESCE(EXCLUDED.detailed_hashtags, ARRAY[]::text[])
-                                    ),
-                                    ' '
-                                )
-                            ),
-                            'B'
-                        ) ||
-                        setweight(to_tsvector('simple', coalesce(EXCLUDED.body_text, '')), 'C')
+INSERT INTO notices (
+    college_key, title, url, body_html, body_text, raw_text, -- raw_text 추가
+    published_at, source_site, content_hash,
+    category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai, detailed_hashtags
+    -- search_vector 제거
+) VALUES (
+    %(college_key)s, %(title)s, %(url)s,
+    %(body_html)s, %(body_text)s, %(raw_text)s, -- raw_text 추가
+    %(published_at)s, %(source_site)s, %(content_hash)s,
+    %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s,
+    %(detailed_hashtags)s
+    -- search_vector 값 계산 제거
+)
+ON CONFLICT (content_hash)
+DO UPDATE SET
+    title = EXCLUDED.title,
+    url = EXCLUDED.url,
+    
+    -- [핵심 수정] 수동 편집 플래그(body_edited_manually)가 True이면 기존 값을 유지
+    body_html = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.body_html 
+        ELSE EXCLUDED.body_html 
+    END,
+    body_text = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.body_text 
+        ELSE EXCLUDED.body_text 
+    END,
+    raw_text = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.raw_text 
+        ELSE EXCLUDED.raw_text 
+    END,
+    
+    published_at = EXCLUDED.published_at,
+    category_ai = EXCLUDED.category_ai,
+    start_at_ai = EXCLUDED.start_at_ai,
+    end_at_ai = EXCLUDED.end_at_ai,
+    qualification_ai = EXCLUDED.qualification_ai,
+    hashtags_ai = EXCLUDED.hashtags_ai,
+    detailed_hashtags = EXCLUDED.detailed_hashtags,
+    updated_at = CURRENT_TIMESTAMP
+    -- search_vector 업데이트 로직 제거 (DB 트리거가 처리)
+RETURNING id; -- crawler_apify.py가 RETURNING id를 사용하므로 유지
 """
 
 # 11) Apify Webhook Models

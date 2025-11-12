@@ -175,7 +175,14 @@ class BodyUpdateRequest(BaseModel):
 @router.post("/api/update-body")
 async def api_update_body_text(payload: BodyUpdateRequest):
     """(본문 수정용) 공지사항의 body_text를 수동으로 업데이트합니다."""
-    query = "UPDATE notices SET body_text = %s, updated_at = now() WHERE id = %s"
+    # [수정] body_edited_manually = TRUE 추가
+    query = """
+        UPDATE notices 
+        SET body_text = %s, 
+            body_edited_manually = TRUE, 
+            updated_at = now() 
+        WHERE id = %s
+    """
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
