@@ -5,6 +5,7 @@ import re
 import json
 from dotenv import load_dotenv
 from typing import Dict, Any, List
+from ai_retry import exponential_backoff, RateLimiter
 
 load_dotenv()
 
@@ -301,10 +302,29 @@ DETAILED_HASHTAG_PROMPT_MAP = {
 }
 
 
-# --- [공통 함수] API 호출 및 JSON 정리 ---
+# --- Rate Limiter 설정 (분당 60회 호출 제한) ---
+_gemini_rate_limiter = RateLimiter(max_calls=60, time_window=60)
+
+
+# --- [공통 함수] API 호출 및 JSON 정리 (재시도 로직 적용) ---
+@exponential_backoff(
+    max_retries=3,
+    initial_delay=2.0,
+    max_delay=60.0,
+    exponential_base=2.0,
+    jitter=True,
+    retryable_exceptions=(Exception,),
+    rate_limiter=_gemini_rate_limiter
+)
 def call_gemini_api(system_prompt, user_prompt, is_json_output=False):
     """
-    Helper function to call the Gemini API.
+    Helper function to call the Gemini API with retry logic.
+    
+    재시도 로직:
+    - 최대 3회 재시도
+    - Exponential backoff (2초 -> 4초 -> 8초)
+    - Rate limiting (분당 60회)
+    - 429 에러 시 특별 처리
     """
     try:
         chat_session = model.start_chat(history=[
@@ -332,9 +352,8 @@ def call_gemini_api(system_prompt, user_prompt, is_json_output=False):
 
     except Exception as e:
         print(f"Error calling Gemini API: {e}")
-        if "429" in str(e):
-            raise e
-        return None
+        # 재시도 로직은 데코레이터가 처리하므로 여기서는 예외를 다시 발생시킴
+        raise e
 
 def clean_json_string(text):
     """

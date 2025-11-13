@@ -38,7 +38,17 @@ from auth_deps import get_current_user
 from auth_security import decode_token
 
 # DB Pool import (신규 표준)
-from db_pool import init_pool, close_pool, get_conn
+from db_pool import init_pool, close_pool, get_conn, get_pool_status
+
+# 에러 핸들러 import
+from error_handlers import setup_error_handlers, APIError
+
+# 입력 검증 import
+from validators import (
+    NoticeListQueryParams,
+    sanitize_search_query,
+    validate_pagination_params
+)
 
 # 1) .env 로드
 load_dotenv(encoding="utf-8")
@@ -80,6 +90,9 @@ logger = logging.getLogger("dice-api")
 
 # 5) FastAPI 앱
 app = FastAPI(title="DICE API", version="0.2.1 (Schema-Aligned + Redis Enqueue)", docs_url="/docs", redoc_url="/redoc")
+
+# 에러 핸들러 설정 (CORS 전에 설정)
+setup_error_handlers(app, env=ENV)
 
 # --- DB 풀 이벤트 핸들러 ---
 @app.on_event("startup")
@@ -202,61 +215,48 @@ def content_hash(college_key: str, title: str, url: str, published_at: Optional[
 
 # UPSERT SQL (search_vector 사용) — summary_ai 제거
 UPSERT_SQL = """
-    INSERT INTO notices (
-        college_key, title, url, body_html, body_text,
-        published_at, source_site, content_hash,
-        category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai, detailed_hashtags,
-        search_vector
-    ) VALUES (
-        %(college_key)s, %(title)s, %(url)s,
-        %(body_html)s, %(body_text)s, %(published_at)s,
-        %(source_site)s, %(content_hash)s,
-        %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s, %(detailed_hashtags)s,
-        setweight(to_tsvector('simple', coalesce(%(title)s, '')), 'A') ||
-        setweight(
-            to_tsvector(
-                'simple',
-                array_to_string(
-                    array_cat(
-                        COALESCE(%(hashtags_ai)s, ARRAY[]::text[]),
-                        COALESCE(%(detailed_hashtags)s, ARRAY[]::text[])
-                    ),
-                    ' '
-                )
-            ),
-            'B'
-        ) ||
-        setweight(to_tsvector('simple', coalesce(%(body_text)s, '')), 'C')
-    )
-    ON CONFLICT (content_hash)
-    DO UPDATE SET
-        title = EXCLUDED.title,
-        url = EXCLUDED.url,
-        body_html = EXCLUDED.body_html,
-        body_text = EXCLUDED.body_text,
-        published_at = EXCLUDED.published_at,
-        category_ai = EXCLUDED.category_ai,
-        start_at_ai = EXCLUDED.start_at_ai,
-        end_at_ai = EXCLUDED.end_at_ai,
-        qualification_ai = EXCLUDED.qualification_ai,
-        hashtags_ai = EXCLUDED.hashtags_ai,
-        detailed_hashtags = EXCLUDED.detailed_hashtags,
-        updated_at = CURRENT_TIMESTAMP,
-        search_vector = setweight(to_tsvector('simple', coalesce(EXCLUDED.title, '')), 'A') ||
-                        setweight(
-                            to_tsvector(
-                                'simple',
-                                array_to_string(
-                                    array_cat(
-                                        COALESCE(EXCLUDED.hashtags_ai, ARRAY[]::text[]),
-                                        COALESCE(EXCLUDED.detailed_hashtags, ARRAY[]::text[])
-                                    ),
-                                    ' '
-                                )
-                            ),
-                            'B'
-                        ) ||
-                        setweight(to_tsvector('simple', coalesce(EXCLUDED.body_text, '')), 'C')
+INSERT INTO notices (
+    college_key, title, url, body_html, body_text, raw_text, -- raw_text 추가
+    published_at, source_site, content_hash,
+    category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai, detailed_hashtags
+    -- search_vector 제거
+) VALUES (
+    %(college_key)s, %(title)s, %(url)s,
+    %(body_html)s, %(body_text)s, %(raw_text)s, -- raw_text 추가
+    %(published_at)s, %(source_site)s, %(content_hash)s,
+    %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s,
+    %(detailed_hashtags)s
+    -- search_vector 값 계산 제거
+)
+ON CONFLICT (content_hash)
+DO UPDATE SET
+    title = EXCLUDED.title,
+    url = EXCLUDED.url,
+    
+    -- [핵심 수정] 수동 편집 플래그(body_edited_manually)가 True이면 기존 값을 유지
+    body_html = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.body_html 
+        ELSE EXCLUDED.body_html 
+    END,
+    body_text = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.body_text 
+        ELSE EXCLUDED.body_text 
+    END,
+    raw_text = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.raw_text 
+        ELSE EXCLUDED.raw_text 
+    END,
+    
+    published_at = EXCLUDED.published_at,
+    category_ai = EXCLUDED.category_ai,
+    start_at_ai = EXCLUDED.start_at_ai,
+    end_at_ai = EXCLUDED.end_at_ai,
+    qualification_ai = EXCLUDED.qualification_ai,
+    hashtags_ai = EXCLUDED.hashtags_ai,
+    detailed_hashtags = EXCLUDED.detailed_hashtags,
+    updated_at = CURRENT_TIMESTAMP
+    -- search_vector 업데이트 로직 제거 (DB 트리거가 처리)
+RETURNING id; -- crawler_apify.py가 RETURNING id를 사용하므로 유지
 """
 
 # 11) Apify Webhook Models
@@ -278,6 +278,8 @@ class ApifyWebhookPayload(BaseModel):
 @app.get("/health")
 def health():
     base = {"env": ENV, "service": "dice-api"}
+    pool_status = get_pool_status()
+    
     try:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT 1 AS ok;")
@@ -289,20 +291,42 @@ def health():
             tbl_check = cur.fetchone()
             have_colleges = tbl_check and tbl_check["c"] == 1
             if not have_colleges:
-                raise HTTPException(status_code=503, detail={"status": "migrations_pending", **base})
+                raise APIError(
+                    status_code=503,
+                    error_code="MIGRATIONS_PENDING",
+                    message="Database migrations are pending",
+                    details={"status": "migrations_pending", **base, "pool": pool_status}
+                )
 
             if HEALTH_REQUIRE_SEEDED == "1":
                 cur.execute("SELECT COUNT(*) AS c FROM colleges;")
                 seeded_result = cur.fetchone()
                 seeded = seeded_result["c"] > 0 if seeded_result else False
                 if not seeded:
-                    raise HTTPException(status_code=503, detail={"status": "seeding_pending", **base})
+                    raise APIError(
+                        status_code=503,
+                        error_code="SEEDING_PENDING",
+                        message="Database seeding is pending",
+                        details={"status": "seeding_pending", **base, "pool": pool_status}
+                    )
+    except APIError:
+        raise
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Health check DB error: {e}")
-        raise HTTPException(status_code=503, detail={"status": "db_unavailable", **base})
-    return {"status": "ok", **base}
+        raise APIError(
+            status_code=503,
+            error_code="DB_UNAVAILABLE",
+            message="Database is unavailable",
+            details={"status": "db_unavailable", **base, "pool": pool_status}
+        )
+    
+    return {
+        "status": "ok",
+        **base,
+        "pool": pool_status
+    }
 
 @app.get("/notices")
 def list_notices(
@@ -327,9 +351,45 @@ def list_notices(
     [수정] FTS 컬럼명을 `search_vector`로, trgm 대상 컬럼을 `body_text`로 변경
     [수정] FTS/Websearch 모드에서 ILIKE (단어 내 부분검색) OR 조건 추가
     """
+    # 입력 검증
+    try:
+        query_params = NoticeListQueryParams(
+            college=college,
+            q=q,
+            search_mode=search_mode,
+            op=op,
+            rank=rank,
+            date_from=date_from,
+            date_to=date_to,
+            sort=sort,
+            limit=limit,
+            offset=offset,
+            my=my,
+            count=count,
+            no_cache=no_cache,
+            hashtags=hashtags
+        )
+        # 검증된 값 사용
+        q = query_params.q
+        college = query_params.college
+        hashtags = query_params.hashtags
+        date_from = query_params.date_from
+        date_to = query_params.date_to
+        limit, offset = validate_pagination_params(query_params.limit, query_params.offset)
+    except Exception as e:
+        raise APIError(
+            status_code=400,
+            error_code="VALIDATION_ERROR",
+            message="입력 파라미터 검증에 실패했습니다.",
+            details={"error": str(e)}
+        )
 
     if rank is None:
         rank = "fts" if search_mode in ("fts", "websearch") else "off"
+    
+    # 검색어 추가 정제
+    if q:
+        q = sanitize_search_query(q)
 
     # 캐시 키 생성 (my=true는 캐시 안 함)
     cache_key = None
@@ -385,10 +445,19 @@ def list_notices(
                  return {"meta": {"returned": 0, "total_count": 0}, "items": []}
 
         except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, HTTPException) as e:
-            raise HTTPException(status_code=401, detail=str(e.detail if hasattr(e, 'detail') else e))
+            raise APIError(
+                status_code=401,
+                error_code="UNAUTHORIZED",
+                message="인증에 실패했습니다.",
+                details={"error": str(e.detail if hasattr(e, 'detail') else e)}
+            )
         except Exception as e:
             logger.error(f"DB error fetching user keywords: {e}")
-            raise HTTPException(status_code=500, detail="Database error fetching profile")
+            raise APIError(
+                status_code=500,
+                error_code="DATABASE_ERROR",
+                message="사용자 프로필 조회 중 오류가 발생했습니다."
+            )
 
     # 검색어 토큰화
     tokens = []
@@ -417,15 +486,25 @@ def list_notices(
     if date_from:
         try:
             params["date_from"] = datetime.fromisoformat(date_from)
-        except:
-            raise HTTPException(status_code=400, detail="Invalid date_from format")
+        except ValueError:
+            raise APIError(
+                status_code=400,
+                error_code="INVALID_DATE_FORMAT",
+                message="시작 날짜 형식이 올바르지 않습니다.",
+                details={"date_from": date_from, "expected_format": "YYYY-MM-DD"}
+            )
         where_clauses.append("published_at >= %(date_from)s")
 
     if date_to:
         try:
             params["date_to"] = datetime.fromisoformat(date_to) + dt.timedelta(days=1)
-        except:
-            raise HTTPException(status_code=400, detail="Invalid date_to format")
+        except ValueError:
+            raise APIError(
+                status_code=400,
+                error_code="INVALID_DATE_FORMAT",
+                message="종료 날짜 형식이 올바르지 않습니다.",
+                details={"date_to": date_to, "expected_format": "YYYY-MM-DD"}
+            )
         where_clauses.append("published_at < %(date_to)s")
 
     if my and user_keywords:
@@ -453,7 +532,13 @@ def list_notices(
                     tsquery_str = " & ".join(tokens)
                 else:
                     tsquery_str = " | ".join(tokens)
+                # SQL 인젝션 방지: tsquery 문자열 정제
                 tsquery_str = re.sub(r'[^0-9A-Za-z가-힣\|\&\s]', '', tsquery_str)
+                # 추가 검증: 길이 제한 및 위험한 패턴 제거
+                if len(tsquery_str) > 500:
+                    tsquery_str = tsquery_str[:500]
+                # 연속된 특수문자 제거
+                tsquery_str = re.sub(r'[|&]{2,}', '', tsquery_str)
                 if tsquery_str:
                     params["tsquery"] = tsquery_str
                     fts_clause = "search_vector @@ to_tsquery('simple', %(tsquery)s)"
@@ -524,7 +609,12 @@ def list_notices(
             rows = cur.fetchall()
     except Exception as e:
         logger.error(f"DB error searching notices: {e}")
-        raise HTTPException(status_code=500, detail="Database error executing search")
+        raise APIError(
+            status_code=500,
+            error_code="DATABASE_QUERY_ERROR",
+            message="공지사항 검색 중 데이터베이스 오류가 발생했습니다.",
+            details={"query": "list_notices"}
+        )
 
     # 응답
     response = {
@@ -558,7 +648,11 @@ def stats():
             total = cur.fetchone()["total"]
     except Exception as e:
         logger.error(f"DB error fetching stats: {e}")
-        raise HTTPException(status_code=500, detail="Database error fetching stats")
+        raise APIError(
+            status_code=500,
+            error_code="DATABASE_ERROR",
+            message="통계 조회 중 데이터베이스 오류가 발생했습니다."
+        )
     return {"total": total, "by_college": by_college}
 
 @app.get("/colleges")
@@ -576,7 +670,11 @@ def list_colleges():
         return result
     except Exception as e:
         logger.error(f"DB error fetching colleges: {e}")
-        raise HTTPException(status_code=500, detail="Database error fetching colleges")
+        raise APIError(
+            status_code=500,
+            error_code="DATABASE_ERROR",
+            message="단과대학 목록 조회 중 데이터베이스 오류가 발생했습니다."
+        )
 
 @app.get("/notices/{notice_id}")
 def get_notice(notice_id: str):
@@ -596,9 +694,19 @@ def get_notice(notice_id: str):
             notice = cur.fetchone()
     except Exception as e:
         logger.error(f"DB error fetching notice {notice_id}: {e}")
-        raise HTTPException(status_code=500, detail="Database error fetching notice")
+        raise APIError(
+            status_code=500,
+            error_code="DATABASE_ERROR",
+            message="공지사항 조회 중 데이터베이스 오류가 발생했습니다.",
+            details={"notice_id": notice_id}
+        )
     if not notice:
-        raise HTTPException(status_code=404, detail="Notice not found")
+        raise APIError(
+            status_code=404,
+            error_code="NOTICE_NOT_FOUND",
+            message="공지사항을 찾을 수 없습니다.",
+            details={"notice_id": notice_id}
+        )
     cache_set(cache_key, notice)
     return notice
 

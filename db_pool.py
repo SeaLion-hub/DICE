@@ -21,6 +21,13 @@ logger = logging.getLogger(__name__)
 # Global pool instance
 _pool: Optional[SimpleConnectionPool] = None
 
+# Pool metrics
+_pool_metrics = {
+    "total_requests": 0,
+    "failed_requests": 0,
+    "pool_exhausted_count": 0,
+}
+
 
 def init_pool(minconn: int = 1, maxconn: int = 10) -> SimpleConnectionPool:
     """
@@ -134,8 +141,10 @@ def get_conn() -> Generator[psycopg2.extensions.connection, None, None]:
     conn = None
     try:
         # Get connection from pool
+        increment_metric("total_requests")
         conn = _pool.getconn()
         if conn is None:
+            increment_metric("pool_exhausted_count")
             raise RuntimeError("Failed to get connection from pool")
             
         yield conn
@@ -145,14 +154,17 @@ def get_conn() -> Generator[psycopg2.extensions.connection, None, None]:
         raise e  # <-- 3. 그대로 다시 raise 합니다.
         
     except PoolError as e:
+        increment_metric("failed_requests")
         logger.error(f"Pool error in connection context: {e}")
         raise RuntimeError(f"Pool error: {e}") from e
     except psycopg2.Error as e:
         # Handle actual DB errors (e.g., connection lost during query)
+        increment_metric("failed_requests")
         logger.error(f"Database error in connection context: {e}")
         raise RuntimeError(f"Database error: {e}") from e
     except Exception as e:
         # Handle other unexpected errors
+        increment_metric("failed_requests")
         logger.error(f"Unexpected error in connection context: {e}")
         raise RuntimeError(f"Unexpected connection error: {e}") from e
     finally:
@@ -162,3 +174,71 @@ def get_conn() -> Generator[psycopg2.extensions.connection, None, None]:
                 _pool.putconn(conn)
             except Exception as e:
                 logger.error(f"Error returning connection to pool: {e}")
+
+
+def get_pool_status() -> dict:
+    """
+    연결 풀 상태 정보 반환
+    
+    Returns:
+        연결 풀 상태 딕셔너리 (활성 연결 수, 최대 연결 수, 메트릭 등)
+    """
+    global _pool, _pool_metrics
+    
+    if _pool is None:
+        return {
+            "initialized": False,
+            "min_connections": None,
+            "max_connections": None,
+            "active_connections": 0,
+            "available_connections": 0,
+            "metrics": _pool_metrics.copy()
+        }
+    
+    try:
+        # SimpleConnectionPool는 직접적인 상태 조회 API가 없으므로
+        # 연결을 시도해서 상태를 확인합니다
+        test_conn = None
+        try:
+            test_conn = _pool.getconn()
+            if test_conn:
+                _pool.putconn(test_conn)
+                available = True
+            else:
+                available = False
+        except PoolError:
+            available = False
+        except Exception:
+            available = False
+        finally:
+            if test_conn:
+                try:
+                    _pool.putconn(test_conn)
+                except:
+                    pass
+        
+        # 풀 설정 정보 (직접 접근 불가능하므로 환경변수에서 가져옴)
+        minconn = int(os.getenv("DB_POOL_MIN", "1"))
+        maxconn = int(os.getenv("DB_POOL_MAX", "10"))
+        
+        return {
+            "initialized": True,
+            "min_connections": minconn,
+            "max_connections": maxconn,
+            "pool_available": available,
+            "metrics": _pool_metrics.copy()
+        }
+    except Exception as e:
+        logger.error(f"Error getting pool status: {e}")
+        return {
+            "initialized": True,
+            "error": str(e),
+            "metrics": _pool_metrics.copy()
+        }
+
+
+def increment_metric(metric_name: str) -> None:
+    """메트릭 증가"""
+    global _pool_metrics
+    if metric_name in _pool_metrics:
+        _pool_metrics[metric_name] += 1

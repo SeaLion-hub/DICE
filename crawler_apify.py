@@ -167,28 +167,40 @@ INSERT INTO notices (
     college_key, title, url, body_html, body_text, raw_text,
     published_at, source_site, content_hash,
     category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
-    detailed_hashtags -- [수정 1] INSERT 목록에 컬럼 추가
+    detailed_hashtags
 ) VALUES (
     %(college_key)s, %(title)s, %(url)s,
     %(body_html)s, %(body_text)s, %(raw_text)s,
     %(published_at)s, %(source_site)s, %(content_hash)s,
     %(category_ai)s, %(start_at_ai)s, %(end_at_ai)s, %(qualification_ai)s, %(hashtags_ai)s,
-    %(detailed_hashtags)s -- [수정 2] VALUES 목록에 파라미터 추가
+    %(detailed_hashtags)s
 )
 ON CONFLICT (content_hash)
 DO UPDATE SET
     title = EXCLUDED.title,
     url = EXCLUDED.url,
-    body_html = EXCLUDED.body_html,
-    body_text = EXCLUDED.body_text,
-    raw_text = EXCLUDED.raw_text,
+    
+    -- [핵심 수정] 수동 편집 플래그(body_edited_manually)가 True이면 기존 값을 유지
+    body_html = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.body_html 
+        ELSE EXCLUDED.body_html 
+    END,
+    body_text = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.body_text 
+        ELSE EXCLUDED.body_text 
+    END,
+    raw_text = CASE 
+        WHEN notices.body_edited_manually = TRUE THEN notices.raw_text 
+        ELSE EXCLUDED.raw_text 
+    END,
+    
     published_at = EXCLUDED.published_at,
     category_ai = EXCLUDED.category_ai,
     start_at_ai = EXCLUDED.start_at_ai,
     end_at_ai = EXCLUDED.end_at_ai,
     qualification_ai = EXCLUDED.qualification_ai,
     hashtags_ai = EXCLUDED.hashtags_ai,
-    detailed_hashtags = EXCLUDED.detailed_hashtags, -- [수정 3] 이 참조가 이제 유효함
+    detailed_hashtags = EXCLUDED.detailed_hashtags,
     updated_at = CURRENT_TIMESTAMP
 RETURNING id;
 """

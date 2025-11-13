@@ -1,15 +1,28 @@
--- 009_add_raw_text.sql의 후속 조치 (수정된 버전)
+-- 009_add_raw_text.sql (수정된 전체 코드)
 -- body_text 갱신 후, search_vector를 A, B, C, D 가중치 모두 포함하여 갱신합니다.
+-- [수정] 'B' 가중치 로직을 005_search_fts.sql(트리거)와 동일하게 수정 (detailed_hashtags 포함)
+
+BEGIN;
 
 UPDATE notices n
 SET search_vector =
   setweight(to_tsvector('simple', coalesce(n.title, '')), 'A') ||
-  setweight(to_tsvector('simple',
-    CASE
-      WHEN n.hashtags_ai IS NOT NULL THEN array_to_string(n.hashtags_ai, ' ')
-      ELSE ''
-    END
-  ), 'B') ||
+  
+  -- [수정됨] B 가중치: hashtags_ai와 detailed_hashtags 모두 포함
+  setweight(
+    to_tsvector(
+      'simple',
+      array_to_string(
+        array_cat(
+          COALESCE(n.hashtags_ai, ARRAY[]::text[]),
+          COALESCE(n.detailed_hashtags, ARRAY[]::text[])
+        ),
+        ' '
+      )
+    ),
+    'B'
+  ) ||
+  
   setweight(to_tsvector('simple', coalesce(n.body_text, '')), 'C') ||
   setweight(to_tsvector('simple', coalesce(c_syn.synonyms, '')), 'D') -- 'D' 가중치 (단과대학 동의어)
 FROM (
@@ -39,3 +52,5 @@ FROM (
   FROM colleges
 ) AS c_syn
 WHERE n.college_key = c_syn.key;
+
+COMMIT;
