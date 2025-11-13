@@ -1,4 +1,4 @@
-# admin_routes.py
+# admin_routes.py (수정됨)
 import logging
 import json 
 from fastapi import APIRouter, HTTPException, status, Depends, Query 
@@ -7,12 +7,13 @@ from psycopg2.extras import RealDictCursor
 from db_pool import get_conn
 from uuid import UUID
 import os 
-from pydantic import BaseModel # [신규] API 요청 본문을 위한 임포트
+from pydantic import BaseModel # API 요청 본문을 위한 임포트
 
-# [수정] 3가지 AI/로직 함수 모두 임포트
+# [수정] 3가지 AI/로직 함수 + 1개 날짜 유틸 함수 임포트
 try:
     from ai_processor import extract_detailed_hashtags, extract_structured_info
     from comparison_logic import check_suitability
+    from calendar_utils import extract_ai_time_window # [유지] 날짜 추출기 임포트
 except ImportError:
     # ... (기존 mock 함수들) ...
     logging.warning("Using mock extract_detailed_hashtags function!")
@@ -25,6 +26,16 @@ except ImportError:
     def check_suitability(user_profile: dict, notice_json: dict) -> dict:
          logging.warning("Using mock check_suitability function!")
          return {"eligibility": "BORDERLINE", "match_percentage": 50.0}
+    
+    # [유지] 날짜 추출기 Mock 함수
+    def extract_ai_time_window(structured_info: dict, notice_title: str) -> tuple:
+        logging.warning("Using mock extract_ai_time_window function!")
+        from datetime import datetime, timezone, timedelta
+        if "마감" in notice_title:
+             kst = timezone(timedelta(hours=9))
+             # (None, <datetime 객체>)
+             return (None, datetime.now(kst) + timedelta(days=5))
+        return (None, None)
 
 
 logger = logging.getLogger("dice-api.admin")
@@ -34,7 +45,7 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 current_dir = os.path.dirname(os.path.abspath(__file__))
 ADMIN_HASHTAG_HTML_PATH = os.path.join(current_dir, "admin_hashtags.html")
 ADMIN_COMPARE_HTML_PATH = os.path.join(current_dir, "admin_compare.html")
-ADMIN_BODY_HTML_PATH = os.path.join(current_dir, "admin_body.html") # [신규] 본문 수정 HTML
+ADMIN_BODY_HTML_PATH = os.path.join(current_dir, "admin_body.html") 
 
 
 # 1. 세부 해시태그 관리자 페이지
@@ -167,7 +178,7 @@ async def get_notice_detail_for_admin(notice_id: UUID): # (FastAPI는 UUID로 �
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
 
 
-# 6. [수정] 본문 업데이트 API
+# 6. [수정] 본문 업데이트 API (오류 수정됨)
 class BodyUpdateRequest(BaseModel):
     notice_id: UUID # (FastAPI는 UUID로 검증)
     body_text: str
@@ -175,7 +186,6 @@ class BodyUpdateRequest(BaseModel):
 @router.post("/api/update-body")
 async def api_update_body_text(payload: BodyUpdateRequest):
     """(본문 수정용) 공지사항의 body_text를 수동으로 업데이트합니다."""
-    # [수정] body_edited_manually = TRUE 추가
     query = """
         UPDATE notices 
         SET body_text = %s, 
@@ -184,22 +194,27 @@ async def api_update_body_text(payload: BodyUpdateRequest):
         WHERE id = %s
     """
     try:
+        # [수정] rowcount 변수를 선언
+        rowcount = 0
         with get_conn() as conn:
             with conn.cursor() as cur:
-                # [수정] DB 드라이버에 전달 시 str()로 변환
                 cur.execute(query, (payload.body_text, str(payload.notice_id)))
+                # [수정] 커밋 전에 rowcount를 변수에 저장
+                rowcount = cur.rowcount 
                 conn.commit()
         
-        if cur.rowcount == 0:
+        # [수정] 'with' 블록 밖에서 저장된 rowcount 변수를 확인
+        if rowcount == 0:
              raise HTTPException(status_code=404, detail="Notice not found or no changes made")
         
         logger.info(f"Admin: Successfully updated body_text for notice {payload.notice_id}")
-        return {"status": "success", "notice_id": str(payload.notice_id)} # 응답도 str로
+        return {"status": "success", "notice_id": str(payload.notice_id)}
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Admin API Error updating body_text for {payload.notice_id}: {e}", exc_info=False) # exc_info=False로 변경
+        # [수정] 디버깅을 위해 exc_info=True로 변경
+        logger.error(f"Admin API Error updating body_text for {payload.notice_id}: {e}", exc_info=True) 
         raise HTTPException(status_code=500, detail=f"Database error: {e}")
 # --- (이하 기존 API: 7. 해시태그, 8. 지원자격, 9. 비교 API) ---
 
@@ -240,48 +255,137 @@ async def api_extract_detailed_hashtags(payload: dict):
         raise HTTPException(status_code=500, detail=f"AI processing error: {e}")
 
 
-# 8. 지원자격(JSON) 추출 API
+# 8. 지원자격(JSON) 추출 API [수정됨 - 날짜 추출 로직 제거]
 @router.post("/api/extract-qualifications")
 async def api_extract_qualifications(payload: dict):
-    # ... (기존 코드) ...
     notice_id = payload.get("notice_id")
     main_category = payload.get("main_category") 
     if not notice_id or not main_category:
         raise HTTPException(status_code=400, detail="notice_id and main_category required")
-    # ... (기존 로직) ...
+    
     try:
+        # 1. 공지 본문 가져오기
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute("SELECT title, body_text FROM notices WHERE id = %s", (notice_id,))
                 row = cur.fetchone()
+        
         if not row:
             raise HTTPException(status_code=404, detail="Notice not found")
+        
         body_text = row.get("body_text") or ""
         title = row.get("title") or ""
+        
         if not title and not body_text:
              raise HTTPException(status_code=404, detail="Notice title and body are both empty")
+        
+        # 2. AI로 구조화된 정보(JSON) 추출
         qual_json_dict = extract_structured_info(title, body_text, main_category)
+        
+        # 3. [제거] 날짜 추출 로직 (별도 API로 분리됨)
+        
+        # 4. DB에 JSON만 저장
         with get_conn() as conn:
             with conn.cursor() as cur:
                 qual_json_string = json.dumps(qual_json_dict, ensure_ascii=False)
+                
+                # [수정] 쿼리에서 start_at_ai, end_at_ai 제거
                 cur.execute(
                     """
                     UPDATE notices 
-                    SET qualification_ai = %s, updated_at = now() 
+                    SET 
+                        qualification_ai = %s,
+                        updated_at = now() 
                     WHERE id = %s
                     """,
                     (qual_json_string, notice_id) 
                 )
                 conn.commit()
-        logger.info(f"Admin: Successfully extracted and saved structured qualifications for notice {notice_id}")
-        return {"notice_id": notice_id, "ai_extracted_json": qual_json_dict}
+        
+        logger.info(f"Admin: Successfully extracted JSON for notice {notice_id}")
+        
+        # 5. [수정] JSON만 반환
+        return {
+            "notice_id": notice_id, 
+            "ai_extracted_json": qual_json_dict
+        }
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"AI extraction (structured) API error for {notice_id}: {e}", exc_info=True)
+        # [신규] 실패 시에도 오류 JSON을 반환
+        error_response = {"error": f"AI processing error: {e}"}
+        return {
+            "notice_id": notice_id,
+            "ai_extracted_json": error_response
+        }
+
+# 9. [신규] 날짜 추출 API (기존 JSON 기반)
+class NoticeIdPayload(BaseModel):
+     notice_id: UUID
+
+@router.post("/api/extract-dates")
+async def api_extract_dates(payload: NoticeIdPayload):
+    """
+    (신규) DB에 저장된 qualification_ai JSON을 기반으로
+    start_at_ai와 end_at_ai를 추출(재추출)하여 저장합니다.
+    """
+    notice_id = str(payload.notice_id)
+    
+    try:
+        # 1. DB에서 title과 existing qualification_ai 가져오기
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute("SELECT title, qualification_ai FROM notices WHERE id = %s", (notice_id,))
+                row = cur.fetchone()
+        
+        if not row:
+            raise HTTPException(status_code=404, detail="Notice not found")
+        
+        title = row.get("title") or ""
+        qual_json_dict = row.get("qualification_ai") # 이것은 이미 dict (jsonb)
+        
+        # 2. [중요] qualification_ai가 없으면 오류 반환
+        if not qual_json_dict or (isinstance(qual_json_dict, dict) and qual_json_dict.get("error")):
+            raise HTTPException(status_code=400, detail="Qualification JSON not found or is invalid. Please extract qualifications first.")
+        
+        # 3. [신규] 기존 JSON에서 날짜(start_at, end_at) 추출
+        start_at, end_at = extract_ai_time_window(qual_json_dict, title)
+        
+        # 4. DB에 날짜만 업데이트
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    UPDATE notices 
+                    SET 
+                        start_at_ai = %s,
+                        end_at_ai = %s,
+                        updated_at = now() 
+                    WHERE id = %s
+                    """,
+                    (start_at, end_at, notice_id) 
+                )
+                conn.commit()
+        
+        logger.info(f"Admin: Successfully extracted Dates from existing JSON for notice {notice_id}")
+        
+        # 5. 프론트엔드로 날짜 정보 반환
+        return {
+            "notice_id": notice_id,
+            "start_at_ai": start_at.isoformat() if start_at else None,
+            "end_at_ai": end_at.isoformat() if end_at else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"AI extraction (dates) API error for {notice_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"AI processing error: {e}")
 
-# 9. 적합도 비교 API
+
+# 10. 적합도 비교 API (기존 9번)
 @router.post("/api/compare-notice")
 async def api_compare_notice(payload: dict):
     # ... (기존 코드) ...

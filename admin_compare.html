@@ -25,17 +25,22 @@
             background-color: #007bff; color: white; border: none; 
             padding: 8px 12px; border-radius: 4px; cursor: pointer; 
             font-size: 14px; min-width: 80px; margin-bottom: 5px;
+            margin-right: 5px; /* [신규] 버튼 간격 */
         }
         button:hover { background-color: #0056b3; }
         button:disabled { background-color: #ccc; cursor: not-allowed; }
         
-        /* [신규] 기능별 버튼 색상 */
-        button.extract-qual { background-color: #17a2b8; } /* 지원자격: 청록 */
+        button.extract-qual { background-color: #17a2b8; } 
         button.extract-qual:hover { background-color: #117a8b; }
-        button.compare { background-color: #6f42c1; } /* 비교: 보라 */
+        
+        /* --- [신규] 날짜 추출 버튼 스타일 --- */
+        button.extract-dates { background-color: #fd7e14; } /* 주황 */
+        button.extract-dates:hover { background-color: #e66b00; }
+        /* --------------------------------- */
+
+        button.compare { background-color: #6f42c1; } 
         button.compare:hover { background-color: #5a359a; }
         
-        /* [신규] 결과 표시용 pre, span 스타일 */
         pre {
             background-color: #e9ecef;
             padding: 10px;
@@ -44,7 +49,7 @@
             word-break: break-all;
             white-space: pre-wrap;
             margin-top: 8px;
-            max-height: 200px; /* 너무 길어지는 것 방지 */
+            max-height: 200px; 
             overflow-y: auto;
             color: #333;
         }
@@ -57,17 +62,34 @@
         .result-span.loading { color: #fd7e14; }
         .result-span.error { color: #dc3545; font-weight: bold; }
         
-        /* [신규] 비교 결과 스타일 */
-        .result-span.eligible { color: #28a745; } /* ELIGIBLE: 초록 */
-        .result-span.borderline { color: #ffc107; } /* BORDERLINE: 노랑 */
-        .result-span.ineligible { color: #dc3545; } /* INELIGIBLE: 빨강 */
+        .result-span.eligible { color: #28a745; } 
+        .result-span.borderline { color: #ffc107; } 
+        .result-span.ineligible { color: #dc3545; } 
+        
+        /* --- [유지] 날짜 표시용 스타일 --- */
+        .date-display {
+            display: block;
+            font-size: 0.85em;
+            color: #555;
+            margin-top: 6px;
+            padding-left: 2px;
+            font-family: 'SFMono-Regular', Consolas, 'Courier New', monospace;
+        }
+        .date-display.start-date { 
+            color: #27ae60; 
+        }
+        .date-display.end-date { 
+            font-weight: bold; 
+            color: #c0392b; 
+            margin-top: 3px;
+        }
+        /* ------------------------------- */
         
         #loading { font-weight: bold; color: #d9534f; }
 
-        /* [신규] 5열 테이블 너비 조정 */
-        td:nth-child(1) { width: 10%; } /* 단과대 */
-        td:nth-child(2) { width: 30%; } /* 제목 */
-        td:nth-child(3) { width: 8%; }  /* 대분류 */
+        td:nth-child(1) { width: 10%; } 
+        td:nth-child(2) { width: 30%; } 
+        td:nth-child(3) { width: 8%; }  
         td:nth-child(4) { width: 26%; } /* 지원자격 (JSON) */
         td:nth-child(5) { width: 26%; } /* 적합도 비교 */
     </style>
@@ -93,39 +115,36 @@
     </table>
 
     <script>
-        // --- [신규] 테스트용 샘플 프로필 ---
+        // --- [유지] 샘플 프로필 ---
         const SAMPLE_USER_PROFILE = {
             "id": "sample_user_01",
             "major": "컴퓨터과학과",
-            "grade": 3, // 3학년 -> 5학기
+            "grade": 3, 
             "gpa": 3.8,
             "gpa_scale": 4.5,
-            "income_bracket": 8, // 소득 8분위
+            "income_bracket": 8, 
             "language_scores": {
                 "TOEIC": 850,
                 "OPIC": "IM3"
             },
             "keywords": ["#AI", "#데이터"],
             "gender": "male",
-            "military_service": "completed" // 군필
+            "military_service": "completed" 
         };
-        // ---------------------------------
         
-        // --- [신규] 한글 번역 헬퍼 ---
+        // --- [유지] 한글 번역 헬퍼 ---
         const KOREAN_LABELS = {
             'ELIGIBLE': '✅ 적합',
             'BORDERLINE': '⚠️ 경계',
             'INELIGIBLE': '❌ 부적합',
             'ERROR': '오류'
         };
-        // ---------------------------------
 
         document.addEventListener('DOMContentLoaded', loadNotices);
 
         // 1. 공지사항 목록 로드
         async function loadNotices() {
             try {
-                // [수정] limit=200 -> limit=1000 로 변경 (최신순으로 1000개 로드)
                 const response = await fetch('/admin/api/notices?limit=1000&sort_by=recent');
                 if (!response.ok) throw new Error('Failed to fetch notices');
                 
@@ -134,23 +153,18 @@
                 tbody.innerHTML = ''; 
 
                 if (data.items.length === 0) {
-                     // [수정] 문구 변경
                      document.getElementById('loading').textContent = '최근 공지가 없습니다. (#일반 제외)';
                      return;
                 }
 
-                // [수정] 전역 저장소에 공지 데이터 원본(JSON) 저장 (비교 로직용)
                 window.noticeDataStore = {};
                 data.items.forEach(notice => {
-                    // [중요] notice.ai_extracted_json은 이제 객체이거나 null입니다.
                     window.noticeDataStore[notice.id] = notice;
                 });
 
                 data.items.forEach(notice => {
                     const tr = document.createElement('tr');
                     
-                    // (지원자격 JSON)
-                    // [수정] ai_extracted_json은 이제 객체이거나 null입니다.
                     const savedQual = notice.ai_extracted_json; 
                     const hasSavedQual = savedQual && !savedQual.error;
                     
@@ -165,6 +179,11 @@
                     } else {
                         savedQualHtml = `<pre>(추출된 내용 없음)</pre>`;
                     }
+                    
+                    // --- [유지] 날짜 표시 HTML 생성 ---
+                    const startDateHtml = `<span class="date-display start-date">시작: ${formatDate(notice.start_at_ai)}</span>`;
+                    const endDateHtml = `<span class="date-display end-date">마감: ${formatDate(notice.end_at_ai)}</span>`;
+                    // ---------------------------------
 
                     tr.innerHTML = `
                         <td>${escapeHTML(notice.college_name)}</td>
@@ -175,8 +194,12 @@
                             <button class="extract-qual" style="background-color: ${qualButtonColor};" onclick="extractQualifications('${notice.id}', '${notice.category_ai}', this)">
                                 ${qualButtonText}
                             </button>
-                            ${savedQualHtml}
-                        </td>
+                            
+                            <button class="extract-dates" onclick="extractDates('${notice.id}', this)" title="저장된 JSON에서 날짜만 다시 추출/저장">
+                                날짜 추출
+                            </button>
+
+                            ${startDateHtml} ${endDateHtml}   ${savedQualHtml}  </td>
                         
                         <td id="cell-compare-${notice.id}">
                             <button class="compare" onclick="compareSuitability('${notice.id}', this)">
@@ -195,7 +218,7 @@
             }
         }
 
-        // 2. [신규] 지원자격(JSON) 추출
+        // 2. [수정] 지원자격(JSON) 추출 [날짜 로직 제거됨]
         async function extractQualifications(noticeId, mainCategory, buttonEl) {
             const cell = buttonEl.closest('td');
             const preEl = cell.querySelector('pre');
@@ -204,6 +227,8 @@
             buttonEl.textContent = '추출 중...';
             preEl.textContent = '(AI 추출 중...)';
             preEl.style.color = '#333';
+            
+            // [제거] 날짜 Span 업데이트 로직 제거
 
             try {
                 const response = await fetch('/admin/api/extract-qualifications', {
@@ -220,47 +245,133 @@
                     throw new Error(errData.detail || '추출 실패');
                 }
 
-                // [수정] 응답 (data.ai_extracted_json)은 파싱된 dict입니다.
+                // [수정] 응답에 JSON만 포함됨
                 const data = await response.json(); 
                 
                 if (data.ai_extracted_json && !data.ai_extracted_json.error) {
+                    // JSON UI 업데이트
                     preEl.textContent = escapeHTML(JSON.stringify(data.ai_extracted_json, null, 2));
-                    // [중요] 원본 데이터 저장소(캐시)에 최신 dict를 업데이트합니다.
+                    
+                    // [제거] 날짜 UI 업데이트 로직 제거
+                    
+                    // [중요] 캐시에 JSON만 업데이트
                     if(window.noticeDataStore[noticeId]) {
                         window.noticeDataStore[noticeId].ai_extracted_json = data.ai_extracted_json;
+                        // [제거] 날짜 캐시 업데이트 로직 제거
                     }
+                    
+                    buttonEl.textContent = '재추출';
+                    buttonEl.style.backgroundColor = '#28a745'; // 성공 시 초록색
+                    
                 } else {
+                    // 오류 케이스
                     preEl.textContent = `[추출 결과 없음 또는 오류]:\n${escapeHTML(JSON.stringify(data.ai_extracted_json, null, 2))}`;
                     preEl.style.color = 'red';
-                    // 오류가 발생해도 캐시를 업데이트합니다 (오류 상태를 저장)
+                    
+                    // [제거] 날짜 UI 업데이트 로직 제거
+
+                    // 오류 캐시 업데이트
                     if(window.noticeDataStore[noticeId]) {
                         window.noticeDataStore[noticeId].ai_extracted_json = data.ai_extracted_json || {"error": "Unknown extraction error"};
+                        // [제거] 날짜 캐시 업데이트 로직 제거
                     }
+                    
+                    buttonEl.textContent = '재추출';
+                    buttonEl.style.backgroundColor = '#ffc107'; 
                 }
                 
-                buttonEl.textContent = '재추출';
-                buttonEl.style.backgroundColor = '#28a745'; // 성공 시 초록색
                 buttonEl.disabled = false;
 
             } catch (error) {
                 console.error('Error extracting qualifications:', error);
                 preEl.textContent = `[API 오류: ${error.message}]`;
                 preEl.style.color = 'red';
+                // [제거] 날짜 UI 오류 처리 제거
+                
                 buttonEl.textContent = '추출 실패';
                 buttonEl.style.backgroundColor = '#dc3545'; // 실패 시 빨간색
                 buttonEl.disabled = false;
             }
         }
 
-        // 3. [신규] 적합도 비교 - [수정됨: notice_json 객체 전체 전송]
+        // 3. [신규] 날짜만 추출 (기존 JSON 기반)
+        async function extractDates(noticeId, buttonEl) {
+            const cell = buttonEl.closest('td');
+            const startDateSpan = cell.querySelector('.start-date');
+            const endDateSpan = cell.querySelector('.end-date');
+
+            // [중요] 캐시된 JSON 데이터 확인
+            const noticeData = window.noticeDataStore[noticeId];
+            if (!noticeData || !noticeData.ai_extracted_json || (noticeData.ai_extracted_json && noticeData.ai_extracted_json.error)) {
+                startDateSpan.textContent = '시작: (JSON 없음)';
+                endDateSpan.textContent = '마감: (Qual 추출 필요)';
+                startDateSpan.style.color = '#dc3545';
+                endDateSpan.style.color = '#dc3545';
+                return;
+            }
+
+            buttonEl.disabled = true;
+            buttonEl.textContent = '날짜 추출 중...';
+            startDateSpan.textContent = '시작: (날짜 추출 중...)';
+            endDateSpan.textContent = '마감: (날짜 추출 중...)';
+            startDateSpan.style.color = '#fd7e14'; // loading color
+            endDateSpan.style.color = '#fd7e14';
+
+            try {
+                // [신규] /api/extract-dates 호출
+                const response = await fetch('/admin/api/extract-dates', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        notice_id: noticeId
+                    })
+                });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.detail || '날짜 추출 실패');
+                }
+
+                // 응답 (data.start_at_ai, data.end_at_ai)
+                const data = await response.json(); 
+                
+                // 날짜 UI 업데이트
+                startDateSpan.textContent = `시작: ${formatDate(data.start_at_ai)}`;
+                endDateSpan.textContent = `마감: ${formatDate(data.end_at_ai)}`;
+                startDateSpan.style.color = '#27ae60'; // reset color
+                endDateSpan.style.color = '#c0392b'; // reset color
+
+                // 날짜 캐시 업데이트
+                if(window.noticeDataStore[noticeId]) {
+                    window.noticeDataStore[noticeId].start_at_ai = data.start_at_ai;
+                    window.noticeDataStore[noticeId].end_at_ai = data.end_at_ai;
+                }
+                
+                buttonEl.textContent = '날짜 추출됨';
+                buttonEl.style.backgroundColor = '#28a745'; // Green
+                buttonEl.disabled = false;
+
+            } catch (error) {
+                console.error('Error extracting dates:', error);
+                startDateSpan.textContent = `시작: (API 오류)`;
+                endDateSpan.textContent = `마감: (추출 실패)`;
+                startDateSpan.style.color = '#dc3545';
+                endDateSpan.style.color = '#dc3545';
+                buttonEl.textContent = '날짜 추출 실패';
+                buttonEl.style.backgroundColor = '#dc3545'; // Red
+                buttonEl.disabled = false;
+            }
+        }
+
+
+        // 4. [유지] 적합도 비교 (기존 3번)
         async function compareSuitability(noticeId, buttonEl) {
+            // ... (기존 compareSuitability 함수 내용은 변경 없음) ...
             const cell = buttonEl.closest('td');
             const resultSpan = cell.querySelector('.result-span');
             
-            // [수정] DB 재조회 대신, 캐시된 최신 공지 데이터를 가져옴
             const noticeData = window.noticeDataStore[noticeId];
             
-            // [중요] 이 pre-check 로직은 이제 JS 캐시(ai_extracted_json 객체)를 정확히 반영
             if (!noticeData || !noticeData.ai_extracted_json || (noticeData.ai_extracted_json && noticeData.ai_extracted_json.error)) {
                 resultSpan.textContent = '[오류: 먼저 지원자격을 성공적으로 추출해야 합니다.]';
                 resultSpan.className = 'result-span error';
@@ -273,14 +384,12 @@
             resultSpan.className = 'result-span loading';
 
             try {
-                // --- API 경로에 /admin 추가 (수정됨) ---
                 const response = await fetch('/admin/api/compare-notice', { 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     
-                    // [수정] notice_id 대신, 캐시된 notice 객체 전체를 전송
                     body: JSON.stringify({
-                        notice_json: noticeData, // noticeData 객체 (ai_extracted_json이 dict로 포함됨)
+                        notice_json: noticeData, 
                         user_profile: SAMPLE_USER_PROFILE
                     })
                 });
@@ -292,22 +401,17 @@
 
                 const data = await response.json();
                 
-                // --- [수정] 결과 포맷팅 (한글화 및 퍼센트 제거) ---
                 const eligibility = data.eligibility || 'ERROR';
-                // [수정] 한글 라벨 사용
                 const eligibility_korean = KOREAN_LABELS[eligibility] || eligibility; 
 
-                // [신규] 3가지 조건 목록을 가져옴
                 const results = data.criteria_results || {};
                 const passItems = results.pass || [];
                 const failItems = results.fail || [];
                 const verifyItems = results.verify || [];
 
-                // [수정] 이제 백엔드에서 한글 메시지를 주므로 escapeHTML만 사용
                 const toLi = (item) => `<li style="font-size: 0.9em; margin-top: 3px;">${escapeHTML(item)}</li>`;
                 const listStyle = `style="margin: 5px 0 10px 0; padding-left: 20px;"`;
 
-                // [수정] 한글 라벨(eligibility_korean) 사용 (퍼센트 없음)
                 let html = `<strong>[${eligibility_korean}]</strong>`; 
                 
                 if (passItems.length > 0) {
@@ -330,10 +434,9 @@
                         <ul ${listStyle}>${verifyItems.map(toLi).join('')}</ul>
                     `;
                 }
-                // --- [수정 완료] ---
 
                 resultSpan.innerHTML = html;
-                resultSpan.className = `result-span ${eligibility.toLowerCase()}`; // eligible, borderline, ineligible
+                resultSpan.className = `result-span ${eligibility.toLowerCase()}`; 
                 
                 buttonEl.textContent = '비교 (샘플 프로필)';
                 buttonEl.disabled = false;
@@ -345,6 +448,26 @@
                 buttonEl.textContent = '비교 실패';
                 buttonEl.style.backgroundColor = '#dc3545';
                 buttonEl.disabled = false;
+            }
+        }
+
+        // --- [유지] (Helper) 날짜 포맷팅 ---
+        function formatDate(isoString) {
+            if (!isoString) return 'N/A';
+            try {
+                const date = new Date(isoString);
+                if (isNaN(date.getTime())) {
+                    return 'Invalid Date';
+                }
+                const year = date.getFullYear();
+                const month = (date.getMonth() + 1).toString().padStart(2, '0');
+                const day = date.getDate().toString().padStart(2, '0');
+                const hours = date.getHours().toString().padStart(2, '0');
+                const minutes = date.getMinutes().toString().padStart(2, '0');
+                return `${year}-${month}-${day} ${hours}:${minutes}`;
+            } catch(e) {
+                console.warn(`formatDate error for: ${isoString}`, e);
+                return 'Parse Error';
             }
         }
 
