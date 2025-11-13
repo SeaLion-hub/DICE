@@ -16,6 +16,12 @@ END_KEYWORDS = [
     "due", "마감 시한", "까지", "기한", "제출"
 ]
 
+# [FIX 1] 영어 월 약어 파싱을 위한 맵 추가
+ENG_MONTH_MAP = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
+}
+
 
 def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, context_label: str = "") -> dict | None:
     """
@@ -55,6 +61,11 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
     if time_match_col:
         hour, minute = int(time_match_col.group(1)), int(time_match_col.group(2))
         if '오후' in text and hour < 12: hour += 12
+        
+        # [FIX 2] 24:00를 23:59 (마감 시간)으로 처리
+        if hour == 24 and minute == 0:
+            hour, minute = 23, 59
+            
     elif time_match_ampm:
         hour = int(time_match_ampm.group(2))
         minute = int(time_match_ampm.group(3) or 0)
@@ -74,9 +85,17 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
         year, month, day = int(year_match_full.group(1)), int(year_match_full.group(2)), int(year_match_full.group(3))
     
     if not month or not day:
-        date_match = re.search(r'(\d{1,2})\s*[/\s월\s\.]+ *(\d{1,2})[일\s]?', text)
-        if date_match:
-            month, day = int(date_match.group(1)), int(date_match.group(2))
+        # [FIX 3] 영어 월 약어 파싱 (예: Oct 17)
+        eng_date_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{1,2})', text, re.IGNORECASE)
+        if eng_date_match:
+            month_str = eng_date_match.group(1).lower()
+            month = ENG_MONTH_MAP.get(month_str)
+            day = int(eng_date_match.group(2))
+        else:
+            # 기존 한국어/숫자 파싱
+            date_match = re.search(r'(\d{1,2})\s*[/\s월\s\.]+ *(\d{1,2})[일\s]?', text)
+            if date_match:
+                month, day = int(date_match.group(1)), int(date_match.group(2))
             
     # 3.3: 연도 재확인
     if not year_match_full:
