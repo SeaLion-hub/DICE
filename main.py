@@ -93,12 +93,19 @@ async def shutdown_event():
     close_pool()
 
 # 6) CORS
+# 허용할 origin 리스트
+origins = [
+    "https://dice-app.kr",
+    "https://dicefront.vercel.app",  # Vercel 기본 도메인
+    "http://localhost:3000",         # 로컬 개발용
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],         # GET, POST, OPTIONS 등 전부 허용
+    allow_headers=["*"],         # Authorization, Content-Type 등
 )
 
 # 7) 인증 라우터 등록
