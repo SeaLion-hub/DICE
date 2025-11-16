@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from datetime import datetime
 import datetime as dt
 import requests
-from typing import Optional, Any, Dict, List
+from typing import Optional, Any, Dict, List, Tuple
 import time
 import threading
 import json
@@ -119,33 +119,57 @@ def get_majors_list():
     return {"items": formatted_list}
 # --- 메타데이터 API 끝 ---
 
-# 8) 캐시 시스템
+# 8) 캐시 시스템 (Redis 우선, 실패 시 메모리 캐시 fallback)
 _cache = {}
 _cache_lock = threading.Lock()
 
 def cache_get(key: str) -> Any:
-    """만료되지 않은 캐시 값 반환, 없거나 만료 시 None"""
+    """만료되지 않은 캐시 값 반환, 없거나 만료 시 None (Redis 우선)"""
+    # Redis 사용 가능 시 Redis에서 조회
+    global redis_client
+    if redis_client:
+        try:
+            cached_value = redis_client.get(f"cache:{key}")
+            if cached_value:
+                logger.debug(f"Redis cache hit for key: {key}")
+                return json.loads(cached_value)
+        except Exception as e:
+            logger.warning(f"Redis cache get failed, falling back to memory cache: {e}")
+    
+    # 메모리 캐시 fallback
     with _cache_lock:
         if key in _cache:
             expire_time, value = _cache[key]
             if time.time() < expire_time:
-                logger.debug(f"Cache hit for key: {key}")
+                logger.debug(f"Memory cache hit for key: {key}")
                 return value
             else:
                 del _cache[key]
-                logger.debug(f"Cache expired for key: {key}")
+                logger.debug(f"Memory cache expired for key: {key}")
         return None
 
 def cache_set(key: str, value: Any, ttl: int = None):
-    """캐시 저장 (기본 TTL은 CACHE_TTL 환경변수)"""
+    """캐시 저장 (기본 TTL은 CACHE_TTL 환경변수, Redis 우선)"""
     if ttl is None:
         ttl = CACHE_TTL
+    
+    # Redis 사용 가능 시 Redis에 저장
+    global redis_client
+    if redis_client:
+        try:
+            redis_client.setex(f"cache:{key}", ttl, json.dumps(value))
+            logger.debug(f"Redis cache set for key: {key}, TTL: {ttl}s")
+            return
+        except Exception as e:
+            logger.warning(f"Redis cache set failed, falling back to memory cache: {e}")
+    
+    # 메모리 캐시 fallback
     expire_time = time.time() + ttl
     with _cache_lock:
         _cache[key] = (expire_time, value)
-        logger.debug(f"Cache set for key: {key}, TTL: {ttl}s")
+        logger.debug(f"Memory cache set for key: {key}, TTL: {ttl}s")
 
-# 9) AI 헬퍼 함수
+# 9) 헬퍼 함수들
 def _to_utc_ts(date_yyyy_mm_dd: str | None):
     """'YYYY-MM-DD' -> aware UTC midnight; None 유지 (방어적 파싱)"""
     if not date_yyyy_mm_dd:
@@ -156,6 +180,106 @@ def _to_utc_ts(date_yyyy_mm_dd: str | None):
     except (ValueError, TypeError):
         logger.warning(f"Invalid date format: {date_yyyy_mm_dd}. Returning None.")
         return None
+
+def _process_hashtags(hashtags: List[str]) -> List[str]:
+    """해시태그 리스트를 정규화하고 중복 제거"""
+    processed: List[str] = []
+    for raw in hashtags:
+        if not isinstance(raw, str):
+            continue
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        processed.append(cleaned)
+        stripped = cleaned.lstrip("#")
+        if stripped and stripped != cleaned:
+            processed.append(stripped)
+        if not cleaned.startswith("#") and stripped:
+            processed.append(f"#{stripped}")
+    return list(dict.fromkeys(processed))
+
+def _get_user_keywords(request: Request) -> List[str] | None:
+    """요청에서 사용자 키워드를 추출 (인증 필요)"""
+    try:
+        auth = request.headers.get("Authorization", "")
+        parts = auth.split()
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise HTTPException(status_code=401, detail="Not authenticated")
+        
+        token = parts[1]
+        payload = decode_token(token)
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid token")
+
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("SELECT keywords FROM user_profiles WHERE user_id = %s", [user_id])
+            profile_row = cur.fetchone()
+            return profile_row['keywords'] if profile_row else []
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, HTTPException):
+        raise
+    except Exception as e:
+        logger.error(f"DB error fetching user keywords: {e}")
+        raise HTTPException(status_code=500, detail="Database error fetching profile")
+
+def _build_search_clauses(tokens: List[str], q_raw: str, search_mode: str, op: str, rank: str, params: Dict[str, Any], select_extra: List[str]) -> Tuple[List[str], List[str]]:
+    """검색 조건과 정렬 조건을 생성"""
+    where_clauses = []
+    order_clauses = []
+    
+    if not tokens:
+        return where_clauses, order_clauses
+    
+    # ILIKE (Substring)
+    like_conditions = []
+    for i, token in enumerate(tokens):
+        param_name = f"like_token_{i}"
+        params[param_name] = f"%{token}%"
+        like_conditions.append(f"(title ILIKE %({param_name})s OR body_text ILIKE %({param_name})s)")
+    op_join_like = " AND " if op == "and" else " OR "
+    like_clause = f"({op_join_like.join(like_conditions)})"
+
+    # FTS
+    fts_clause = "FALSE"
+    if search_mode in ("fts", "websearch"):
+        if search_mode == "fts":
+            if op == "and":
+                tsquery_str = " & ".join(tokens)
+            else:
+                tsquery_str = " | ".join(tokens)
+            tsquery_str = re.sub(r'[^0-9A-Za-z가-힣\|\&\s]', '', tsquery_str)
+            if tsquery_str:
+                params["tsquery"] = tsquery_str
+                fts_clause = "search_vector @@ to_tsquery('simple', %(tsquery)s)"
+                if rank == "fts":
+                    select_extra.append("ts_rank(search_vector, to_tsquery('simple', %(tsquery)s), 1) AS rank_score")
+        elif search_mode == "websearch":
+            if q_raw:
+                params["websearch_query"] = q_raw
+                try:
+                    fts_clause = "search_vector @@ websearch_to_tsquery('simple', %(websearch_query)s)"
+                    if rank == "fts":
+                        select_extra.append("ts_rank(search_vector, websearch_to_tsquery('simple', %(websearch_query)s), 1) AS rank_score")
+                except psycopg2.Error as e:
+                    logger.warning(f"websearch_to_tsquery failed, falling back to plainto_tsquery: {e}")
+                    params["fallback_query"] = q_raw
+                    fts_clause = "search_vector @@ plainto_tsquery('simple', %(fallback_query)s)"
+                    if rank == "fts":
+                        select_extra.append("ts_rank(search_vector, plainto_tsquery('simple', %(fallback_query)s), 1) AS rank_score")
+
+        # FTS와 ILIKE를 OR로 결합
+        where_clauses.append(f"({fts_clause} OR {like_clause})")
+        if rank == "fts":
+            order_clauses.append("rank_score DESC")
+
+    elif search_mode in ("like", "trgm"):
+        where_clauses.append(like_clause)
+        if rank == "trgm":
+            params["q_raw"] = q_raw
+            select_extra.append("GREATEST(similarity(title, %(q_raw)s), similarity(body_text, %(q_raw)s)) AS rank_score")
+            order_clauses.append("rank_score DESC")
+
+    return where_clauses, order_clauses
 
 # 10) Crawler 헬퍼 함수들
 def normalize_item(item: dict, base_url: str = None) -> dict:
@@ -175,13 +299,15 @@ def normalize_item(item: dict, base_url: str = None) -> dict:
     if item.get("published_at"):
         try:
             normalized["published_at"] = datetime.fromisoformat(item["published_at"].replace("Z", "+00:00"))
-        except:
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.debug(f"Failed to parse published_at '{item.get('published_at')}': {e}")
             pass
     elif item.get("date"):
         try:
             d = dt.date.fromisoformat(item["date"])
             normalized["published_at"] = dt.datetime(d.year, d.month, d.day, tzinfo=dt.timezone.utc)
-        except:
+        except (ValueError, TypeError, AttributeError) as e:
+            logger.debug(f"Failed to parse date '{item.get('date')}': {e}")
             pass
 
     return normalized
@@ -320,21 +446,7 @@ def list_notices(
 
     # 캐시 키 생성 (my=true는 캐시 안 함)
     cache_key = None
-    processed_hashtags: List[str] = []
-    for raw in hashtags:
-        if not isinstance(raw, str):
-            continue
-        cleaned = raw.strip()
-        if not cleaned:
-            continue
-        processed_hashtags.append(cleaned)
-        stripped = cleaned.lstrip("#")
-        if stripped and stripped != cleaned:
-            processed_hashtags.append(stripped)
-        if not cleaned.startswith("#") and stripped:
-            processed_hashtags.append(f"#{stripped}")
-
-    hashtags = list(dict.fromkeys(processed_hashtags))
+    hashtags = _process_hashtags(hashtags)
 
     if not no_cache and not my:
         cache_key_parts = [
@@ -351,31 +463,9 @@ def list_notices(
 
     user_keywords = None
     if my:
-        try:
-            auth = request.headers.get("Authorization", "")
-            parts = auth.split()
-            if len(parts) == 2 and parts[0].lower() == "bearer":
-                token = parts[1]
-                payload = decode_token(token)
-                user_id = payload.get("sub")
-                if not user_id:
-                    raise HTTPException(status_code=401, detail="Invalid token")
-            else:
-                raise HTTPException(status_code=401, detail="Not authenticated")
-
-            with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute("SELECT keywords FROM user_profiles WHERE user_id = %s", [user_id])
-                profile_row = cur.fetchone()
-                user_keywords = profile_row['keywords'] if profile_row else []
-
-            if not user_keywords:
-                 return {"meta": {"returned": 0, "total_count": 0}, "items": []}
-
-        except (jwt.ExpiredSignatureError, jwt.InvalidTokenError, HTTPException) as e:
-            raise HTTPException(status_code=401, detail=str(e.detail if hasattr(e, 'detail') else e))
-        except Exception as e:
-            logger.error(f"DB error fetching user keywords: {e}")
-            raise HTTPException(status_code=500, detail="Database error fetching profile")
+        user_keywords = _get_user_keywords(request)
+        if not user_keywords:
+            return {"meta": {"returned": 0, "total_count": 0}, "items": []}
 
     # 검색어 토큰화
     tokens = []
@@ -404,73 +494,30 @@ def list_notices(
     if date_from:
         try:
             params["date_from"] = datetime.fromisoformat(date_from)
-        except:
-            raise HTTPException(status_code=400, detail="Invalid date_from format")
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid date_from format: {date_from}, error: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid date_from format: {date_from}. Expected YYYY-MM-DD")
         where_clauses.append("published_at >= %(date_from)s")
 
     if date_to:
         try:
             params["date_to"] = datetime.fromisoformat(date_to) + dt.timedelta(days=1)
-        except:
-            raise HTTPException(status_code=400, detail="Invalid date_to format")
+        except (ValueError, TypeError) as e:
+            logger.warning(f"Invalid date_to format: {date_to}, error: {e}")
+            raise HTTPException(status_code=400, detail=f"Invalid date_to format: {date_to}. Expected YYYY-MM-DD")
         where_clauses.append("published_at < %(date_to)s")
 
     if my and user_keywords:
-        if my and user_keywords:
         # [수정] 사용자의 keywords를 공지의 detailed_hashtags와 비교
-            where_clauses.append("(detailed_hashtags && %(user_keywords)s::text[])") 
-            params["user_keywords"] = user_keywords
+        where_clauses.append("(detailed_hashtags && %(user_keywords)s::text[])") 
+        params["user_keywords"] = user_keywords
 
     # 검색 로직 (FTS + ILIKE 하이브리드)
-    if tokens:
-        # ILIKE (Substring)
-        like_conditions = []
-        for i, token in enumerate(tokens):
-            param_name = f"like_token_{i}"
-            params[param_name] = f"%{token}%"
-            like_conditions.append(f"(title ILIKE %({param_name})s OR body_text ILIKE %({param_name})s)")
-        op_join_like = " AND " if op == "and" else " OR "
-        like_clause = f"({op_join_like.join(like_conditions)})"
-
-        # FTS
-        fts_clause = "FALSE"
-        if search_mode in ("fts", "websearch"):
-            if search_mode == "fts":
-                if op == "and":
-                    tsquery_str = " & ".join(tokens)
-                else:
-                    tsquery_str = " | ".join(tokens)
-                tsquery_str = re.sub(r'[^0-9A-Za-z가-힣\|\&\s]', '', tsquery_str)
-                if tsquery_str:
-                    params["tsquery"] = tsquery_str
-                    fts_clause = "search_vector @@ to_tsquery('simple', %(tsquery)s)"
-                    if rank == "fts":
-                        select_extra.append("ts_rank(search_vector, to_tsquery('simple', %(tsquery)s), 1) AS rank_score")
-            elif search_mode == "websearch":
-                if q_raw:
-                    params["websearch_query"] = q_raw
-                    try:
-                        fts_clause = "search_vector @@ websearch_to_tsquery('simple', %(websearch_query)s)"
-                        if rank == "fts":
-                            select_extra.append("ts_rank(search_vector, websearch_to_tsquery('simple', %(websearch_query)s), 1) AS rank_score")
-                    except psycopg2.Error as e:
-                        logger.warning(f"websearch_to_tsquery failed, falling back to plainto_tsquery: {e}")
-                        params["fallback_query"] = q_raw
-                        fts_clause = "search_vector @@ plainto_tsquery('simple', %(fallback_query)s)"
-                        if rank == "fts":
-                            select_extra.append("ts_rank(search_vector, plainto_tsquery('simple', %(fallback_query)s), 1) AS rank_score")
-
-            # FTS와 ILIKE를 OR로 결합
-            where_clauses.append(f"({fts_clause} OR {like_clause})")
-            if rank == "fts":
-                order_clauses.append("rank_score DESC")
-
-        elif search_mode in ("like", "trgm"):
-            where_clauses.append(like_clause)
-            if rank == "trgm":
-                params["q_raw"] = q_raw
-                select_extra.append("GREATEST(similarity(title, %(q_raw)s), similarity(body_text, %(q_raw)s)) AS rank_score")
-                order_clauses.append("rank_score DESC")
+    search_where_clauses, search_order_clauses = _build_search_clauses(
+        tokens, q_raw, search_mode, op, rank, params, select_extra
+    )
+    where_clauses.extend(search_where_clauses)
+    order_clauses.extend(search_order_clauses)
 
     # 기본 정렬
     if sort == "oldest":
@@ -495,6 +542,15 @@ def list_notices(
             # SELECT
             params["limit"] = min(limit, 100)
             params["offset"] = offset
+            
+            # 중복 방지: 정렬 기준에 id 추가하여 일관된 결과 보장
+            # DISTINCT ON을 사용하지 않고, 정렬 기준에 id를 추가하여 중복 방지
+            order_sql_with_id = order_sql
+            if order_sql and "id" not in order_sql.lower():
+                order_sql_with_id = order_sql + ", id DESC"
+            elif not order_sql:
+                order_sql_with_id = "ORDER BY id DESC"
+            
             sql = f"""
                 SELECT 
                     id, college_key, title, url,
@@ -504,11 +560,21 @@ def list_notices(
                     {select_extra_sql}
                 FROM notices
                 {where_sql}
-                {order_sql}
+                {order_sql_with_id}
                 LIMIT %(limit)s OFFSET %(offset)s
             """
             cur.execute(sql, params)
             rows = cur.fetchall()
+            
+            # Python 레벨에서 중복 제거 (방어적 프로그래밍)
+            seen_ids = set()
+            unique_rows = []
+            for row in rows:
+                row_id = row.get("id")
+                if row_id and row_id not in seen_ids:
+                    seen_ids.add(row_id)
+                    unique_rows.append(row)
+            rows = unique_rows
     except Exception as e:
         logger.error(f"DB error searching notices: {e}")
         raise HTTPException(status_code=500, detail="Database error executing search")
