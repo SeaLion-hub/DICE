@@ -31,6 +31,9 @@ from ai_processor import (
 # [신규] 적합도 검증 로직 import
 from comparison_logic import check_suitability
 
+# [신규] 일정 추출 유틸리티 import
+from calendar_utils import ensure_utc_datetime
+
 # 인증 라우터 및 의존성 import
 from auth_routes import router as auth_router
 from admin_routes import router as admin_router
@@ -204,6 +207,36 @@ def _process_hashtags(hashtags: List[str]) -> List[str]:
         if not cleaned.startswith("#") and stripped:
             processed.append(f"#{stripped}")
     return list(dict.fromkeys(processed))
+
+def calculate_is_closed(start_at_ai: Any, end_at_ai: Any, now: Optional[datetime] = None) -> bool:
+    """
+    일정이 추출된 공지의 마감 여부를 계산합니다.
+    
+    Args:
+        start_at_ai: 시작일 (datetime 객체, ISO 문자열, 또는 None)
+        end_at_ai: 종료일 (datetime 객체, ISO 문자열, 또는 None)
+        now: 현재 시각 (기본값: UTC now)
+    
+    Returns:
+        마감 여부 (True: 마감됨, False: 마감 안 됨)
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+    
+    # 일정이 추출되지 않은 경우 False 반환
+    if not (start_at_ai or end_at_ai):
+        return False
+    
+    # end_at_ai 우선, 없으면 start_at_ai 사용
+    deadline_dt = end_at_ai if end_at_ai else start_at_ai
+    
+    # UTC datetime으로 정규화
+    deadline_utc = ensure_utc_datetime(deadline_dt)
+    
+    if not deadline_utc:
+        return False
+    
+    return deadline_utc < now
 
 def _get_user_keywords(request: Request) -> List[str] | None:
     """요청에서 사용자 키워드를 추출 (인증 필요)"""
@@ -583,37 +616,10 @@ def list_notices(
                 if row_id and row_id not in seen_ids:
                     seen_ids.add(row_id)
                     
-                    # 일정이 추출된 공지인지 확인
+                    # 마감 여부 계산 (일정이 추출된 공지에 대하여만)
                     start_at_ai = row.get("start_at_ai")
                     end_at_ai = row.get("end_at_ai")
-                    has_schedule = bool(start_at_ai or end_at_ai)
-                    
-                    # 마감 여부 계산 (일정이 추출된 공지에 대하여만)
-                    is_closed = False
-                    if has_schedule:
-                        # end_at_ai가 있으면 그것을 기준으로, 없으면 start_at_ai를 기준으로 마감 여부 확인
-                        deadline_dt = end_at_ai if end_at_ai else start_at_ai
-                        
-                        if deadline_dt:
-                            # datetime 객체인 경우 그대로 사용, 문자열인 경우 파싱
-                            if isinstance(deadline_dt, str):
-                                try:
-                                    deadline_dt = datetime.fromisoformat(deadline_dt.replace("Z", "+00:00"))
-                                    if deadline_dt.tzinfo is None:
-                                        deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
-                                    else:
-                                        deadline_dt = deadline_dt.astimezone(timezone.utc)
-                                except (ValueError, TypeError):
-                                    deadline_dt = None
-                            
-                            if deadline_dt and isinstance(deadline_dt, datetime):
-                                if deadline_dt.tzinfo is None:
-                                    deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
-                                else:
-                                    deadline_dt = deadline_dt.astimezone(timezone.utc)
-                                is_closed = deadline_dt < now
-                    
-                    row["is_closed"] = is_closed
+                    row["is_closed"] = calculate_is_closed(start_at_ai, end_at_ai, now)
                     unique_rows.append(row)
             rows = unique_rows
     except Exception as e:
@@ -712,32 +718,7 @@ def get_notice(notice_id: str):
             if notice:
                 start_at_ai = notice.get("start_at_ai")
                 end_at_ai = notice.get("end_at_ai")
-                has_schedule = bool(start_at_ai or end_at_ai)
-                
-                is_closed = False
-                if has_schedule:
-                    now = datetime.now(timezone.utc)
-                    deadline_dt = end_at_ai if end_at_ai else start_at_ai
-                    
-                    if deadline_dt:
-                        if isinstance(deadline_dt, str):
-                            try:
-                                deadline_dt = datetime.fromisoformat(deadline_dt.replace("Z", "+00:00"))
-                                if deadline_dt.tzinfo is None:
-                                    deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
-                                else:
-                                    deadline_dt = deadline_dt.astimezone(timezone.utc)
-                            except (ValueError, TypeError):
-                                deadline_dt = None
-                        
-                        if deadline_dt and isinstance(deadline_dt, datetime):
-                            if deadline_dt.tzinfo is None:
-                                deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
-                            else:
-                                deadline_dt = deadline_dt.astimezone(timezone.utc)
-                            is_closed = deadline_dt < now
-                
-                notice["is_closed"] = is_closed
+                notice["is_closed"] = calculate_is_closed(start_at_ai, end_at_ai)
     except Exception as e:
         logger.error(f"DB error fetching notice {notice_id}: {e}")
         raise HTTPException(status_code=500, detail="Database error fetching notice")
