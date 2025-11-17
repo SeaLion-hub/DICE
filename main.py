@@ -132,6 +132,7 @@ def get_majors_list():
 # 8) 캐시 시스템 (Redis 우선, 실패 시 메모리 캐시 fallback)
 _cache = {}
 _cache_lock = threading.Lock()
+MAX_CACHE_SIZE = 500  # 메모리 캐시 최대 크기 제한 (MVP 안정성)
 
 def cache_get(key: str) -> Any:
     """만료되지 않은 캐시 값 반환, 없거나 만료 시 None (Redis 우선)"""
@@ -176,6 +177,22 @@ def cache_set(key: str, value: Any, ttl: int = None):
     # 메모리 캐시 fallback
     expire_time = time.time() + ttl
     with _cache_lock:
+        # [FIX] 메모리 캐시 크기 제한: 최대 크기 초과 시 가장 오래된 항목 제거
+        if len(_cache) >= MAX_CACHE_SIZE:
+            # 만료된 항목 먼저 제거 시도
+            now = time.time()
+            expired_keys = [k for k, (exp, _) in _cache.items() if exp < now]
+            if expired_keys:
+                for k in expired_keys[:10]:  # 한 번에 최대 10개 제거
+                    del _cache[k]
+                logger.debug(f"Removed {len(expired_keys)} expired cache entries")
+            
+            # 여전히 크기 초과 시 가장 오래된 항목 1개 제거
+            if len(_cache) >= MAX_CACHE_SIZE:
+                oldest_key = min(_cache.items(), key=lambda x: x[1][0])[0]
+                del _cache[oldest_key]
+                logger.debug(f"Cache size limit reached, removed oldest entry: {oldest_key[:50]}...")
+        
         _cache[key] = (expire_time, value)
         logger.debug(f"Memory cache set for key: {key}, TTL: {ttl}s")
 
@@ -867,3 +884,249 @@ def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
             "reasons_human": ["자격 검증 중 서버 오류가 발생했습니다. (관리자 문의)"],
             "missing_info": [],
         }
+
+# =========================
+# 검색어 제안 API (오타 교정 + 연관 검색어)
+# =========================
+
+@app.get("/search/suggest")
+def suggest_search(
+    q: str = Query(..., min_length=1, description="검색어"),
+    limit: int = Query(5, ge=1, le=20, description="제안 개수")
+):
+    """
+    검색어 제안 API
+    - 오타 교정: 유사한 인기 검색어 제안
+    - 연관 검색어: 함께 검색된 키워드 제안
+    """
+    if not q or len(q.strip()) < 1:
+        return {"corrections": [], "related": []}
+    
+    query = q.strip()
+    results = {"corrections": [], "related": []}
+    
+    try:
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 1. 오타 교정: 인기 검색어에서 유사도 검색 (pg_trgm 사용)
+            cur.execute("""
+                SELECT 
+                    keyword,
+                    similarity(keyword, %s) as sim_score
+                FROM popular_keywords
+                WHERE similarity(keyword, %s) > 0.3
+                  AND keyword != %s
+                ORDER BY sim_score DESC, search_count DESC
+                LIMIT %s
+            """, [query, query, query, limit])
+            
+            corrections = cur.fetchall()
+            results["corrections"] = [
+                {
+                    "keyword": row["keyword"],
+                    "score": float(row["sim_score"]),
+                    "type": "correction"
+                }
+                for row in corrections
+            ]
+            
+            # 2. 연관 검색어: 검색 로그에서 함께 검색된 키워드
+            cur.execute("""
+                SELECT DISTINCT
+                    s2.query as keyword,
+                    COUNT(*) as cooccurrence
+                FROM search_logs s1
+                JOIN search_logs s2 ON s1.user_id = s2.user_id
+                WHERE s1.query = %s
+                  AND s2.query != %s
+                  AND s1.created_at > NOW() - INTERVAL '30 days'
+                  AND s2.created_at > NOW() - INTERVAL '30 days'
+                GROUP BY s2.query
+                ORDER BY cooccurrence DESC
+                LIMIT %s
+            """, [query, query, limit])
+            
+            related_from_logs = cur.fetchall()
+            
+            # 3. 인기 검색어 기반 연관 검색어 (검색 로그가 부족할 경우)
+            if len(related_from_logs) < limit:
+                # 간단한 연관 검색어 매핑 (하드코딩)
+                related_keywords_map = {
+                    "장학금": ["장학", "국가장학", "성적우수"],
+                    "장학": ["장학금", "국가장학"],
+                    "인턴십": ["인턴", "채용", "취업"],
+                    "인턴": ["인턴십", "채용"],
+                    "공모전": ["대회", "경진대회"],
+                    "취업": ["채용", "인턴십"],
+                    "채용": ["취업", "인턴십"],
+                }
+                
+                related_hardcoded = []
+                for key, values in related_keywords_map.items():
+                    if query.startswith(key) or key in query:
+                        related_hardcoded.extend(values)
+                
+                # 이미 corrections에 포함된 것은 제외
+                correction_keywords = {r["keyword"] for r in results["corrections"]}
+                related_hardcoded = [kw for kw in related_hardcoded if kw not in correction_keywords and kw != query]
+                
+                # 검색 로그 결과와 합치기
+                related_keywords = {row["keyword"] for row in related_from_logs}
+                for kw in related_hardcoded[:limit - len(related_from_logs)]:
+                    if kw not in related_keywords:
+                        related_keywords.add(kw)
+                        results["related"].append({
+                            "keyword": kw,
+                            "type": "related"
+                        })
+            
+            # 검색 로그 결과 추가
+            for row in related_from_logs:
+                if row["keyword"] not in {r["keyword"] for r in results["corrections"]}:
+                    results["related"].append({
+                        "keyword": row["keyword"],
+                        "cooccurrence": row["cooccurrence"],
+                        "type": "related"
+                    })
+            
+            # 4. 검색 로그 기록 (비동기로 처리하는 것이 좋지만, 간단하게 동기 처리)
+            # 실제 검색 실행 시에만 기록하므로 여기서는 기록하지 않음
+            
+    except Exception as e:
+        logger.error(f"Error in search suggest: {e}", exc_info=True)
+        # 오류 발생 시에도 빈 결과 반환 (서비스 중단 방지)
+        return {"corrections": [], "related": []}
+    
+    return results
+
+@app.post("/search/log")
+def log_search(
+    request: Request,
+    query: str = Body(..., embed=True),
+    results_count: int = Body(None, embed=True),
+    clicked_notice_id: str = Body(None, embed=True)
+):
+    """
+    검색 로그 기록 (연관 검색어 분석용)
+    """
+    user_id = None
+    try:
+        auth = request.headers.get("Authorization", "")
+        if auth:
+            parts = auth.split()
+            if len(parts) == 2 and parts[0].lower() == "bearer":
+                token = parts[1]
+                payload = decode_token(token)
+                user_id = payload.get("sub")
+    except Exception:
+        pass  # 인증 실패 시 user_id는 None (익명 검색 로그)
+    
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            # 검색 로그 기록
+            cur.execute("""
+                INSERT INTO search_logs (user_id, query, results_count, clicked_notice_id)
+                VALUES (%s, %s, %s, %s)
+            """, [user_id, query.strip(), results_count, clicked_notice_id])
+            
+            # 인기 검색어 업데이트 (검색 횟수 증가)
+            cur.execute("""
+                INSERT INTO popular_keywords (keyword, search_count, last_searched_at)
+                VALUES (%s, 1, NOW())
+                ON CONFLICT (keyword) 
+                DO UPDATE SET 
+                    search_count = popular_keywords.search_count + 1,
+                    last_searched_at = NOW()
+            """, [query.strip()])
+            
+            conn.commit()
+    except Exception as e:
+        logger.error(f"Error logging search: {e}", exc_info=True)
+        # 로그 기록 실패해도 검색은 계속 진행
+    
+    return {"ok": True}
+
+# =========================
+# 알림 설정 API
+# =========================
+
+class NotificationSettings(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    enabled: bool = True
+    deadline_days: List[int] = Field(default=[3, 7], description="마감 N일 전 알림")
+    categories: List[str] = Field(default_factory=list, description="알림 받을 카테고리 (빈 배열이면 전체)")
+    email_notifications: bool = False
+    push_notifications: bool = True
+
+@app.get("/notifications/settings")
+def get_notification_settings(user: dict = Depends(get_current_user)):
+    """알림 설정 조회"""
+    try:
+        user_id = user["id"]
+        
+        with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT enabled, deadline_days, categories, email_notifications, push_notifications
+                FROM user_notification_settings
+                WHERE user_id = %s
+            """, [user_id])
+            
+            row = cur.fetchone()
+            
+            if row:
+                return {
+                    "enabled": row["enabled"],
+                    "deadline_days": row["deadline_days"] or [3, 7],
+                    "categories": row["categories"] or [],
+                    "email_notifications": row["email_notifications"],
+                    "push_notifications": row["push_notifications"]
+                }
+            else:
+                # 기본값 반환
+                return {
+                    "enabled": True,
+                    "deadline_days": [3, 7],
+                    "categories": [],
+                    "email_notifications": False,
+                    "push_notifications": True
+                }
+    except Exception as e:
+        logger.error(f"Error fetching notification settings: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Database error")
+
+@app.put("/notifications/settings")
+def update_notification_settings(
+    settings: NotificationSettings,
+    user: dict = Depends(get_current_user)
+):
+    """알림 설정 업데이트"""
+    try:
+        user_id = user["id"]
+        
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO user_notification_settings 
+                    (user_id, enabled, deadline_days, categories, email_notifications, push_notifications)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (user_id) 
+                DO UPDATE SET
+                    enabled = EXCLUDED.enabled,
+                    deadline_days = EXCLUDED.deadline_days,
+                    categories = EXCLUDED.categories,
+                    email_notifications = EXCLUDED.email_notifications,
+                    push_notifications = EXCLUDED.push_notifications,
+                    updated_at = NOW()
+            """, [
+                user_id,
+                settings.enabled,
+                settings.deadline_days,
+                settings.categories,
+                settings.email_notifications,
+                settings.push_notifications
+            ])
+            
+            conn.commit()
+            
+        return {"ok": True, "message": "알림 설정이 업데이트되었습니다."}
+    except Exception as e:
+        logger.error(f"Error updating notification settings: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Database error")

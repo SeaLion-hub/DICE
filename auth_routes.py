@@ -136,27 +136,27 @@ async def register(req: RegisterRequest):
         with get_conn() as conn:
             ensure_user_profile_schema(conn)
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                # 1. 중복 체크 (레이스 컨디션 가능성 있음)
-                cur.execute(
-                    "SELECT 1 FROM users WHERE lower(email) = lower(%s)",
-                    (email,)
-                )
-                if cur.fetchone():
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="Email already registered"
-                    )
-
-                # 2. 사용자 생성
+                # [FIX] 레이스 컨디션 해결: UNIQUE 인덱스를 활용한 원자적 INSERT
+                # SELECT 후 INSERT 사이에 다른 요청이 끼어들어도 DB 레벨에서 중복 방지
+                # users_email_lower_uidx 인덱스는 lower(email) 표현식 기반이므로 표현식 직접 사용
                 cur.execute(
                     """
                     INSERT INTO users (email, password_hash)
                     VALUES (%s, %s)
+                    ON CONFLICT (lower(email)) DO NOTHING
                     RETURNING id, created_at
                     """,
                     (email, pw_hash)
                 )
                 user = cur.fetchone()
+                
+                # INSERT가 실제로 실행되지 않았으면 (중복 이메일) 에러 반환
+                if not user:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Email already registered"
+                    )
+                
                 user_id = str(user["id"])
 
                 # 쓰기 작업이므로 커밋
