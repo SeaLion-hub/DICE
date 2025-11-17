@@ -80,7 +80,7 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
         if '오후' in text and hour < 12: hour += 12
 
     # 3.2: 연도/월/일 (YYYY.MM.DD, MM/DD, MM.DD., MM월 DD일)
-    year_match_full = re.search(r'(202[4-9])\s*[\.년]\s*(\d{1,2})\s*[\.월]\s*(\d{1,2})', text)
+    year_match_full = re.search(r'(202[4-9]|20[3-9][0-9])\s*[\.년]\s*(\d{1,2})\s*[\.월]\s*(\d{1,2})', text)
     if year_match_full:
         year, month, day = int(year_match_full.group(1)), int(year_match_full.group(2)), int(year_match_full.group(3))
     
@@ -92,16 +92,40 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
             month = ENG_MONTH_MAP.get(month_str)
             day = int(eng_date_match.group(2))
         else:
-            # 기존 한국어/숫자 파싱
-            date_match = re.search(r'(\d{1,2})\s*[/\s월\s\.]+ *(\d{1,2})[일\s]?', text)
+            # 기존 한국어/숫자 파싱 - "(금)" 같은 요일 표시도 처리
+            date_match = re.search(r'(\d{1,2})\s*[/\s월\s\.]+ *(\d{1,2})\s*일', text)
             if date_match:
                 month, day = int(date_match.group(1)), int(date_match.group(2))
             
-    # 3.3: 연도 재확인
+    # 3.3: 연도 재확인 및 추론 개선
     if not year_match_full:
-        year_match_simple = re.search(r'(202[4-9])', text)
+        year_match_simple = re.search(r'(202[4-9]|20[3-9][0-9])', text)
         if year_match_simple:
             year = int(year_match_simple.group(1))
+        elif month and day:
+            # 연도가 없고 월/일만 있는 경우: 스마트한 연도 추론
+            # 현재 날짜와 비교하여 미래 날짜로 추론
+            try:
+                # 현재 연도로 시도
+                test_date_current = datetime.datetime(current_year, month, day, 0, 0)
+                # 현재 날짜보다 이전이면 다음 연도일 가능성 높음
+                # 특히 11월, 12월인 경우 다음 연도일 가능성이 높음
+                if test_date_current < now:
+                    # 현재보다 이전이면 다음 연도
+                    # 강연회/행사는 보통 미래 날짜이므로 다음 연도로 추론
+                    year = current_year + 1
+                else:
+                    # 현재보다 미래이면 현재 연도
+                    year = current_year
+                    
+                # 추가 검증: 추론된 연도로 만든 날짜가 여전히 과거면 한 번 더 확인
+                test_date_inferred = datetime.datetime(year, month, day, 0, 0)
+                if test_date_inferred < now and month >= 10:
+                    # 11월, 12월인데 여전히 과거면 다음 연도로 확정
+                    year = current_year + 1
+            except ValueError:
+                # 유효하지 않은 날짜면 현재 연도 사용
+                year = current_year
             
     # --- 4. 유효성 검사 및 객체 생성 ---
     
@@ -131,7 +155,8 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
                  hour, minute = 9, 0 # 기존 기본값 유지 (모호한 경우)
 
     try:
-        dt = datetime.datetime(year, month, day, hour, minute)
+        # KST 타임존으로 datetime 생성
+        dt = datetime.datetime(year, month, day, hour, minute, tzinfo=KST)
         
         event_title_prefix = dt.strftime('%Y-%m-%d %H:%M')
         
