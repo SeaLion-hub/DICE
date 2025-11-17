@@ -253,6 +253,12 @@ def calculate_is_closed(start_at_ai: Any, end_at_ai: Any, now: Optional[datetime
     if not deadline_utc:
         return False
     
+    # 04:23으로 설정된 경우 (기본값 버그) 마감일로 간주하여 23:59로 보정
+    # 단, end_at_ai가 없고 start_at_ai만 있는 경우는 시작일이므로 보정하지 않음
+    if end_at_ai and deadline_utc.hour == 4 and deadline_utc.minute == 23:
+        # 마감일이므로 23:59로 보정
+        deadline_utc = deadline_utc.replace(hour=23, minute=59)
+    
     return deadline_utc < now
 
 def _get_user_keywords(request: Request) -> List[str] | None:

@@ -190,9 +190,13 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
         elif is_end_hint and is_start_hint:
             hour, minute = 23, 59
 
-        # 4. 키워드 없음 (순수 일회성 이벤트) -> 04:23
+        # 4. 키워드 없음 (순수 일회성 이벤트) -> 기본값 변경
         else:
-             hour, minute = 4, 23 
+            # context_label이 명시적으로 'start'인 경우만 00:00, 그 외는 마감일로 간주하여 23:59
+            if is_explicit_start:
+                hour, minute = 0, 0
+            else:
+                hour, minute = 23, 59  # 기본값을 23:59로 변경 (04:23 제거) 
 
     try:
         dt = datetime.datetime(year, month, day, hour, minute, tzinfo=KST)
@@ -343,17 +347,32 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
             # 키워드 없음 (일회성 이벤트): 마감(end_at)에 우선 할당
             if end_at is None:
                 end_at = candidate
+                # 마감일이므로 시간을 23:59로 보정 (시간이 없을 경우)
+                if end_at.hour == 4 and end_at.minute == 23:
+                    end_at = end_at.replace(hour=23, minute=59)
             elif start_at is None:
                 if candidate < end_at:
                     start_at = candidate
+                    # 시작일이므로 시간을 00:00으로 보정 (시간이 없을 경우)
+                    if start_at.hour == 4 and start_at.minute == 23:
+                        start_at = start_at.replace(hour=0, minute=0)
                 else:
                     start_at = end_at
                     end_at = candidate
+                    # 마감일 시간 보정
+                    if end_at.hour == 4 and end_at.minute == 23:
+                        end_at = end_at.replace(hour=23, minute=59)
             else:
                 if candidate > end_at:
                     end_at = candidate
+                    # 마감일 시간 보정
+                    if end_at.hour == 4 and end_at.minute == 23:
+                        end_at = end_at.replace(hour=23, minute=59)
                 elif candidate < start_at:
                     start_at = candidate
+                    # 시작일 시간 보정
+                    if start_at.hour == 4 and start_at.minute == 23:
+                        start_at = start_at.replace(hour=0, minute=0)
 
 
     key_dates = []
@@ -409,6 +428,14 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
 
     start_at = _normalize_structured_datetime(start_at)
     end_at = _normalize_structured_datetime(end_at)
+
+    # 04:23 기본값 버그 보정 (정규화 후에도 확인)
+    if end_at and end_at.hour == 4 and end_at.minute == 23:
+        # 마감일이므로 23:59로 보정
+        end_at = end_at.replace(hour=23, minute=59)
+    if start_at and start_at.hour == 4 and start_at.minute == 23:
+        # 시작일이므로 00:00으로 보정
+        start_at = start_at.replace(hour=0, minute=0)
 
     # 데이터 검증 강화
     if start_at and end_at:
