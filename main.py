@@ -646,12 +646,31 @@ def get_notice(notice_id: str):
         return cached_data
     try:
         with get_conn() as conn, conn.cursor(cursor_factory=RealDictCursor) as cur:
+            # 프론트엔드가 기대하는 필드들을 모두 포함하여 조회
+            # raw_text, posted_at (published_at 별칭), source_college (source_site 별칭) 추가
             cur.execute("""
-              SELECT id, college_key, title, url, body_html, body_text,
-                     category_ai, start_at_ai, end_at_ai, qualification_ai, hashtags_ai,
-                     detailed_hashtags, -- [추가] 세부 해시태그
-                     published_at, created_at, updated_at
-              FROM notices WHERE id = %s
+              SELECT 
+                n.id, 
+                n.college_key, 
+                n.title, 
+                n.url, 
+                n.body_html, 
+                n.body_text,
+                n.raw_text,
+                n.category_ai, 
+                n.start_at_ai, 
+                n.end_at_ai, 
+                n.qualification_ai, 
+                n.hashtags_ai,
+                n.detailed_hashtags,
+                n.published_at,
+                n.published_at AS posted_at,
+                n.source_site,
+                n.source_site AS source_college,
+                n.created_at, 
+                n.updated_at
+              FROM notices n
+              WHERE n.id = %s
             """, [notice_id])
             notice = cur.fetchone()
     except Exception as e:
