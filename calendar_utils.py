@@ -6,17 +6,16 @@ from typing import Any, Dict, Optional, Tuple
 
 KST = timezone(timedelta(hours=9))
 
-# [유지] 키워드 목록 (start/end 분류에 사용)
+# [유지] 키워드 목록
 START_KEYWORDS = [
     "시작", "start", "개시", "개강", "오픈", "open", "모집 시작", "접수 시작",
-    "부터", "일시", "기간", "개최"
+    "부터", "기간", "개최"
 ]
 END_KEYWORDS = [
     "마감", "deadline", "종료", "until", "마감일", "마감기한", "접수 마감", "마지막",
     "due", "마감 시한", "까지", "기한", "제출"
 ]
 
-# [FIX 1] 영어 월 약어 파싱을 위한 맵 추가
 ENG_MONTH_MAP = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12
@@ -27,44 +26,28 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
     """
     AI가 추출한 비정형 날짜 텍스트(key_date)와 컨텍스트(context_label)를 바탕으로
     캘린더 API가 이해할 수 있는 표준 포맷(dict)으로 변환합니다.
-
-    Args:
-        key_date_text (str): ai_processor.py가 추출한 'key_date' 필드 값.
-        notice_title (str): 캘린더 제목으로 사용할 공지사항 원본 제목.
-        context_label (str): "제출 기한", "시작일" 등 key_date_type 값.
-                             (시간 기본값 설정을 위해 사용됨)
-
-    Returns:
-        dict | None: 캘린더 이벤트 객체
     """
     
-    # 1. 현재 시간 기준으로 기본 연도 설정 (KST 타임존)
     now = datetime.datetime.now(KST)
     current_year = now.year
 
-    # 2. 문자열 정제 (범위 문자 '~'는 제거하지 않음)
     text = key_date_text.strip().lstrip('~').rstrip('까지').rstrip('.')
     if '부터' in text:
         text = text.split('부터')[0].strip()
         
     year, month, day, hour, minute = current_year, None, None, None, None
 
-    # --- 3. 정규표현식(Regex)으로 날짜/시간 파싱 (FIX 1: 시간 파싱 우선) ---
+    # --- 3. 정규표현식(Regex)으로 날짜/시간 파싱 ---
 
-    # 3.1: 시간 (HH:MM, 오후 H시, H시)
-    # [FIX 1] "18:00 까지" -> "18:00"을 먼저 잡도록 순서 변경 및 정규식 강화
+    # 3.1: 시간 파싱
     time_match_col = re.search(r'(\d{1,2}):(\d{2})', text)
     time_match_ampm = re.search(r'(오전|오후)\s*(\d{1,2})시\s*(\d{1,2})?분?', text)
-    # [FIX 1] "17시" 케이스 (AM/PM이나 콜론(:) 없는 경우)
     time_match_kor = re.search(r'(\d{1,2})시\s*(\d{1,2})?분?', text)
 
     if time_match_col:
         hour, minute = int(time_match_col.group(1)), int(time_match_col.group(2))
         if '오후' in text and hour < 12: hour += 12
-        
-        # [FIX 2] 24:00를 23:59 (마감 시간)으로 처리
-        if hour == 24 and minute == 0:
-            hour, minute = 23, 59
+        if hour == 24 and minute == 0: hour, minute = 23, 59
             
     elif time_match_ampm:
         hour = int(time_match_ampm.group(2))
@@ -74,87 +57,83 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
     elif '자정' in text:
         hour, minute = 23, 59
     elif time_match_kor:
-        # (주의) 다른 시간 정규식과 겹치지 않도록 'elif' 유지
         hour = int(time_match_kor.group(1))
         minute = int(time_match_kor.group(2) or 0)
         if '오후' in text and hour < 12: hour += 12
 
-    # 3.2: 연도/월/일 (YYYY.MM.DD, MM/DD, MM.DD., MM월 DD일)
+    # 3.2: 연도/월/일 파싱
     year_match_full = re.search(r'(202[4-9]|20[3-9][0-9])\s*[\.년]\s*(\d{1,2})\s*[\.월]\s*(\d{1,2})', text)
     if year_match_full:
         year, month, day = int(year_match_full.group(1)), int(year_match_full.group(2)), int(year_match_full.group(3))
     
     if not month or not day:
-        # [FIX 3] 영어 월 약어 파싱 (예: Oct 17)
         eng_date_match = re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s*(\d{1,2})', text, re.IGNORECASE)
         if eng_date_match:
             month_str = eng_date_match.group(1).lower()
             month = ENG_MONTH_MAP.get(month_str)
             day = int(eng_date_match.group(2))
         else:
-            # 기존 한국어/숫자 파싱 - "(금)" 같은 요일 표시도 처리
-            date_match = re.search(r'(\d{1,2})\s*[/\s월\s\.]+ *(\d{1,2})\s*일', text)
+            # '일' 글자가 없거나 마침표(.)로 끝나는 경우도 허용
+            date_match = re.search(r'(\d{1,2})\s*[/\s월\s\.]+ *(\d{1,2})\s*[일\.]?', text)
             if date_match:
                 month, day = int(date_match.group(1)), int(date_match.group(2))
             
-    # 3.3: 연도 재확인 및 추론 개선
+    # 3.3: 연도 추론
     if not year_match_full:
         year_match_simple = re.search(r'(202[4-9]|20[3-9][0-9])', text)
         if year_match_simple:
             year = int(year_match_simple.group(1))
         elif month and day:
-            # 연도가 없고 월/일만 있는 경우: 스마트한 연도 추론
-            # 현재 날짜와 비교하여 미래 날짜로 추론
             try:
-                # 현재 연도로 시도
                 test_date_current = datetime.datetime(current_year, month, day, 23, 59, tzinfo=KST)
-                # 현재 날짜보다 이전이면 다음 연도일 가능성 높음
-                # 강연회/행사는 보통 미래 날짜이므로 다음 연도로 추론
                 if test_date_current < now:
-                    # 현재보다 이전이면 다음 연도
                     year = current_year + 1
                 else:
-                    # 현재보다 미래이면 현재 연도
                     year = current_year
-                    
-                # 최종 검증: 추론된 연도로 만든 날짜가 현재보다 이전인지 확인
+                
                 test_date_final = datetime.datetime(year, month, day, 0, 0, tzinfo=KST)
                 if test_date_final < now:
-                    # 여전히 과거면 다음 연도로 확정
                     year = current_year + 1
             except ValueError:
-                # 유효하지 않은 날짜면 현재 연도 사용
                 year = current_year
             
     # --- 4. 유효성 검사 및 객체 생성 ---
     
-    # 월/일 정보가 없으면 유효한 이벤트로 보지 않음
     if not all([month, day]):
         return None
 
-    # [FIX 3] (사용자 요청) 시간 정보가 없는 경우, 컨텍스트 기반으로 기본값 설정
+    # [FIX 3] 시간 기본값 설정 로직 개선
     if hour is None or minute is None:
-        # context_label ("제출 기한")과 key_date_text ("...까지")를 모두 검사
         full_context = f"{context_label.lower()} {key_date_text.lower()}"
         
-        is_end_hint = any(kw in full_context for kw in END_KEYWORDS)
-        is_start_hint = any(kw in full_context for kw in START_KEYWORDS)
+        # [FIX 4] 상위 함수(extract_ai_time_window)에서 넘겨준 명시적 힌트('end'/'start')를 우선 확인
+        # 이렇게 해야 "마감일" -> "end"로 변환된 힌트가 정확히 23:59 로직으로 연결됨
+        is_explicit_end = (context_label == 'end')
+        is_explicit_start = (context_label == 'start')
 
-        if is_end_hint and not is_start_hint:
-            hour, minute = 23, 59 # (사용자 요청) 마감일 기본값
-        elif is_start_hint and not is_end_hint:
-            hour, minute = 0, 0 # (사용자 요청) 시작일 기본값
+        is_end_kw = any(kw in full_context for kw in END_KEYWORDS)
+        is_start_kw = any(kw in full_context for kw in START_KEYWORDS)
+        
+        is_end_hint = is_explicit_end or is_end_kw
+        is_start_hint = is_explicit_start or is_start_kw
+
+        # 1. 시작 키워드 존재 (마감 키워드 없음) -> 00:00
+        if is_start_hint and not is_end_hint:
+            hour, minute = 0, 0
+            
+        # 2. 마감 키워드 존재 (시작 키워드 없음) -> 23:59
+        elif is_end_hint and not is_start_hint:
+            hour, minute = 23, 59
+            
+        # 3. 시작/마감 모두 존재 (범위의 끝 등) -> 마감 우선 23:59
+        elif is_end_hint and is_start_hint:
+            hour, minute = 23, 59
+
+        # 4. 키워드 없음 (순수 일회성 이벤트) -> 04:23
         else:
-            # "2025-10-10" 처럼 모호하거나, "시작 및 마감"처럼 둘 다 해당하면
-            # 09:00 (업무 시작) 또는 23:59 (마감일 가능성)
-            # 로그상 "마감일"이 09:00로 잡히는 문제를 봤으므로, 마감일 가능성이 더 높음.
-            if is_end_hint:
-                 hour, minute = 23, 59
-            else:
-                 hour, minute = 9, 0 # 기존 기본값 유지 (모호한 경우)
+             hour, minute = 4, 23 
 
     try:
-        # KST 타임존으로 datetime 생성
         dt = datetime.datetime(year, month, day, hour, minute, tzinfo=KST)
         
         event_title_prefix = dt.strftime('%Y-%m-%d %H:%M')
@@ -182,7 +161,6 @@ def _parse_iso_datetime(value: Optional[str]) -> Optional[datetime.datetime]:
         return None
 
 
-# [FIX 2] 컨텍스트(context_label)를 normalize 함수로 전달
 def _parse_freetext_datetime(text: Optional[str], title: str, context_label: str = "") -> Optional[datetime.datetime]:
     if not text or not isinstance(text, str):
         return None
@@ -201,10 +179,6 @@ def _parse_freetext_datetime(text: Optional[str], title: str, context_label: str
 
 
 def _normalize_structured_datetime(value: Any) -> Optional[datetime.datetime]:
-    """
-    AI가 반환한 구조화 데이터에서 날짜 필드를 안전하게 UTC datetime으로 변환한다.
-    (내부 헬퍼 함수, 수정 없음)
-    """
     if value is None:
         return None
 
@@ -242,11 +216,9 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
     start_at = None
     end_at = None
 
-    # [FIX 2] classify_and_assign 함수 수정
     def classify_and_assign(type_label: Optional[str], date_text: Optional[str], iso_value: Optional[str] = None):
         nonlocal start_at, end_at
         
-        # 1. 컨텍스트(키워드)부터 파악
         label = (type_label or "").lower()
         text_lower = (date_text or "").lower()
         context = f"{label} {text_lower}"
@@ -254,23 +226,19 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
         is_end = any(keyword in context for keyword in END_KEYWORDS)
         is_start = any(keyword in context for keyword in START_KEYWORDS)
         
-        # 2. 파서에게 컨텍스트 힌트 전달
-        # (normalize_datetime_for_calendar가 이 힌트를 사용해 00:00 / 23:59 결정)
         context_hint = ""
         if is_end and not is_start:
             context_hint = "end"
         elif is_start and not is_end:
             context_hint = "start"
-        elif is_end: # 둘 다 True ("~까지 시작")이면 end 우선
+        elif is_end:
             context_hint = "end"
         
-        # 3. 컨텍스트 힌트와 함께 파싱 실행
         candidate = _parse_iso_datetime(iso_value) or _parse_freetext_datetime(date_text, notice_title, context_hint)
         
         if not candidate:
             return
 
-        # 4. 파싱된 datetime 객체를 start/end 변수에 할당
         if is_end and not is_start:
             if end_at is None or candidate > end_at:
                 end_at = candidate
@@ -281,20 +249,28 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
                 start_at = candidate
             return
 
-        # [FIX] 모호한 경우 (둘 다 True or 둘 다 False)
-        if is_end: # "시작 마감일" (is_start=True, is_end=True) -> 마감일(end_at)
+        # 모호한 경우
+        if is_end: 
              if end_at is None or candidate > end_at:
                 end_at = candidate
-        elif is_start: # "2025-10-10 일시" (is_start=True, is_end=False) -> 시작일(start_at)
+        elif is_start:
              if start_at is None or candidate < start_at:
                 start_at = candidate
         else:
-            # 둘 다 False (예: "2025-10-10"만)
-            # 첫 번째는 start, 두 번째는 end로 할당 (범위 파싱에서 사용)
-            if start_at is None:
-                start_at = candidate
-            elif end_at is None or candidate > end_at:
+            # 키워드 없음 (일회성 이벤트): 마감(end_at)에 우선 할당
+            if end_at is None:
                 end_at = candidate
+            elif start_at is None:
+                if candidate < end_at:
+                    start_at = candidate
+                else:
+                    start_at = end_at
+                    end_at = candidate
+            else:
+                if candidate > end_at:
+                    end_at = candidate
+                elif candidate < start_at:
+                    start_at = candidate
 
 
     key_dates = []
@@ -311,7 +287,6 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
         text = entry.get("key_date") or entry.get("value") or entry.get("text") or ""
         iso = entry.get("iso") or entry.get("key_date_iso")
 
-        # [유지] 범위 파싱 로직
         if text and isinstance(text, str):
             range_match = re.search(r'^(.*?)(\s*(?:∼|~)\s*)(.*)$', text)
         else:
@@ -322,16 +297,13 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
             end_text = range_match.group(3).strip()
             
             if start_text:
-                # [FIX 2] "시작" 컨텍스트를 명시적으로 전달
                 classify_and_assign(f"{label} (시작)", start_text, None)
             if end_text:
-                # [FIX 2] "마감" 컨텍스트를 명시적으로 전달
                 classify_and_assign(f"{label} (마감)", end_text, None)
         else:
             classify_and_assign(label, text, iso)
 
 
-    # 루트 레벨의 key_date도 동일하게 처리
     root_label = structured_info.get("key_date_type") or structured_info.get("keyDateType") or ""
     root_text = structured_info.get("key_date") or structured_info.get("keyDate") or ""
     root_iso = structured_info.get("key_date_iso") or structured_info.get("keyDateIso")
@@ -356,7 +328,6 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
     end_at = _normalize_structured_datetime(end_at)
 
     if start_at and end_at and end_at < start_at:
-        # 종료 시간이 시작 시간보다 이전인 경우, 종료 시간을 폐기
         end_at = None
 
     return (start_at, end_at)
