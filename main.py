@@ -7,7 +7,7 @@ from psycopg2.extras import RealDictCursor, Json
 from fastapi import FastAPI, Query, HTTPException, Body, Request, Header, status, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
-from datetime import datetime
+from datetime import datetime, timezone
 import datetime as dt
 import requests
 from typing import Optional, Any, Dict, List, Tuple
@@ -573,13 +573,47 @@ def list_notices(
             cur.execute(sql, params)
             rows = cur.fetchall()
             
-            # Python 레벨에서 중복 제거 (방어적 프로그래밍)
+            # Python 레벨에서 중복 제거 및 마감 여부 계산
             seen_ids = set()
             unique_rows = []
+            now = datetime.now(timezone.utc)
+            
             for row in rows:
                 row_id = row.get("id")
                 if row_id and row_id not in seen_ids:
                     seen_ids.add(row_id)
+                    
+                    # 일정이 추출된 공지인지 확인
+                    start_at_ai = row.get("start_at_ai")
+                    end_at_ai = row.get("end_at_ai")
+                    has_schedule = bool(start_at_ai or end_at_ai)
+                    
+                    # 마감 여부 계산 (일정이 추출된 공지에 대하여만)
+                    is_closed = False
+                    if has_schedule:
+                        # end_at_ai가 있으면 그것을 기준으로, 없으면 start_at_ai를 기준으로 마감 여부 확인
+                        deadline_dt = end_at_ai if end_at_ai else start_at_ai
+                        
+                        if deadline_dt:
+                            # datetime 객체인 경우 그대로 사용, 문자열인 경우 파싱
+                            if isinstance(deadline_dt, str):
+                                try:
+                                    deadline_dt = datetime.fromisoformat(deadline_dt.replace("Z", "+00:00"))
+                                    if deadline_dt.tzinfo is None:
+                                        deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+                                    else:
+                                        deadline_dt = deadline_dt.astimezone(timezone.utc)
+                                except (ValueError, TypeError):
+                                    deadline_dt = None
+                            
+                            if deadline_dt and isinstance(deadline_dt, datetime):
+                                if deadline_dt.tzinfo is None:
+                                    deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+                                else:
+                                    deadline_dt = deadline_dt.astimezone(timezone.utc)
+                                is_closed = deadline_dt < now
+                    
+                    row["is_closed"] = is_closed
                     unique_rows.append(row)
             rows = unique_rows
     except Exception as e:
@@ -673,6 +707,37 @@ def get_notice(notice_id: str):
               WHERE n.id = %s
             """, [notice_id])
             notice = cur.fetchone()
+            
+            # 마감 여부 계산 (일정이 추출된 공지에 대하여만)
+            if notice:
+                start_at_ai = notice.get("start_at_ai")
+                end_at_ai = notice.get("end_at_ai")
+                has_schedule = bool(start_at_ai or end_at_ai)
+                
+                is_closed = False
+                if has_schedule:
+                    now = datetime.now(timezone.utc)
+                    deadline_dt = end_at_ai if end_at_ai else start_at_ai
+                    
+                    if deadline_dt:
+                        if isinstance(deadline_dt, str):
+                            try:
+                                deadline_dt = datetime.fromisoformat(deadline_dt.replace("Z", "+00:00"))
+                                if deadline_dt.tzinfo is None:
+                                    deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+                                else:
+                                    deadline_dt = deadline_dt.astimezone(timezone.utc)
+                            except (ValueError, TypeError):
+                                deadline_dt = None
+                        
+                        if deadline_dt and isinstance(deadline_dt, datetime):
+                            if deadline_dt.tzinfo is None:
+                                deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+                            else:
+                                deadline_dt = deadline_dt.astimezone(timezone.utc)
+                            is_closed = deadline_dt < now
+                
+                notice["is_closed"] = is_closed
     except Exception as e:
         logger.error(f"DB error fetching notice {notice_id}: {e}")
         raise HTTPException(status_code=500, detail="Database error fetching notice")
