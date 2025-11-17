@@ -38,8 +38,8 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
         dict | None: 캘린더 이벤트 객체
     """
     
-    # 1. 현재 시간 기준으로 기본 연도 설정
-    now = datetime.datetime.now()
+    # 1. 현재 시간 기준으로 기본 연도 설정 (KST 타임존)
+    now = datetime.datetime.now(KST)
     current_year = now.year
 
     # 2. 문자열 정제 (범위 문자 '~'는 제거하지 않음)
@@ -107,21 +107,20 @@ def normalize_datetime_for_calendar(key_date_text: str, notice_title: str, conte
             # 현재 날짜와 비교하여 미래 날짜로 추론
             try:
                 # 현재 연도로 시도
-                test_date_current = datetime.datetime(current_year, month, day, 0, 0)
+                test_date_current = datetime.datetime(current_year, month, day, 23, 59, tzinfo=KST)
                 # 현재 날짜보다 이전이면 다음 연도일 가능성 높음
-                # 특히 11월, 12월인 경우 다음 연도일 가능성이 높음
+                # 강연회/행사는 보통 미래 날짜이므로 다음 연도로 추론
                 if test_date_current < now:
                     # 현재보다 이전이면 다음 연도
-                    # 강연회/행사는 보통 미래 날짜이므로 다음 연도로 추론
                     year = current_year + 1
                 else:
                     # 현재보다 미래이면 현재 연도
                     year = current_year
                     
-                # 추가 검증: 추론된 연도로 만든 날짜가 여전히 과거면 한 번 더 확인
-                test_date_inferred = datetime.datetime(year, month, day, 0, 0)
-                if test_date_inferred < now and month >= 10:
-                    # 11월, 12월인데 여전히 과거면 다음 연도로 확정
+                # 최종 검증: 추론된 연도로 만든 날짜가 현재보다 이전인지 확인
+                test_date_final = datetime.datetime(year, month, day, 0, 0, tzinfo=KST)
+                if test_date_final < now:
+                    # 여전히 과거면 다음 연도로 확정
                     year = current_year + 1
             except ValueError:
                 # 유효하지 않은 날짜면 현재 연도 사용
