@@ -347,9 +347,8 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
             # 키워드 없음 (일회성 이벤트): 마감(end_at)에 우선 할당
             if end_at is None:
                 end_at = candidate
-                # 마감일이므로 시간을 23:59로 보정 (시간이 없을 경우)
-                if end_at.hour == 4 and end_at.minute == 23:
-                    end_at = end_at.replace(hour=23, minute=59)
+                # 일회성 이벤트는 04:23 유지 (프론트엔드에서 시간 숨김용)
+                # 보정하지 않음
             elif start_at is None:
                 if candidate < end_at:
                     start_at = candidate
@@ -429,10 +428,14 @@ def extract_ai_time_window(structured_info: Dict[str, Any] | None, notice_title:
     start_at = _normalize_structured_datetime(start_at)
     end_at = _normalize_structured_datetime(end_at)
 
-    # 04:23 기본값 버그 보정 (정규화 후에도 확인)
+    # 04:23 보정 (정규화 후에도 확인)
+    # 일회성 이벤트(end_at만 있고 04:23)는 04:23 유지 (프론트엔드에서 시간 숨김용)
+    # start_at이 있으면 마감일로 간주하고 23:59로 보정
     if end_at and end_at.hour == 4 and end_at.minute == 23:
-        # 마감일이므로 23:59로 보정
-        end_at = end_at.replace(hour=23, minute=59)
+        if start_at:
+            # start_at이 있으면 마감일로 간주하고 23:59로 보정
+            end_at = end_at.replace(hour=23, minute=59)
+        # start_at이 없으면 일회성 이벤트이므로 04:23 유지
     if start_at and start_at.hour == 4 and start_at.minute == 23:
         # 시작일이므로 00:00으로 보정
         start_at = start_at.replace(hour=0, minute=0)

@@ -253,11 +253,16 @@ def calculate_is_closed(start_at_ai: Any, end_at_ai: Any, now: Optional[datetime
     if not deadline_utc:
         return False
     
-    # 04:23으로 설정된 경우 (기본값 버그) 마감일로 간주하여 23:59로 보정
-    # 단, end_at_ai가 없고 start_at_ai만 있는 경우는 시작일이므로 보정하지 않음
+    # 04:23은 일회성 이벤트 표시용 (프론트엔드에서 시간 숨김용)
+    # end_at_ai가 04:23이고 start_at_ai가 없으면 → 일회성 이벤트 (마감 여부 판단 불가)
+    # end_at_ai가 04:23이고 start_at_ai가 있으면 → 마감일로 간주하고 23:59로 보정
     if end_at_ai and deadline_utc.hour == 4 and deadline_utc.minute == 23:
-        # 마감일이므로 23:59로 보정
-        deadline_utc = deadline_utc.replace(hour=23, minute=59)
+        if not start_at_ai:
+            # 일회성 이벤트는 마감 여부를 판단할 수 없음
+            return False
+        else:
+            # start_at_ai가 있으면 마감일로 간주하고 23:59로 보정
+            deadline_utc = deadline_utc.replace(hour=23, minute=59)
     
     return deadline_utc < now
 
