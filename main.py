@@ -729,10 +729,17 @@ def apify_webhook_redis(
 
 # 13) 실시간 자격검증 엔드포인트
 class UserProfile(BaseModel):
+    model_config = ConfigDict(extra="ignore")  # 추가 필드 무시 (하위 호환성)
     grade: int | None = None
     major: str | None = None
     gpa: float | None = None
-    lang: str | None = None
+    lang: str | None = None  # 하위 호환성을 위해 유지
+    language_scores: Dict[str, Any] | None = None  # 실제 사용되는 필드
+    gender: str | None = None
+    age: int | None = None
+    keywords: List[str] | None = None
+    military_service: str | None = None
+    income_bracket: int | None = None
 
 @app.post("/notices/{notice_id}/verify-eligibility")
 def verify_eligibility_endpoint(notice_id: str, profile: UserProfile):
