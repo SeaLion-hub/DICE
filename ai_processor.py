@@ -113,13 +113,22 @@ QUALIFICATIONS_RULES = """
 - "other": 위 7개 항목으로 분류되지 않는 **기타 자격** (예: "2028년 1~2월 중 입사 가능자", "N/A")
 """
 
-# 공통적으로 사용할 날짜 추출 가이드 (변수로 관리하여 일관성 유지)
-KEY_DATE_GUIDE = "[핵심 날짜 (시간 정보가 텍스트에 명시된 경우 시간까지 포함, 없는 경우 날짜만 기재. 예: '11/14(금) 19:00' 또는 '11/14(금)')]"
+# [수정] 2. 날짜 추출 가이드 강화: 키워드 명시 및 위치 강조
+KEY_DATE_GUIDE = "텍스트 내 '제출기한', '마감', '기간', '일시' 뒤에 나오는 날짜. (예: '11월 25일 화요일까지', '2025.11.24~11.28'). 없으면 'N/A'"
+
+# [수정] 날짜 추출을 위한 공통 지시사항 추가
+DATE_EXTRACTION_INSTRUCTION = """
+[날짜 추출 중요 규칙]
+1. 공지사항의 **맨 위** 또는 **맨 아래**에 있는 '신청 기간', '제출 기한', '마감일'을 반드시 찾아내라.
+2. 연도(Year)가 없더라도 '월/일' 정보가 있으면 그대로 추출하라. (예: '11월 25일까지')
+3. 날짜가 여러 개일 경우, 서류 '제출 마감일'을 최우선으로 추출한다.
+"""
 
 PROMPT_SCHOLARSHIP = f"""
-당신은 '장학금' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
+당신은 '장학금' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건/지원 조건을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
 {QUALIFICATIONS_RULES}
+{DATE_EXTRACTION_INSTRUCTION}
 
 [공지 텍스트]
 {{notice_text}}
@@ -139,7 +148,7 @@ JSON 출력 (다른 설명 없이 JSON만):
     "gender": "[성별 요건]",
     "other": "[기타 자격]"
   }},
-  "key_date_type": "[날짜 유형]",
+  "key_date_type": "[날짜 유형 (예: 제출기한, 신청기간)]",
   "key_date": "{KEY_DATE_GUIDE}"
 }}
 ```"""
@@ -148,6 +157,7 @@ PROMPT_RECRUITMENT = f"""
 당신은 '채용 및 취업' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
 {QUALIFICATIONS_RULES}
+{DATE_EXTRACTION_INSTRUCTION}
 
 [공지 텍스트]
 {{notice_text}}
@@ -159,7 +169,7 @@ JSON 출력 (다른 설명 없이 JSON만):
   "target_audience_raw": "[지원 자격 원본 텍스트 요약]",
   "qualifications": {{
     "gpa_min": "[추출된 최소 학점]",
-    "grade_level": "[대상 학년/학위 (예: '교육학 박사')]",
+    "grade_level": "[대상 학년/학위]",
     "income_status": "[소득 요건]",
     "department": "[대상 학과/단과대학]",
     "language_requirements_text": "[어학 요건]",
@@ -176,6 +186,7 @@ PROMPT_INTERNATIONAL = f"""
 당신은 '국제교류 프로그램' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
 {QUALIFICATIONS_RULES}
+{DATE_EXTRACTION_INSTRUCTION}
 
 [공지 텍스트]
 {{notice_text}}
@@ -204,6 +215,7 @@ PROMPT_ACADEMIC = f"""
 당신은 '학사(수강, 졸업, 휴복학 등)' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
 {QUALIFICATIONS_RULES}
+{DATE_EXTRACTION_INSTRUCTION}
 
 [공지 텍스트]
 {{notice_text}}
@@ -212,18 +224,18 @@ PROMPT_ACADEMIC = f"""
 JSON 출력 (다른 설명 없이 JSON만):
 ```json
 {{
-  "target_audience_raw": "[지원 자격 원본 텍스트 요약 (예: '치과대학 휴복학 신청자')]",
+  "target_audience_raw": "[지원 자격 원본 텍스트 요약]",
   "qualifications": {{
     "gpa_min": "[추출된 최소 학점 (없으면 N/A)]",
-    "grade_level": "[대상 학년/학위 (예: '신입생', '졸업예정자', '치과대학 학생')]",
+    "grade_level": "[대상 학년/학위]",
     "income_status": "[소득 요건 (없으면 N/A)]",
-    "department": "[대상 학과/단과대학 (예: '치과대학', '학과 무관')]",
+    "department": "[대상 학과/단과대학]",
     "language_requirements_text": "[어학 요건 (없으면 N/A)]",
     "military_service": "[병역 요건 (없으면 N/A)]",
     "gender": "[성별 요건 (없으면 N/A)]",
-    "other": "[기타 자격 (예: '미납도서 없는 자')]"
+    "other": "[기타 자격]"
   }},
-  "key_date_type": "[날짜 유형 (예: '복학신청 마감일')]",
+  "key_date_type": "[날짜 유형]",
   "key_date": "{KEY_DATE_GUIDE}"
 }}
 ```"""
@@ -232,6 +244,7 @@ PROMPT_EVENT_CONTEST = f"""
 당신은 '행사 또는 공모전' 공지사항에서 프로필 비교에 사용할 수 있도록 핵심 자격 요건(참여 대상)을 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 **구조화된 정보**를 추출하세요.
 {QUALIFICATIONS_RULES}
+{DATE_EXTRACTION_INSTRUCTION}
 
 [공지 텍스트]
 {{notice_text}}
@@ -240,18 +253,18 @@ PROMPT_EVENT_CONTEST = f"""
 JSON 출력 (다른 설명 없이 JSON만):
 ```json
 {{
-  "target_audience_raw": "[참여 대상 원본 텍스트 요약 (예: '공과대학 학부생')]",
+  "target_audience_raw": "[참여 대상 원본 텍스트 요약]",
   "qualifications": {{
     "gpa_min": "[추출된 최소 학점 (없으면 N/A)]",
-    "grade_level": "[대상 학년/학위 (예: '학부생', '대학원생')]",
+    "grade_level": "[대상 학년/학위]",
     "income_status": "[소득 요건 (없으면 N/A)]",
-    "department": "[대상 학과/단과대학 (예: '공과대학', '학과 무관')]",
+    "department": "[대상 학과/단과대학]",
     "language_requirements_text": "[어학 요건 (없으면 N/A)]",
     "military_service": "[병역 요건 (없으면 N/A)]",
     "gender": "[성별 요건 (없으면 N/A)]",
-    "other": "[기타 자격 (없으면 N/A)]"
+    "other": "[기타 자격]"
   }},
-  "key_date_type": "[날짜 유형 (예: '신청 마감일', '행사 일시')]",
+  "key_date_type": "[날짜 유형]",
   "key_date": "{KEY_DATE_GUIDE}"
 }}
 ```"""
@@ -259,14 +272,16 @@ JSON 출력 (다른 설명 없이 JSON만):
 PROMPT_SIMPLE_DEFAULT = f"""
 당신은 '{{category_name}}' 공지사항에서 '대상'과 '핵심 날짜'를 추출하는 AI입니다.
 주어진 [공지 텍스트]를 꼼꼼히 분석하여, 아래 JSON 형식에 맞춰 정보를 추출하세요.
+{DATE_EXTRACTION_INSTRUCTION}
+
 [공지 텍스트]
 {{notice_text}}
 [/공지 텍스트]
 JSON 출력 (다른 설명 없이 JSON만):
 ```json
 {{
-  "target_audience": "[참가/참여/적용/관련 대상 (예: '본교 학부생', '졸업예정자')]",
-  "key_date_type": "[날짜 유형 (예: '접수 마감일')]",
+  "target_audience": "[참가/참여/적용/관련 대상]",
+  "key_date_type": "[날짜 유형]",
   "key_date": "{KEY_DATE_GUIDE}"
 }}
 ```"""
