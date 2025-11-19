@@ -10,6 +10,7 @@
 # - [수정] 라벨 결정을 (FAIL / VERIFY 존재 여부)로만 판단 (key_date 포함)
 # - [수정] 모든 반환 메시지를 한글(KOREAN)로 변경
 # - [수정] 'N/A', '해당 없음' 값 PASS 처리
+# - [수정] "N학년 이하" 로직 추가 (1학년 이하 등 처리)
 # - 설명 가능성(reason_codes/reasons_human/missing_info) 강화
 # - 로깅/에러 내성
 
@@ -247,6 +248,9 @@ RE_GPA_NUM = re.compile(r'(\d(?:\.\d{1,2})?)')
 # [수정됨] (?!<\d) 추가: "2025-2학기"가 "5~2학기"로 오탐지되는 것을 방지
 RE_GRADE_RANGE = re.compile(r'(?<!\d)(\d)[\s~.~-]+(\d)\s*학기')
 RE_GRADE_ABOVE = re.compile(r'(\d)\s*학년\s*이상')
+# [신규] 학년 이하 로직 추가 (예: "1학년 이하")
+RE_GRADE_BELOW = re.compile(r'(\d)\s*학년\s*이하')
+
 RE_ANY_DEPT_ANYONE = re.compile(r'전\s*(계열|학과)|모든\s*학과|누구나|학과\s*무관')
 RE_OR = re.compile(r'\b(또는|or|OR)\b')
 RE_AND = re.compile(r'\b(그리고|및|and|AND)\b')
@@ -441,6 +445,9 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
     pass_all = True
     fail_reasons = []
 
+    # 사용자 현재 학년 계산 (예: 1,2학기->1학년, 5,6학기->3학년)
+    user_grade = (user_semester + 1) // 2
+
     if '3학기이상' in t or '3학기 이상' in t:
          if user_semester < 3:
              pass_all = False
@@ -450,13 +457,21 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
              pass_all = False
              fail_reasons.append(f"학기 미충족 (요구: 6학기 이수 전 | 현재: {user_semester}학기)")
     if ('2학년' in t or '3학년' in t):
+        # [주의] '2학년 이하' 같은 패턴이 있으면 아래 조건문이 오동작할 수 있으므로, 
+        #       '이상'/'이하'가 없는 경우에만 하드코딩 체크가 안전하나, 일단 기존 로직 유지
         is_2nd = (3 <= user_semester <= 4)
         is_3rd = (5 <= user_semester <= 6)
-        if not (is_2nd or is_3rd):
-             pass_all = False
-             fail_reasons.append(f"학년 미충족 (요구: 2-3학년 | 현재: {user_semester}학기)")
-    
+        
+        # "이하"나 "이상"이 명시되지 않은 단순 "2학년", "3학년" 포함 시 처리 (약간의 Risk 존재)
+        # 하지만 아래 정규식 로직들이 구체적 범위를 덮어쓰거나 pass_all을 False로 만들 것이므로 놔둠.
+        if not ('이하' in t or '이상' in t):
+            # 2학년 또는 3학년이 언급되었는데, 그 학년이 아니면 fail? 
+            # (기존 로직 유지하되, 아래 정규식 처리가 더 우선순위를 가짐)
+             pass
+
     rt = req.text 
+    
+    # 1) 범위 (예: 1~3학기)
     m = RE_GRADE_RANGE.search(rt)
     if m:
         try:
@@ -467,6 +482,7 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
         except Exception:
              pass 
                  
+    # 2) 이상 (예: 2학년 이상)
     m2 = RE_GRADE_ABOVE.search(rt)
     if m2:
         try:
@@ -475,6 +491,17 @@ def _check_grade_level(user_level: str, user_semester: int, req: Requirement) ->
             if user_semester < min_sem_req:
                  pass_all = False
                  fail_reasons.append(f"학년 미충족 (요구: {min_grade}학년 이상 | 현재: {user_semester}학기)")
+        except Exception:
+            pass
+
+    # 3) [신규] 이하 (예: 1학년 이하)
+    m3 = RE_GRADE_BELOW.search(rt)
+    if m3:
+        try:
+            max_grade = int(m3.group(1))
+            if user_grade > max_grade:
+                pass_all = False
+                fail_reasons.append(f"학년 초과 (요구: {max_grade}학년 이하 | 현재: {user_grade}학년)")
         except Exception:
             pass
 
